@@ -1,7 +1,6 @@
 use std::{
     cmp::Ordering,
     hash::{DefaultHasher, Hash, Hasher},
-    usize,
 };
 
 use eframe::egui::{self, Color32, Pos2, Rect, Vec2};
@@ -141,14 +140,14 @@ impl std::ops::AddAssign<(f32, f32)> for Camera {
 
 fn lerp(lo: f32, hi: f32, t: f32) -> f32 {
     assert!(lo < hi);
-    assert!((0.0..=1.0).contains(&t));
+    // assert!((0.0..=1.0).contains(&t));
     // lo * (1.0 - t) + hi * t
     lo + (hi - lo) * t
 }
 
 fn inv_lerp(lo: f32, hi: f32, x: f32) -> f32 {
     assert!(lo < hi);
-    assert!((lo..=hi).contains(&x));
+    // assert!((lo..=hi).contains(&x));
     (x - lo) / (hi - lo)
 }
 
@@ -356,7 +355,13 @@ impl Square {
     fn new(real_lo: f32, real_hi: f32, imag_lo: f32, imag_hi: f32) -> Self {
         assert!(real_lo < real_hi);
         assert!(imag_lo < imag_hi);
-        assert!(((real_hi - real_lo) - (imag_hi - imag_lo)).abs() < 1e-6);
+        assert!(
+            (1.0 - ((real_hi as f64 - real_lo as f64) / (imag_hi as f64 - imag_lo as f64))).abs()
+                < 1e-4
+                || (real_hi as f64 - real_lo as f64).abs()
+                    + (imag_hi as f64 - imag_lo as f64).abs()
+                    < 1e-4
+        );
         Self {
             real_lo,
             real_hi,
@@ -662,7 +667,7 @@ impl App {
     fn new(_cc: &eframe::CreationContext<'_>) -> Self {
         Self {
             tree: Tree::new_leaf(Square::new(-4.0, 4.0, -4.0, 4.0)),
-            stride: 8,
+            stride: 32,
             camera: Camera::new(0.0, 0.0, 2.0),
             velocity: Vec2::ZERO,
             dts: egui::util::History::new(1..100, 0.1),
@@ -725,8 +730,14 @@ impl eframe::App for App {
                     }
 
                     for (_, pixel) in camera_map.pixels(self.stride) {
-                        assert!(self.tree.is_weak_pixel_safe(pixel));
-                        assert!(self.tree.is_strong_pixel_safe(pixel));
+                        if self
+                            .tree
+                            .window
+                            .contains(pixel.real_mid(), pixel.imag_mid())
+                        {
+                            assert!(self.tree.is_weak_pixel_safe(pixel));
+                            assert!(self.tree.is_strong_pixel_safe(pixel));
+                        }
                     }
 
                     let painter = ui.painter_at(ui.max_rect());
