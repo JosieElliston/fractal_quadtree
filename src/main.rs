@@ -1,18 +1,20 @@
 use std::{
     cmp::Ordering,
-    hash::{DefaultHasher, Hash, Hasher},
+    hint::black_box,
     iter::Sum,
-    num::NonZero,
-    ops::{Add, AddAssign},
+    ops::AddAssign,
     time::{Duration, Instant},
 };
 
 use eframe::egui::{self, Color32, Key, Pos2, Rect, RichText, Vec2};
-use rand::seq::{IteratorRandom, SliceRandom};
+use rand::seq::SliceRandom;
 
 fn main() -> eframe::Result {
     // std::env::set_var("RUST_BACKTRACE", "1");
     // env_logger::init();
+
+    // bench();
+    // panic!();
 
     let native_options = eframe::NativeOptions::default();
 
@@ -21,6 +23,25 @@ fn main() -> eframe::Result {
         native_options,
         Box::new(|cc| Ok(Box::new(App::new(cc)))),
     )
+}
+
+fn bench() {
+    let mut tree = Tree::new_leaf(Square::try_new(-4.0, 4.0, -4.0, 4.0).unwrap());
+    let stride = 8;
+    let camera = Camera::new(0.0, 0.0, 2.0);
+    let camera_map = CameraMap::new(
+        Rect::from_min_size(Pos2::ZERO, Vec2::new(600.0, 400.0)),
+        camera,
+    );
+    for (_, pixel) in camera_map.pixels(stride) {
+        tree.ensure_pixel_safe(pixel);
+    }
+    for _ in 0..600 {
+        for (_, pixel) in camera_map.pixels(stride) {
+            black_box(tree.color(pixel));
+        }
+    }
+    black_box(tree);
 }
 
 struct Sample {
@@ -442,6 +463,7 @@ impl Square {
     //     (self.real_lo..=self.real_hi).contains(&real)
     //         && (self.imag_lo..=self.imag_hi).contains(&imag)
     // }
+    // #[inline(never)]
     fn contains(self, real: f32, imag: f32) -> bool {
         (self.real_lo..=self.real_hi).contains(&real)
             && (self.imag_lo..=self.imag_hi).contains(&imag)
@@ -464,9 +486,17 @@ impl Square {
     //         || other.contains(self.real_hi, self.imag_hi)
     // }
 
+    // fn overlaps(self, other: Self) -> bool {
+    //     ((self.real_mid() - other.real_mid()).abs() <= (self.rad() + other.rad()))
+    //         && ((self.imag_mid() - other.imag_mid()).abs() <= (self.rad() + other.rad()))
+    // }
+
+    // #[inline(never)]
     fn overlaps(self, other: Self) -> bool {
-        ((self.real_mid() - other.real_mid()).abs() <= (self.rad() + other.rad()))
-            && ((self.imag_mid() - other.imag_mid()).abs() <= (self.rad() + other.rad()))
+        !(self.real_hi < other.real_lo
+            || other.real_hi < self.real_lo
+            || self.imag_hi < other.imag_lo
+            || other.imag_hi < self.imag_lo)
     }
 }
 impl PartialOrd for Square {
@@ -837,21 +867,10 @@ impl Tree {
         if pixel.contains(self.dom.real_mid(), self.dom.imag_mid()) {
             return self.color.into();
         }
-        if self.is_leaf() {
-            // we're too zoomed in
-            return ColorBuilder::default();
+        match &self.children {
+            Some(children) => children.iter().map(|c| c.color(pixel)).sum(),
+            None => ColorBuilder::default(),
         }
-        // // TODO: i think it's actually possible that it's not the child closest to the pixel center that has a child eventually inside pixel
-        // let closest_child_i = self
-        //     .child_i_closest_to(pixel.real_mid(), pixel.imag_mid())
-        //     .unwrap();
-        // self.children.as_ref().unwrap()[closest_child_i].color(pixel)
-        self.children
-            .as_ref()
-            .unwrap()
-            .iter()
-            .map(|c| c.color(pixel))
-            .sum()
     }
 
     // fn validate(&self) {
@@ -879,7 +898,7 @@ impl App {
     fn new(_cc: &eframe::CreationContext<'_>) -> Self {
         Self {
             tree: Tree::new_leaf(Square::try_new(-4.0, 4.0, -4.0, 4.0).unwrap()),
-            stride: 8,
+            stride: 2,
             camera: Camera::new(0.0, 0.0, 2.0),
             velocity: Vec2::ZERO,
             dts: egui::util::History::new(1..100, 0.1),
@@ -940,42 +959,94 @@ impl eframe::App for App {
                 //     }
                 // }
 
+                // // ensure_pixel_safe with time bound
+                // if !ctx.input(|i| i.key_down(Key::Space)) {
+                //     const MAX_TIME: Duration = Duration::from_millis(100);
+                //     let start = Instant::now();
+                //     let mut rng = rand::rng();
+                //     let pixels = {
+                //         let mut pixels = camera_map
+                //             .pixels(self.stride)
+                //             .map(|(_, pixel)| pixel)
+                //             .filter(|pixel| !self.tree.contains_sample(*pixel))
+                //             .collect::<Vec<_>>();
+                //         pixels.shuffle(&mut rng);
+                //         pixels
+                //     };
+                //     for pixel in pixels {
+                //         if start.elapsed() > MAX_TIME {
+                //             break;
+                //         }
+                //         if !self.tree.contains_sample(pixel) {
+                //             self.tree.ensure_pixel_safe(pixel);
+                //         }
+                //     }
+                // }
+
                 // ensure_pixel_safe with time bound
+                // but with a decreasing stride
                 if !ctx.input(|i| i.key_down(Key::Space)) {
                     const MAX_TIME: Duration = Duration::from_millis(100);
                     let start = Instant::now();
                     let mut rng = rand::rng();
-                    let pixels = {
-                        let mut pixels = camera_map
-                            .pixels(self.stride)
-                            .map(|(_, pixel)| pixel)
-                            .filter(|pixel| !self.tree.contains_sample(*pixel))
-                            .collect::<Vec<_>>();
-                        pixels.shuffle(&mut rng);
-                        pixels
-                    };
-                    for pixel in pixels {
-                        if start.elapsed() > MAX_TIME {
-                            break;
-                        }
-                        if !self.tree.contains_sample(pixel) {
-                            self.tree.ensure_pixel_safe(pixel);
+
+                    let hi_stride_pow = (ui.max_rect().width() as u32).ilog2();
+                    let lo_stride_pow = self.stride.ilog2();
+                    'outer: for stride_pow in (lo_stride_pow..hi_stride_pow).rev() {
+                        let stride = 1 << stride_pow;
+
+                        let pixels = {
+                            let mut pixels = camera_map
+                                .pixels(stride)
+                                .map(|(_, pixel)| pixel)
+                                .filter(|pixel| !self.tree.contains_sample(*pixel))
+                                .collect::<Vec<_>>();
+                            pixels.shuffle(&mut rng);
+                            pixels
+                        };
+                        for pixel in pixels {
+                            if start.elapsed() > MAX_TIME {
+                                break 'outer;
+                            }
+                            if !self.tree.contains_sample(pixel) {
+                                self.tree.ensure_pixel_safe(pixel);
+                            }
                         }
                     }
                 }
 
-                // draw the fractal
+                // // draw the fractal
+                // {
+                //     let painter = ui.painter_at(ui.max_rect());
+
+                //     painter.rect_filled(ui.max_rect(), 0.0, Color32::RED);
+
+                //     // const STRIDE: u32 = 1;
+                //     for (rect, pixel) in camera_map.pixels(self.stride) {
+                //         let color = self.tree.color(pixel).build().unwrap_or(Color32::MAGENTA);
+                //         // .expect("tree invariant not satisfied");
+
+                //         painter.rect_filled(rect, 0.0, color);
+                //     }
+                // }
+
+                // draw the fractal,
+                // but instead of drawing error magenta,
+                // draw pixels decreasing in stride
                 {
                     let painter = ui.painter_at(ui.max_rect());
 
                     painter.rect_filled(ui.max_rect(), 0.0, Color32::RED);
 
-                    // const STRIDE: u32 = 1;
-                    for (rect, pixel) in camera_map.pixels(self.stride) {
-                        let color = self.tree.color(pixel).build().unwrap_or(Color32::MAGENTA);
-                        // .expect("tree invariant not satisfied");
-
-                        painter.rect_filled(rect, 0.0, color);
+                    let hi_stride_pow = (ui.max_rect().width() as u32).ilog2();
+                    let lo_stride_pow = self.stride.ilog2();
+                    for stride_pow in (lo_stride_pow..hi_stride_pow).rev() {
+                        let stride = 1 << stride_pow;
+                        for (rect, pixel) in camera_map.pixels(stride) {
+                            if let Some(color) = self.tree.color(pixel).build() {
+                                painter.rect_filled(rect, 0.0, color);
+                            }
+                        }
                     }
                 }
 
