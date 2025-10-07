@@ -4,9 +4,11 @@ use std::{
     iter::Sum,
     num::NonZero,
     ops::{Add, AddAssign},
+    time::{Duration, Instant},
 };
 
-use eframe::egui::{self, Color32, Key, Pos2, Rect, Vec2};
+use eframe::egui::{self, Color32, Key, Pos2, Rect, RichText, Vec2};
+use rand::seq::{IteratorRandom, SliceRandom};
 
 fn main() -> eframe::Result {
     // std::env::set_var("RUST_BACKTRACE", "1");
@@ -38,12 +40,10 @@ impl Sample {
     }
 }
 
-fn sample(c_real: f32, c_imag: f32) -> Sample {
+fn mandelbrot_sample(z0_real: f32, z0_imag: f32, c_real: f32, c_imag: f32) -> Sample {
     const Z_ESCAPE_RAD2: f32 = 4.0;
-    // let mut z_real = self.z0.real;
-    // let mut z_imag = self.z0.imag;
-    let mut z_real = 0.0;
-    let mut z_imag = 0.0;
+    let mut z_real = z0_real;
+    let mut z_imag = z0_imag;
     let mut old_real = z_real;
     let mut old_imag = z_imag;
     let mut z_real2 = z_real * z_real;
@@ -103,6 +103,29 @@ fn sample(c_real: f32, c_imag: f32) -> Sample {
     //         imag: z_imag,
     //     },
     // )
+}
+
+#[inline(never)]
+fn metabrot_sample(z0_real: f32, z0_imag: f32) -> Sample {
+    const WIDTH: usize = 128;
+    const WINDOW: Square = Square::try_new(-2.0, 2.0, -2.0, 2.0).unwrap();
+    let mut deepest = 0;
+    for row in 0..WIDTH {
+        let c_imag = lerp(
+            WINDOW.imag_lo,
+            WINDOW.imag_hi,
+            1.0 - row as f32 / WIDTH as f32,
+        );
+        for col in 0..WIDTH {
+            let c_real = lerp(WINDOW.real_lo, WINDOW.real_hi, col as f32 / WIDTH as f32);
+            let sample = mandelbrot_sample(z0_real, z0_imag, c_real, c_imag);
+            if sample.depth == Sample::MAX_DEPTH {
+                return sample;
+            }
+            deepest = deepest.max(sample.depth);
+        }
+    }
+    Sample { depth: deepest }
 }
 
 // TODO: make this a mapping from egui rect to complex window
@@ -237,19 +260,19 @@ impl CameraMap {
             .flat_map(move |row| {
                 (0..self.rect.size().x as usize)
                     .step_by(stride)
-                    .map(move |col| {
-                        (
+                    .filter_map(move |col| {
+                        Some((
                             Rect::from_min_size(
                                 Pos2::new(col as f32, row as f32),
                                 Vec2::new(stride as f32, stride as f32),
                             ),
-                            Square::new(
+                            Square::try_new(
                                 self.x_to_real(col as f32),
                                 self.x_to_real((col + stride) as f32),
                                 self.y_to_imag((row + stride) as f32),
                                 self.y_to_imag(row as f32),
-                            ),
-                        )
+                            )?,
+                        ))
                     })
             })
     }
@@ -355,21 +378,39 @@ struct Square {
     // rad: f32,
 }
 impl Square {
-    fn new(real_lo: f32, real_hi: f32, imag_lo: f32, imag_hi: f32) -> Self {
-        assert!(real_lo < real_hi);
-        assert!(imag_lo < imag_hi);
-        assert!(
-            (1.0 - ((real_hi as f64 - real_lo as f64) / (imag_hi as f64 - imag_lo as f64))).abs()
-                < 1e-4
-                || (real_hi as f64 - real_lo as f64).abs()
-                    + (imag_hi as f64 - imag_lo as f64).abs()
-                    < 1e-4
-        );
-        Self {
-            real_lo,
-            real_hi,
-            imag_lo,
-            imag_hi,
+    // fn new(real_lo: f32, real_hi: f32, imag_lo: f32, imag_hi: f32) -> Self {
+    //     assert!(real_lo < real_hi);
+    //     assert!(imag_lo < imag_hi);
+    //     {
+    //         let dx = real_hi as f64 - real_lo as f64;
+    //         let dy = imag_hi as f64 - imag_lo as f64;
+    //         let diff = dx - dy;
+    //         let ratio = dx / dy;
+    //         assert!(diff.abs() < 1e-4 || (1.0 - ratio).abs() < 1e-4);
+    //     }
+    //     Self {
+    //         real_lo,
+    //         real_hi,
+    //         imag_lo,
+    //         imag_hi,
+    //     }
+    // }
+    const fn try_new(real_lo: f32, real_hi: f32, imag_lo: f32, imag_hi: f32) -> Option<Self> {
+        if !(real_lo < real_hi && imag_lo < imag_hi && {
+            let dx = real_hi as f64 - real_lo as f64;
+            let dy = imag_hi as f64 - imag_lo as f64;
+            let diff = dx - dy;
+            let ratio = dx / dy;
+            diff.abs() < 1e-4 || (1.0 - ratio).abs() < 1e-4
+        }) {
+            None
+        } else {
+            Some(Self {
+                real_lo,
+                real_hi,
+                imag_lo,
+                imag_hi,
+            })
         }
     }
 
@@ -381,12 +422,16 @@ impl Square {
         (self.imag_hi + self.imag_lo) / 2.0
     }
 
-    fn real_rad(self) -> f32 {
-        (self.real_hi - self.real_lo) / 2.0
-    }
+    // fn real_rad(self) -> f32 {
+    //     (self.real_hi - self.real_lo) / 2.0
+    // }
 
-    fn imag_rad(self) -> f32 {
-        (self.imag_hi - self.imag_lo) / 2.0
+    // fn imag_rad(self) -> f32 {
+    //     (self.imag_hi - self.imag_lo) / 2.0
+    // }
+
+    fn rad(self) -> f32 {
+        (self.real_hi - self.real_lo) / 2.0
     }
 
     fn area(self) -> f32 {
@@ -406,17 +451,22 @@ impl Square {
         todo!()
     }
 
-    // TODO: optimize
+    // // TODO: optimize
+    // fn debug_overlaps(self, other: Self) -> bool {
+    //     // self.intersect(other).is_some()
+    //     self.contains(other.real_lo, other.imag_lo)
+    //         || self.contains(other.real_lo, other.imag_hi)
+    //         || self.contains(other.real_hi, other.imag_lo)
+    //         || self.contains(other.real_hi, other.imag_hi)
+    //         || other.contains(self.real_lo, self.imag_lo)
+    //         || other.contains(self.real_lo, self.imag_hi)
+    //         || other.contains(self.real_hi, self.imag_lo)
+    //         || other.contains(self.real_hi, self.imag_hi)
+    // }
+
     fn overlaps(self, other: Self) -> bool {
-        // self.intersect(other).is_some()
-        self.contains(other.real_lo, other.imag_lo)
-            || self.contains(other.real_lo, other.imag_hi)
-            || self.contains(other.real_hi, other.imag_lo)
-            || self.contains(other.real_hi, other.imag_hi)
-            || other.contains(self.real_lo, self.imag_lo)
-            || other.contains(self.real_lo, self.imag_hi)
-            || other.contains(self.real_hi, self.imag_lo)
-            || other.contains(self.real_hi, self.imag_hi)
+        ((self.real_mid() - other.real_mid()).abs() <= (self.rad() + other.rad()))
+            && ((self.imag_mid() - other.imag_mid()).abs() <= (self.rad() + other.rad()))
     }
 }
 impl PartialOrd for Square {
@@ -477,7 +527,7 @@ impl Sum for ColorBuilder {
 
 #[derive(Debug, Clone)]
 struct Tree {
-    window: Square,
+    dom: Square,
     color: Color32,
     /// 0 1
     ///
@@ -487,8 +537,9 @@ struct Tree {
 impl Tree {
     fn new_leaf(window: Square) -> Self {
         Self {
-            color: sample(window.real_mid(), window.imag_mid()).color(),
-            window,
+            // color: mandelbrot_sample(0.0, 0.0, window.real_mid(), window.imag_mid()).color(),
+            color: metabrot_sample(window.real_mid(), window.imag_mid()).color(),
+            dom: window,
             children: None,
         }
     }
@@ -504,8 +555,8 @@ impl Tree {
         Some(
             (0..children.len())
                 .map(|i| {
-                    let dx = children[i].window.real_mid() - real;
-                    let dy = children[i].window.imag_mid() - imag;
+                    let dx = children[i].dom.real_mid() - real;
+                    let dy = children[i].dom.imag_mid() - imag;
                     (i, dx * dx + dy * dy)
                 })
                 .min_by(|(_, left), (_, right)| left.total_cmp(right))
@@ -515,33 +566,38 @@ impl Tree {
     }
 
     fn split(&mut self) {
-        self.children = Some([
-            Box::new(Self::new_leaf(Square::new(
-                self.window.real_lo,
-                self.window.real_mid(),
-                self.window.imag_mid(),
-                self.window.imag_hi,
-            ))),
-            Box::new(Self::new_leaf(Square::new(
-                self.window.real_mid(),
-                self.window.real_hi,
-                self.window.imag_mid(),
-                self.window.imag_hi,
-            ))),
-            Box::new(Self::new_leaf(Square::new(
-                self.window.real_lo,
-                self.window.real_mid(),
-                self.window.imag_lo,
-                self.window.imag_mid(),
-            ))),
-            Box::new(Self::new_leaf(Square::new(
-                self.window.real_mid(),
-                self.window.real_hi,
-                self.window.imag_lo,
-                self.window.imag_mid(),
-            ))),
-        ]);
-        // self.children.as_ref().unwrap().iter().any(|c| c.window)
+        if let Some(children) = {
+            || {
+                Some([
+                    Box::new(Self::new_leaf(Square::try_new(
+                        self.dom.real_lo,
+                        self.dom.real_mid(),
+                        self.dom.imag_mid(),
+                        self.dom.imag_hi,
+                    )?)),
+                    Box::new(Self::new_leaf(Square::try_new(
+                        self.dom.real_mid(),
+                        self.dom.real_hi,
+                        self.dom.imag_mid(),
+                        self.dom.imag_hi,
+                    )?)),
+                    Box::new(Self::new_leaf(Square::try_new(
+                        self.dom.real_lo,
+                        self.dom.real_mid(),
+                        self.dom.imag_lo,
+                        self.dom.imag_mid(),
+                    )?)),
+                    Box::new(Self::new_leaf(Square::try_new(
+                        self.dom.real_mid(),
+                        self.dom.real_hi,
+                        self.dom.imag_lo,
+                        self.dom.imag_mid(),
+                    )?)),
+                ])
+            }
+        }() {
+            self.children = Some(children);
+        }
     }
 
     fn count_overlaps(&self, window: Square) -> u32 {
@@ -574,10 +630,10 @@ impl Tree {
     // }
 
     fn count_samples_strong(&self, pixel: Square) -> u32 {
-        if !self.window.overlaps(pixel) {
+        if !self.dom.overlaps(pixel) {
             return 0;
         }
-        (if pixel.contains(self.window.real_mid(), self.window.imag_mid()) {
+        (if pixel.contains(self.dom.real_mid(), self.dom.imag_mid()) {
             1
         } else {
             0
@@ -589,6 +645,24 @@ impl Tree {
                 .unwrap();
             self.children.as_ref().unwrap()[closest_child_i].count_samples_strong(pixel)
         })
+    }
+
+    /// whether the pixel contains any samples
+    fn contains_sample(&self, pixel: Square) -> bool {
+        if !self.dom.overlaps(pixel) {
+            return false;
+        }
+        if pixel.contains(self.dom.real_mid(), self.dom.imag_mid()) {
+            return true;
+        }
+        if self.is_leaf() {
+            return false;
+        }
+        self.children
+            .as_ref()
+            .unwrap()
+            .iter()
+            .any(|c| c.contains_sample(pixel))
     }
 
     // // TODO: rename
@@ -674,20 +748,22 @@ impl Tree {
 
     /// every pixel must contain a sample
     fn ensure_pixel_safe(&mut self, pixel: Square) {
-        if !self.window.overlaps(pixel) {
+        if !self.dom.overlaps(pixel) {
             return;
         }
-        if pixel.contains(self.window.real_mid(), self.window.imag_mid()) {
+        if pixel.contains(self.dom.real_mid(), self.dom.imag_mid()) {
             return;
         }
         if self.is_leaf() {
             self.split();
         }
         // TODO: this isn't really what i want
-        let closest_child_i = self
-            .child_i_closest_to(pixel.real_mid(), pixel.imag_mid())
-            .unwrap();
-        self.children.as_mut().unwrap()[closest_child_i].ensure_pixel_safe(pixel);
+        if !self.is_leaf() {
+            let closest_child_i = self
+                .child_i_closest_to(pixel.real_mid(), pixel.imag_mid())
+                .unwrap();
+            self.children.as_mut().unwrap()[closest_child_i].ensure_pixel_safe(pixel);
+        }
     }
 
     // fn is_strong_pixel_safe(&self, pixel: Square) -> bool {
@@ -755,10 +831,10 @@ impl Tree {
     // TODO: average of all samples inside the pixel
     /// the color of the first node who's sample is inside the pixel
     fn color(&self, pixel: Square) -> ColorBuilder {
-        if !self.window.overlaps(pixel) {
+        if !self.dom.overlaps(pixel) {
             return ColorBuilder::default();
         }
-        if pixel.contains(self.window.real_mid(), self.window.imag_mid()) {
+        if pixel.contains(self.dom.real_mid(), self.dom.imag_mid()) {
             return self.color.into();
         }
         if self.is_leaf() {
@@ -802,7 +878,7 @@ struct App {
 impl App {
     fn new(_cc: &eframe::CreationContext<'_>) -> Self {
         Self {
-            tree: Tree::new_leaf(Square::new(-4.0, 4.0, -4.0, 4.0)),
+            tree: Tree::new_leaf(Square::try_new(-4.0, 4.0, -4.0, 4.0).unwrap()),
             stride: 8,
             camera: Camera::new(0.0, 0.0, 2.0),
             velocity: Vec2::ZERO,
@@ -857,27 +933,42 @@ impl eframe::App for App {
                 }
 
                 let camera_map = CameraMap::new(ui.max_rect(), self.camera);
-                if ctx.input(|i| i.key_down(Key::Space)) {
-                    // let rect = ui.available_rect_before_wrap();
-                    // let rect = ;
+                // ensure_pixel_safe for all pixels
+                // if ctx.input(|i| i.key_down(Key::Space)) {
+                //     for (_, pixel) in camera_map.pixels(self.stride) {
+                //         self.tree.ensure_pixel_safe(pixel);
+                //     }
+                // }
 
-                    for (_, pixel) in camera_map.pixels(self.stride) {
-                        self.tree.ensure_pixel_safe(pixel);
+                // ensure_pixel_safe with time bound
+                if !ctx.input(|i| i.key_down(Key::Space)) {
+                    const MAX_TIME: Duration = Duration::from_millis(100);
+                    let start = Instant::now();
+                    let mut rng = rand::rng();
+                    let pixels = {
+                        let mut pixels = camera_map
+                            .pixels(self.stride)
+                            .map(|(_, pixel)| pixel)
+                            .filter(|pixel| !self.tree.contains_sample(*pixel))
+                            .collect::<Vec<_>>();
+                        pixels.shuffle(&mut rng);
+                        pixels
+                    };
+                    for pixel in pixels {
+                        if start.elapsed() > MAX_TIME {
+                            break;
+                        }
+                        if !self.tree.contains_sample(pixel) {
+                            self.tree.ensure_pixel_safe(pixel);
+                        }
                     }
-
-                    // for (_, pixel) in camera_map.pixels(self.stride) {
-                    //     if self
-                    //         .tree
-                    //         .window
-                    //         .contains(pixel.real_mid(), pixel.imag_mid())
-                    //     {
-                    //         assert!(self.tree.is_weak_pixel_safe(pixel));
-                    //         assert!(self.tree.is_strong_pixel_safe(pixel));
-                    //     }
-                    // }
                 }
+
+                // draw the fractal
                 {
                     let painter = ui.painter_at(ui.max_rect());
+
+                    painter.rect_filled(ui.max_rect(), 0.0, Color32::RED);
 
                     // const STRIDE: u32 = 1;
                     for (rect, pixel) in camera_map.pixels(self.stride) {
@@ -967,26 +1058,42 @@ impl eframe::App for App {
                 //     }
                 // }
 
-                // frame rate
-                {
-                    let average_dt = self
-                        .dts
-                        .average()
-                        .expect("we added one this frame so dts must be non-empty");
-                    ui.label(format!(
-                        "    dt: {:08.05}\n1/dt: {:08.05}",
-                        average_dt,
-                        1.0 / average_dt,
-                    ));
-                }
+                // area is to allow the frame to be drawn on top of the fractal
+                egui::Area::new(egui::Id::new("area"))
+                    .constrain_to(ctx.screen_rect())
+                    .anchor(egui::Align2::LEFT_TOP, egui::Vec2::ZERO)
+                    .show(ui.ctx(), |ui| {
+                        // frame rate
+                        {
+                            let average_dt = self
+                                .dts
+                                .average()
+                                .expect("we added one this frame so dts must be non-empty");
+                            // ui.label(format!(
+                            //     "    dt: {:08.04}\n1/dt: {:08.04}",
+                            //     average_dt,
+                            //     1.0 / average_dt,
+                            // ));
+                            ui.label(
+                                RichText::new(format!(
+                                    "    dt: {:08.04}\n1/dt: {:08.04}",
+                                    average_dt,
+                                    1.0 / average_dt,
+                                ))
+                                .background_color(Color32::BLACK),
+                            );
+                        }
 
-                // view stuff
-                {
-                    ui.label(format!(
-                        "center: {:12.09} + {:12.09}i\nreal_radius: {:12.09}",
-                        self.camera.real_mid, self.camera.imag_mid, self.camera.real_rad,
-                    ));
-                }
+                        // // view stuff
+                        // {
+                        //     ui.label(format!(
+                        //         "center: {:12.09} + {:12.09}i\nreal_radius: {:12.09}",
+                        //         self.camera.real_mid,
+                        //         self.camera.imag_mid,
+                        //         self.camera.real_rad,
+                        //     ));
+                        // }
+                    });
             });
     }
 }
