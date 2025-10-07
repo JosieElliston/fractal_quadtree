@@ -2,16 +2,22 @@ use std::{
     cmp::Ordering,
     hint::black_box,
     iter::Sum,
-    ops::AddAssign,
+    ops::{Add, AddAssign},
     time::{Duration, Instant},
 };
 
 use eframe::egui::{self, Color32, Key, Pos2, Rect, RichText, Vec2};
 use rand::seq::SliceRandom;
 
+use mimalloc::MiMalloc;
+
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc;
+
 fn main() -> eframe::Result {
     // std::env::set_var("RUST_BACKTRACE", "1");
     // env_logger::init();
+
 
     // bench();
     // panic!();
@@ -26,6 +32,7 @@ fn main() -> eframe::Result {
 }
 
 fn bench() {
+    let start = Instant::now();
     let mut tree = Tree::new_leaf(Square::try_new(-4.0, 4.0, -4.0, 4.0).unwrap());
     let stride = 8;
     let camera = Camera::new(0.0, 0.0, 2.0);
@@ -42,6 +49,7 @@ fn bench() {
         }
     }
     black_box(tree);
+    println!("time: {:?}", start.elapsed());
 }
 
 struct Sample {
@@ -133,12 +141,16 @@ fn metabrot_sample(z0_real: f32, z0_imag: f32) -> Sample {
     let mut deepest = 0;
     for row in 0..WIDTH {
         let c_imag = lerp(
-            WINDOW.imag_lo,
-            WINDOW.imag_hi,
+            WINDOW.imag_lo(),
+            WINDOW.imag_hi(),
             1.0 - row as f32 / WIDTH as f32,
         );
         for col in 0..WIDTH {
-            let c_real = lerp(WINDOW.real_lo, WINDOW.real_hi, col as f32 / WIDTH as f32);
+            let c_real = lerp(
+                WINDOW.real_lo(),
+                WINDOW.real_hi(),
+                col as f32 / WIDTH as f32,
+            );
             let sample = mandelbrot_sample(z0_real, z0_imag, c_real, c_imag);
             if sample.depth == Sample::MAX_DEPTH {
                 return sample;
@@ -358,10 +370,10 @@ impl Window {
 impl From<Square> for Window {
     fn from(value: Square) -> Self {
         Window {
-            real_lo: value.real_lo,
-            real_hi: value.real_hi,
-            imag_lo: value.imag_lo,
-            imag_hi: value.imag_hi,
+            real_lo: value.real_lo(),
+            real_hi: value.real_hi(),
+            imag_lo: value.imag_lo(),
+            imag_hi: value.imag_hi(),
         }
     }
 }
@@ -390,13 +402,13 @@ impl PartialOrd for Window {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Square {
-    real_lo: f32,
-    real_hi: f32,
-    imag_lo: f32,
-    imag_hi: f32,
-    // real: f32,
-    // imag: f32,
-    // rad: f32,
+    // real_lo: f32,
+    // real_hi: f32,
+    // imag_lo: f32,
+    // imag_hi: f32,
+    real_mid: f32,
+    imag_mid: f32,
+    rad: f32,
 }
 impl Square {
     // fn new(real_lo: f32, real_hi: f32, imag_lo: f32, imag_hi: f32) -> Self {
@@ -426,38 +438,54 @@ impl Square {
         }) {
             None
         } else {
+            // Some(Self {
+            //     real_lo,
+            //     real_hi,
+            //     imag_lo,
+            //     imag_hi,
+            // })
             Some(Self {
-                real_lo,
-                real_hi,
-                imag_lo,
-                imag_hi,
+                real_mid: (real_lo + real_hi) / 2.0,
+                imag_mid: (imag_lo + imag_hi) / 2.0,
+                rad: (real_hi - real_lo) / 2.0,
             })
         }
     }
 
     fn real_mid(self) -> f32 {
-        (self.real_hi + self.real_lo) / 2.0
+        // (self.real_hi + self.real_lo) / 2.0
+        self.real_mid
     }
 
     fn imag_mid(self) -> f32 {
-        (self.imag_hi + self.imag_lo) / 2.0
+        // (self.imag_hi + self.imag_lo) / 2.0
+        self.imag_mid
     }
-
-    // fn real_rad(self) -> f32 {
-    //     (self.real_hi - self.real_lo) / 2.0
-    // }
-
-    // fn imag_rad(self) -> f32 {
-    //     (self.imag_hi - self.imag_lo) / 2.0
-    // }
 
     fn rad(self) -> f32 {
-        (self.real_hi - self.real_lo) / 2.0
+        // (self.real_hi - self.real_lo) / 2.0
+        self.rad
     }
 
-    fn area(self) -> f32 {
-        (self.real_hi - self.real_lo) * (self.imag_hi - self.imag_lo)
+    fn real_lo(self) -> f32 {
+        self.real_mid - self.rad
     }
+
+    fn real_hi(self) -> f32 {
+        self.real_mid + self.rad
+    }
+
+    fn imag_lo(self) -> f32 {
+        self.imag_mid - self.rad
+    }
+
+    fn imag_hi(self) -> f32 {
+        self.imag_mid + self.rad
+    }
+
+    // fn area(self) -> f32 {
+    //     (self.real_hi - self.real_lo) * (self.imag_hi - self.imag_lo)
+    // }
 
     // fn contains(self, real: f32, imag: f32) -> bool {
     //     (self.real_lo..=self.real_hi).contains(&real)
@@ -465,13 +493,14 @@ impl Square {
     // }
     // #[inline(never)]
     fn contains(self, real: f32, imag: f32) -> bool {
-        (self.real_lo..=self.real_hi).contains(&real)
-            && (self.imag_lo..=self.imag_hi).contains(&imag)
+        // (self.real_lo..=self.real_hi).contains(&real)
+        //     && (self.imag_lo..=self.imag_hi).contains(&imag)
+        (self.real_mid - real).abs() <= self.rad && (self.imag_mid - imag).abs() <= self.rad
     }
 
-    fn intersect(self, other: Self) -> Option<Window> {
-        todo!()
-    }
+    // fn intersect(self, other: Self) -> Option<Window> {
+    //     todo!()
+    // }
 
     // // TODO: optimize
     // fn debug_overlaps(self, other: Self) -> bool {
@@ -486,18 +515,18 @@ impl Square {
     //         || other.contains(self.real_hi, self.imag_hi)
     // }
 
-    // fn overlaps(self, other: Self) -> bool {
-    //     ((self.real_mid() - other.real_mid()).abs() <= (self.rad() + other.rad()))
-    //         && ((self.imag_mid() - other.imag_mid()).abs() <= (self.rad() + other.rad()))
-    // }
+    fn overlaps(self, other: Self) -> bool {
+        ((self.real_mid() - other.real_mid()).abs() <= (self.rad() + other.rad()))
+            && ((self.imag_mid() - other.imag_mid()).abs() <= (self.rad() + other.rad()))
+    }
 
     // #[inline(never)]
-    fn overlaps(self, other: Self) -> bool {
-        !(self.real_hi < other.real_lo
-            || other.real_hi < self.real_lo
-            || self.imag_hi < other.imag_lo
-            || other.imag_hi < self.imag_lo)
-    }
+    // fn overlaps(self, other: Self) -> bool {
+    //     !(self.real_hi < other.real_lo
+    //         || other.real_hi < self.real_lo
+    //         || self.imag_hi < other.imag_lo
+    //         || other.imag_hi < self.imag_lo)
+    // }
 }
 impl PartialOrd for Square {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
@@ -545,6 +574,15 @@ impl AddAssign<ColorBuilder> for ColorBuilder {
         self.b += rhs.b;
     }
 }
+impl Add<ColorBuilder> for ColorBuilder {
+    type Output = ColorBuilder;
+
+    fn add(self, rhs: ColorBuilder) -> ColorBuilder {
+        let mut result = self;
+        result += rhs;
+        result
+    }
+}
 impl Sum for ColorBuilder {
     fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
         let mut ret = Self::default();
@@ -555,7 +593,7 @@ impl Sum for ColorBuilder {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct Tree {
     dom: Square,
     color: Color32,
@@ -600,27 +638,27 @@ impl Tree {
             || {
                 Some([
                     Box::new(Self::new_leaf(Square::try_new(
-                        self.dom.real_lo,
+                        self.dom.real_lo(),
                         self.dom.real_mid(),
                         self.dom.imag_mid(),
-                        self.dom.imag_hi,
+                        self.dom.imag_hi(),
                     )?)),
                     Box::new(Self::new_leaf(Square::try_new(
                         self.dom.real_mid(),
-                        self.dom.real_hi,
+                        self.dom.real_hi(),
                         self.dom.imag_mid(),
-                        self.dom.imag_hi,
+                        self.dom.imag_hi(),
                     )?)),
                     Box::new(Self::new_leaf(Square::try_new(
-                        self.dom.real_lo,
+                        self.dom.real_lo(),
                         self.dom.real_mid(),
-                        self.dom.imag_lo,
+                        self.dom.imag_lo(),
                         self.dom.imag_mid(),
                     )?)),
                     Box::new(Self::new_leaf(Square::try_new(
                         self.dom.real_mid(),
-                        self.dom.real_hi,
-                        self.dom.imag_lo,
+                        self.dom.real_hi(),
+                        self.dom.imag_lo(),
                         self.dom.imag_mid(),
                     )?)),
                 ])
@@ -860,17 +898,37 @@ impl Tree {
 
     // TODO: average of all samples inside the pixel
     /// the color of the first node who's sample is inside the pixel
+    // fn color(&self, pixel: Square) -> ColorBuilder {
+    //     if !self.dom.overlaps(pixel) {
+    //         return ColorBuilder::default();
+    //     }
+    //     (if pixel.contains(self.dom.real_mid(), self.dom.imag_mid()) {
+    //         self.color.into()
+    //     } else {
+    //         ColorBuilder::default()
+    //     } + match &self.children {
+    //         Some(children) => children.iter().map(|c| c.color(pixel)).sum(),
+    //         None => ColorBuilder::default(),
+    //     })
+    // }
+    #[inline(never)]
     fn color(&self, pixel: Square) -> ColorBuilder {
-        if !self.dom.overlaps(pixel) {
-            return ColorBuilder::default();
+        let mut stack = Vec::with_capacity(64);
+        stack.push(self);
+        let mut ret = ColorBuilder::default();
+        while let Some(node) = stack.pop() {
+            if !node.dom.overlaps(pixel) {
+                continue;
+            }
+            if pixel.contains(node.dom.real_mid(), node.dom.imag_mid()) {
+                ret += node.color.into();
+            }
+            if let Some(children) = &node.children {
+                stack.extend(children.iter().map(|c| c.as_ref()));
+            }
         }
-        if pixel.contains(self.dom.real_mid(), self.dom.imag_mid()) {
-            return self.color.into();
-        }
-        match &self.children {
-            Some(children) => children.iter().map(|c| c.color(pixel)).sum(),
-            None => ColorBuilder::default(),
-        }
+        // assert_eq!(stack.capacity(), 64);
+        ret
     }
 
     // fn validate(&self) {
