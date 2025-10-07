@@ -1,9 +1,12 @@
 use std::{
     cmp::Ordering,
     hash::{DefaultHasher, Hash, Hasher},
+    iter::Sum,
+    num::NonZero,
+    ops::{Add, AddAssign},
 };
 
-use eframe::egui::{self, Color32, Pos2, Rect, Vec2};
+use eframe::egui::{self, Color32, Key, Pos2, Rect, Vec2};
 
 fn main() -> eframe::Result {
     // std::env::set_var("RUST_BACKTRACE", "1");
@@ -422,6 +425,56 @@ impl PartialOrd for Square {
     }
 }
 
+/// represents the average of `count` colors
+#[derive(Debug, Default)]
+struct ColorBuilder {
+    // count: NonZero<u32>,
+    count: u32,
+    r: u32,
+    g: u32,
+    b: u32,
+}
+impl ColorBuilder {
+    fn build(self) -> Option<Color32> {
+        if self.count == 0 {
+            None
+        } else {
+            Some(Color32::from_rgb(
+                (self.r / self.count) as u8,
+                (self.g / self.count) as u8,
+                (self.b / self.count) as u8,
+            ))
+        }
+    }
+}
+impl From<Color32> for ColorBuilder {
+    fn from(value: Color32) -> Self {
+        Self {
+            count: 1,
+            r: value.r() as _,
+            g: value.g() as _,
+            b: value.b() as _,
+        }
+    }
+}
+impl AddAssign<ColorBuilder> for ColorBuilder {
+    fn add_assign(&mut self, rhs: ColorBuilder) {
+        self.count += rhs.count;
+        self.r += rhs.r;
+        self.g += rhs.g;
+        self.b += rhs.b;
+    }
+}
+impl Sum for ColorBuilder {
+    fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
+        let mut ret = Self::default();
+        for c in iter {
+            ret += c;
+        }
+        ret
+    }
+}
+
 #[derive(Debug, Clone)]
 struct Tree {
     window: Square,
@@ -499,6 +552,45 @@ impl Tree {
         todo!()
     }
 
+    // actually i think this basically just returns 1
+    // fn count_samples_weak(&self, pixel: Square) -> u32 {
+    //     if !self.window.overlaps(pixel) {
+    //         return 0;
+    //     }
+    //     (if pixel.contains(self.window.real_mid(), self.window.imag_mid()) {
+    //         1
+    //     } else {
+    //         0
+    //     } + if self.is_leaf() {
+    //         0
+    //     } else {
+    //         self.children
+    //             .as_ref()
+    //             .unwrap()
+    //             .iter()
+    //             .map(|c| c.count_samples_weak(pixel))
+    //             .sum()
+    //     })
+    // }
+
+    fn count_samples_strong(&self, pixel: Square) -> u32 {
+        if !self.window.overlaps(pixel) {
+            return 0;
+        }
+        (if pixel.contains(self.window.real_mid(), self.window.imag_mid()) {
+            1
+        } else {
+            0
+        } + if self.is_leaf() {
+            0
+        } else {
+            let closest_child_i = self
+                .child_i_closest_to(pixel.real_mid(), pixel.imag_mid())
+                .unwrap();
+            self.children.as_ref().unwrap()[closest_child_i].count_samples_strong(pixel)
+        })
+    }
+
     // // TODO: rename
     // /// ensures that every pixel in the window contains at least subsamples leaves
     // // fn ensure_pixel_safe(&mut self, window: Window, pixel_width: f32, subsamples: u8) {
@@ -538,80 +630,98 @@ impl Tree {
     // }
 
     // TODO: subsampling / area average
-    /// every pixel must contain a node
+    // every pixel must contain a node
+    // fn ensure_pixel_safe(&mut self, pixel: Square) {
+    //     // println!("ensure_pixel_safe: {self:?}");
+    //     if !self.window.overlaps(pixel) {
+    //         // println!("!self.window.overlaps(pixel)");
+    //         return;
+    //     }
+    //     if self.window <= pixel {
+    //         // println!("self.window <= pixel");
+    //         return;
+    //     }
+    //     // match &mut self.children {
+    //     //     Some(children) => {
+    //     //         children
+    //     //             .iter_mut()
+    //     //             .map(|c| {
+    //     //                 let dx = c.window.real_mid() - pixel.real_mid();
+    //     //                 let dy = c.window.imag_mid() - pixel.imag_mid();
+    //     //                 (c, dx * dx + dy * dy)
+    //     //             })
+    //     //             .min_by(|(_, left), (_, right)| left.total_cmp(right))
+    //     //             .unwrap()
+    //     //             .0
+    //     //             .ensure_pixel_safe(pixel);
+    //     //     }
+    //     //     None => {
+    //     //         self.split();
+    //     //         for c in self.children.as_mut().unwrap().iter_mut() {
+    //     //             c.ensure_pixel_safe(pixel)
+    //     //         }
+    //     //     }
+    //     // };
+    //     if self.is_leaf() {
+    //         // println!("self.is_leaf()");
+    //         self.split();
+    //     }
+    //     let closest_child_i = self
+    //         .child_i_closest_to(pixel.real_mid(), pixel.imag_mid())
+    //         .unwrap();
+    //     self.children.as_mut().unwrap()[closest_child_i].ensure_pixel_safe(pixel);
+    // }
+
+    /// every pixel must contain a sample
     fn ensure_pixel_safe(&mut self, pixel: Square) {
-        // println!("ensure_pixel_safe: {self:?}");
         if !self.window.overlaps(pixel) {
-            // println!("!self.window.overlaps(pixel)");
             return;
         }
-        if self.window <= pixel {
-            // println!("self.window <= pixel");
+        if pixel.contains(self.window.real_mid(), self.window.imag_mid()) {
             return;
         }
-        // match &mut self.children {
-        //     Some(children) => {
-        //         children
-        //             .iter_mut()
-        //             .map(|c| {
-        //                 let dx = c.window.real_mid() - pixel.real_mid();
-        //                 let dy = c.window.imag_mid() - pixel.imag_mid();
-        //                 (c, dx * dx + dy * dy)
-        //             })
-        //             .min_by(|(_, left), (_, right)| left.total_cmp(right))
-        //             .unwrap()
-        //             .0
-        //             .ensure_pixel_safe(pixel);
-        //     }
-        //     None => {
-        //         self.split();
-        //         for c in self.children.as_mut().unwrap().iter_mut() {
-        //             c.ensure_pixel_safe(pixel)
-        //         }
-        //     }
-        // };
         if self.is_leaf() {
-            // println!("self.is_leaf()");
             self.split();
         }
+        // TODO: this isn't really what i want
         let closest_child_i = self
             .child_i_closest_to(pixel.real_mid(), pixel.imag_mid())
             .unwrap();
         self.children.as_mut().unwrap()[closest_child_i].ensure_pixel_safe(pixel);
     }
 
-    fn is_strong_pixel_safe(&self, pixel: Square) -> bool {
-        if !self.window.overlaps(pixel) {
-            return false;
-        }
-        if self.window <= pixel {
-            return true;
-        }
-        if self.is_leaf() {
-            return false;
-        }
-        let closest_child_i = self
-            .child_i_closest_to(pixel.real_mid(), pixel.imag_mid())
-            .unwrap();
-        self.children.as_ref().unwrap()[closest_child_i].is_strong_pixel_safe(pixel)
-    }
+    // fn is_strong_pixel_safe(&self, pixel: Square) -> bool {
+    //     if !self.window.overlaps(pixel) {
+    //         return false;
+    //     }
+    //     if self.window <= pixel {
+    //         return true;
+    //     }
+    //     if self.is_leaf() {
+    //         return false;
+    //     }
+    //     let closest_child_i = self
+    //         .child_i_closest_to(pixel.real_mid(), pixel.imag_mid())
+    //         .unwrap();
+    //     self.children.as_ref().unwrap()[closest_child_i].is_strong_pixel_safe(pixel)
+    // }
 
-    fn is_weak_pixel_safe(&self, pixel: Square) -> bool {
-        if !self.window.overlaps(pixel) {
-            return false;
-        }
-        if self.window <= pixel {
-            return true;
-        }
-        if self.is_leaf() {
-            return false;
-        }
-        self.children
-            .as_ref()
-            .unwrap()
-            .iter()
-            .any(|c| c.is_weak_pixel_safe(pixel))
-    }
+    // fn is_weak_pixel_safe(&self, pixel: Square) -> bool {
+    //     if !self.window.overlaps(pixel) {
+    //         return false;
+    //     }
+    //     if self.window <= pixel {
+    //         return true;
+    //     }
+    //     if self.is_leaf() {
+    //         return false;
+    //     }
+    //     self.children
+    //         .as_ref()
+    //         .unwrap()
+    //         .iter()
+    //         .any(|c| c.is_weak_pixel_safe(pixel))
+    // }
 
     /// ensures that we have < n nodes
     /// or maybe that each pixel contains at most n leaves
@@ -623,23 +733,49 @@ impl Tree {
 
     // /// the average color of leaves inside the pixel weighted by area that's overlapping the pixel
     // /// or maybe weighted by distance to the center of the pixel
-    /// the color of the highest node contained in pixel
-    fn color(&self, pixel: Square) -> Option<Color32> {
+    // /// the color of the highest node contained in pixel
+    // fn color(&self, pixel: Square) -> Option<Color32> {
+    //     if !self.window.overlaps(pixel) {
+    //         return None;
+    //     }
+    //     if self.window <= pixel {
+    //         return Some(self.color);
+    //     }
+    //     if self.is_leaf() {
+    //         // we're too zoomed in
+    //         return None;
+    //     }
+    //     // TODO: i think it's actually possible that it's not the child closest to the pixel center that has a child eventually inside pixel
+    //     let closest_child_i = self
+    //         .child_i_closest_to(pixel.real_mid(), pixel.imag_mid())
+    //         .unwrap();
+    //     self.children.as_ref().unwrap()[closest_child_i].color(pixel)
+    // }
+
+    // TODO: average of all samples inside the pixel
+    /// the color of the first node who's sample is inside the pixel
+    fn color(&self, pixel: Square) -> ColorBuilder {
         if !self.window.overlaps(pixel) {
-            return None;
+            return ColorBuilder::default();
         }
-        if self.window <= pixel {
-            return Some(self.color);
+        if pixel.contains(self.window.real_mid(), self.window.imag_mid()) {
+            return self.color.into();
         }
         if self.is_leaf() {
             // we're too zoomed in
-            return None;
+            return ColorBuilder::default();
         }
-        // TODO: i think it's actually possible that it's not the child closest to the pixel center that has a child eventually inside pixel
-        let closest_child_i = self
-            .child_i_closest_to(pixel.real_mid(), pixel.imag_mid())
-            .unwrap();
-        self.children.as_ref().unwrap()[closest_child_i].color(pixel)
+        // // TODO: i think it's actually possible that it's not the child closest to the pixel center that has a child eventually inside pixel
+        // let closest_child_i = self
+        //     .child_i_closest_to(pixel.real_mid(), pixel.imag_mid())
+        //     .unwrap();
+        // self.children.as_ref().unwrap()[closest_child_i].color(pixel)
+        self.children
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|c| c.color(pixel))
+            .sum()
     }
 
     // fn validate(&self) {
@@ -667,7 +803,7 @@ impl App {
     fn new(_cc: &eframe::CreationContext<'_>) -> Self {
         Self {
             tree: Tree::new_leaf(Square::new(-4.0, 4.0, -4.0, 4.0)),
-            stride: 32,
+            stride: 8,
             camera: Camera::new(0.0, 0.0, 2.0),
             velocity: Vec2::ZERO,
             dts: egui::util::History::new(1..100, 0.1),
@@ -721,7 +857,7 @@ impl eframe::App for App {
                 }
 
                 let camera_map = CameraMap::new(ui.max_rect(), self.camera);
-                {
+                if ctx.input(|i| i.key_down(Key::Space)) {
                     // let rect = ui.available_rect_before_wrap();
                     // let rect = ;
 
@@ -729,86 +865,107 @@ impl eframe::App for App {
                         self.tree.ensure_pixel_safe(pixel);
                     }
 
-                    for (_, pixel) in camera_map.pixels(self.stride) {
-                        if self
-                            .tree
-                            .window
-                            .contains(pixel.real_mid(), pixel.imag_mid())
-                        {
-                            assert!(self.tree.is_weak_pixel_safe(pixel));
-                            assert!(self.tree.is_strong_pixel_safe(pixel));
-                        }
-                    }
-
+                    // for (_, pixel) in camera_map.pixels(self.stride) {
+                    //     if self
+                    //         .tree
+                    //         .window
+                    //         .contains(pixel.real_mid(), pixel.imag_mid())
+                    //     {
+                    //         assert!(self.tree.is_weak_pixel_safe(pixel));
+                    //         assert!(self.tree.is_strong_pixel_safe(pixel));
+                    //     }
+                    // }
+                }
+                {
                     let painter = ui.painter_at(ui.max_rect());
 
                     // const STRIDE: u32 = 1;
                     for (rect, pixel) in camera_map.pixels(self.stride) {
-                        let color = self.tree.color(pixel).unwrap_or(Color32::MAGENTA);
+                        let color = self.tree.color(pixel).build().unwrap_or(Color32::MAGENTA);
                         // .expect("tree invariant not satisfied");
 
                         painter.rect_filled(rect, 0.0, color);
                     }
                 }
 
-                // draw sequence of nodes that contain the mouse
-                {
-                    if let Some(mouse_pos) = ctx.input(|i| i.pointer.latest_pos()) {
-                        fn draw_node(
-                            node: &Tree,
-                            depth: u32,
-                            painter: &egui::Painter,
-                            camera_map: &CameraMap,
-                            real: f32,
-                            imag: f32,
-                        ) {
-                            // println!("here");
-                            painter.rect_stroke(
-                                camera_map.window_to_rect(node.window),
-                                0.0,
-                                egui::Stroke::new(
-                                    3.0,
-                                    // Color32::from_rgb(100, 100, 255u32.saturating_sub(5*depth) as u8),
-                                    // Color32::from_rgb(100, 100, {
-                                    //     let mut h = DefaultHasher::new();
-                                    //     depth.hash(&mut h);
-                                    //     h.finish() as u8
-                                    // }),
-                                    {
-                                        let mut h = DefaultHasher::new();
-                                        depth.hash(&mut h);
-                                        let hash = h.finish();
-                                        Color32::from_rgb(
-                                            (hash >> 24) as u8,
-                                            (hash >> 16) as u8,
-                                            (hash >> 8) as u8,
-                                        )
-                                    },
-                                ),
-                                egui::StrokeKind::Inside,
-                            );
-                            let Some(children) = &node.children else {
-                                return;
-                            };
-                            for child in children {
-                                if child.window.contains(real, imag) {
-                                    draw_node(child, depth + 1, painter, camera_map, real, imag);
-                                }
-                            }
-                        }
-                        let (real, imag) = camera_map.pos_to_complex(mouse_pos);
+                // // draw sequence of nodes that contain the mouse
+                // {
+                //     if let Some(mouse_pos) = ctx.input(|i| i.pointer.latest_pos()) {
+                //         fn draw_node(
+                //             node: &Tree,
+                //             depth: u32,
+                //             painter: &egui::Painter,
+                //             camera_map: &CameraMap,
+                //             real: f32,
+                //             imag: f32,
+                //         ) {
+                //             // println!("here");
+                //             painter.rect_stroke(
+                //                 camera_map.window_to_rect(node.window),
+                //                 0.0,
+                //                 egui::Stroke::new(
+                //                     3.0,
+                //                     // Color32::from_rgb(100, 100, 255u32.saturating_sub(5*depth) as u8),
+                //                     // Color32::from_rgb(100, 100, {
+                //                     //     let mut h = DefaultHasher::new();
+                //                     //     depth.hash(&mut h);
+                //                     //     h.finish() as u8
+                //                     // }),
+                //                     {
+                //                         let mut h = DefaultHasher::new();
+                //                         depth.hash(&mut h);
+                //                         let hash = h.finish();
+                //                         Color32::from_rgb(
+                //                             (hash >> 24) as u8,
+                //                             (hash >> 16) as u8,
+                //                             (hash >> 8) as u8,
+                //                         )
+                //                     },
+                //                 ),
+                //                 egui::StrokeKind::Inside,
+                //             );
+                //             let Some(children) = &node.children else {
+                //                 return;
+                //             };
+                //             for child in children {
+                //                 if child.window.contains(real, imag) {
+                //                     draw_node(child, depth + 1, painter, camera_map, real, imag);
+                //                 }
+                //             }
+                //         }
+                //         let (real, imag) = camera_map.pos_to_complex(mouse_pos);
 
-                        draw_node(
-                            &self.tree,
-                            0,
-                            &ui.painter_at(ui.max_rect()),
-                            &camera_map,
-                            real,
-                            imag,
-                        );
-                        // panic!();
-                    }
-                }
+                //         draw_node(
+                //             &self.tree,
+                //             0,
+                //             &ui.painter_at(ui.max_rect()),
+                //             &camera_map,
+                //             real,
+                //             imag,
+                //         );
+                //         // panic!();
+                //     }
+                // }
+
+                // TODO: debug draw sequence of nodes that eventually have a child who's sample is inside the pixel the mouse is in
+
+                // // debug coloring of how many samples are inside each pixel
+                // {
+                //     let painter = ui.painter_at(ui.max_rect());
+                //     for (rect, pixel) in camera_map.pixels(self.stride) {
+                //         // let color = self.tree.color(pixel).unwrap_or(Color32::MAGENTA);
+                //         let count = self.tree.count_samples_strong(pixel);
+                //         painter.rect_filled(
+                //             rect,
+                //             0.0,
+                //             if count == 0 {
+                //                 Color32::MAGENTA
+                //             } else {
+                //                 Color32::from_gray((count * 50).min(255) as u8)
+                //             },
+                //         );
+                //     }
+                // }
 
                 // frame rate
                 {
