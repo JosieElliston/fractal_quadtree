@@ -18,7 +18,6 @@ fn main() -> eframe::Result {
     // std::env::set_var("RUST_BACKTRACE", "1");
     // env_logger::init();
 
-
     // bench();
     // panic!();
 
@@ -716,6 +715,7 @@ impl Tree {
     }
 
     /// whether the pixel contains any samples
+    #[inline(never)]
     fn contains_sample(&self, pixel: Square) -> bool {
         if !self.dom.overlaps(pixel) {
             return false;
@@ -1048,9 +1048,9 @@ impl eframe::App for App {
                     let start = Instant::now();
                     let mut rng = rand::rng();
 
-                    let hi_stride_pow = (ui.max_rect().width() as u32).ilog2();
-                    let lo_stride_pow = self.stride.ilog2();
-                    'outer: for stride_pow in (lo_stride_pow..hi_stride_pow).rev() {
+                    'outer: for stride_pow in
+                        (self.stride.ilog2()..(ui.max_rect().width() as u32).ilog2()).rev()
+                    {
                         let stride = 1 << stride_pow;
 
                         let pixels = {
@@ -1096,9 +1096,25 @@ impl eframe::App for App {
 
                     painter.rect_filled(ui.max_rect(), 0.0, Color32::RED);
 
-                    let hi_stride_pow = (ui.max_rect().width() as u32).ilog2();
-                    let lo_stride_pow = self.stride.ilog2();
-                    for stride_pow in (lo_stride_pow..hi_stride_pow).rev() {
+                    // don't draw pixels that will be completely overdrawn in the future
+                    let stride_pow_hi = {
+                        || {
+                            for stride_pow in
+                                (self.stride.ilog2()..(ui.max_rect().width() as u32).ilog2()).rev()
+                            {
+                                let stride = 1 << stride_pow;
+                                for (_, pixel) in camera_map.pixels(stride) {
+                                    if !self.tree.contains_sample(pixel) {
+                                        return stride_pow + 1;
+                                    }
+                                }
+                            }
+                            // idk why this need + 1
+                            self.stride.ilog2() + 1
+                        }
+                    }();
+
+                    for stride_pow in (self.stride.ilog2()..=stride_pow_hi).rev() {
                         let stride = 1 << stride_pow;
                         for (rect, pixel) in camera_map.pixels(stride) {
                             if let Some(color) = self.tree.color(pixel).build() {
