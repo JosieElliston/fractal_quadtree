@@ -1,8 +1,15 @@
+#![feature(portable_simd)]
+
 use std::{
     cmp::Ordering,
     hint::black_box,
     iter::Sum,
     ops::{Add, AddAssign},
+    simd::{
+        Mask, Simd,
+        cmp::{SimdPartialEq, SimdPartialOrd},
+        num::SimdFloat,
+    },
     time::{Duration, Instant},
 };
 
@@ -311,6 +318,7 @@ impl CameraMap {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[repr(align(32))]
 struct Window {
     real_lo: f32,
     real_hi: f32,
@@ -400,14 +408,16 @@ impl PartialOrd for Window {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[repr(align(32))]
+#[repr(C)]
 struct Square {
-    // real_lo: f32,
-    // real_hi: f32,
-    // imag_lo: f32,
-    // imag_hi: f32,
-    real_mid: f32,
-    imag_mid: f32,
-    rad: f32,
+    real_lo: f32,
+    imag_lo: f32,
+    real_hi: f32,
+    imag_hi: f32,
+    // real_mid: f32,
+    // imag_mid: f32,
+    // rad: f32,
 }
 impl Square {
     // fn new(real_lo: f32, real_hi: f32, imag_lo: f32, imag_hi: f32) -> Self {
@@ -437,49 +447,53 @@ impl Square {
         }) {
             None
         } else {
-            // Some(Self {
-            //     real_lo,
-            //     real_hi,
-            //     imag_lo,
-            //     imag_hi,
-            // })
             Some(Self {
-                real_mid: (real_lo + real_hi) / 2.0,
-                imag_mid: (imag_lo + imag_hi) / 2.0,
-                rad: (real_hi - real_lo) / 2.0,
+                real_lo,
+                real_hi,
+                imag_lo,
+                imag_hi,
             })
+            // Some(Self {
+            //     real_mid: (real_lo + real_hi) / 2.0,
+            //     imag_mid: (imag_lo + imag_hi) / 2.0,
+            //     rad: (real_hi - real_lo) / 2.0,
+            // })
         }
     }
 
     fn real_mid(self) -> f32 {
-        // (self.real_hi + self.real_lo) / 2.0
-        self.real_mid
+        (self.real_hi + self.real_lo) / 2.0
+        // self.real_mid
     }
 
     fn imag_mid(self) -> f32 {
-        // (self.imag_hi + self.imag_lo) / 2.0
-        self.imag_mid
+        (self.imag_hi + self.imag_lo) / 2.0
+        // self.imag_mid
     }
 
     fn rad(self) -> f32 {
-        // (self.real_hi - self.real_lo) / 2.0
-        self.rad
+        (self.real_hi - self.real_lo) / 2.0
+        // self.rad
     }
 
     fn real_lo(self) -> f32 {
-        self.real_mid - self.rad
+        self.real_lo
+        // self.real_mid - self.rad
     }
 
     fn real_hi(self) -> f32 {
-        self.real_mid + self.rad
+        self.real_hi
+        // self.real_mid + self.rad
     }
 
     fn imag_lo(self) -> f32 {
-        self.imag_mid - self.rad
+        self.imag_lo
+        // self.imag_mid - self.rad
     }
 
     fn imag_hi(self) -> f32 {
-        self.imag_mid + self.rad
+        self.imag_hi
+        // self.imag_mid + self.rad
     }
 
     // fn area(self) -> f32 {
@@ -492,39 +506,50 @@ impl Square {
     // }
     // #[inline(never)]
     fn contains(self, real: f32, imag: f32) -> bool {
-        // (self.real_lo..=self.real_hi).contains(&real)
-        //     && (self.imag_lo..=self.imag_hi).contains(&imag)
-        (self.real_mid - real).abs() <= self.rad && (self.imag_mid - imag).abs() <= self.rad
-    }
-
-    // fn intersect(self, other: Self) -> Option<Window> {
-    //     todo!()
-    // }
-
-    // // TODO: optimize
-    // fn debug_overlaps(self, other: Self) -> bool {
-    //     // self.intersect(other).is_some()
-    //     self.contains(other.real_lo, other.imag_lo)
-    //         || self.contains(other.real_lo, other.imag_hi)
-    //         || self.contains(other.real_hi, other.imag_lo)
-    //         || self.contains(other.real_hi, other.imag_hi)
-    //         || other.contains(self.real_lo, self.imag_lo)
-    //         || other.contains(self.real_lo, self.imag_hi)
-    //         || other.contains(self.real_hi, self.imag_lo)
-    //         || other.contains(self.real_hi, self.imag_hi)
-    // }
-
-    fn overlaps(self, other: Self) -> bool {
-        ((self.real_mid() - other.real_mid()).abs() <= (self.rad() + other.rad()))
-            && ((self.imag_mid() - other.imag_mid()).abs() <= (self.rad() + other.rad()))
+        (self.real_lo..=self.real_hi).contains(&real)
+            && (self.imag_lo..=self.imag_hi).contains(&imag)
+        // (self.real_mid() - real).abs() <= self.rad() && (self.imag_mid() - imag).abs() <= self.rad()
+        // f32::max(
+        //     (self.real_mid() - real).abs(),
+        //     (self.imag_mid() - imag).abs(),
+        // ) <= self.rad()
     }
 
     // #[inline(never)]
     // fn overlaps(self, other: Self) -> bool {
-    //     !(self.real_hi < other.real_lo
-    //         || other.real_hi < self.real_lo
-    //         || self.imag_hi < other.imag_lo
-    //         || other.imag_hi < self.imag_lo)
+    //     ((self.real_mid() - other.real_mid()).abs() <= (self.rad() + other.rad()))
+    //         && ((self.imag_mid() - other.imag_mid()).abs() <= (self.rad() + other.rad()))
+    //     // f32::max(
+    //     //     (self.real_mid() - other.real_mid()).abs(),
+    //     //     (self.imag_mid() - other.imag_mid()).abs(),
+    //     // ) <= self.rad() + other.rad()
+    // }
+
+    fn overlaps(self, other: Self) -> bool {
+        let real_lo = f32::max(self.real_lo(), other.real_lo());
+        let real_hi = f32::min(self.real_hi(), other.real_hi());
+        let imag_lo = f32::max(self.imag_lo(), other.imag_lo());
+        let imag_hi = f32::min(self.imag_hi(), other.imag_hi());
+        real_lo <= real_hi && imag_lo <= imag_hi
+    }
+
+    // #[inline(never)]
+    // fn overlaps(self, other: Self) -> bool {
+    //     let self_lo: Simd<f32, 2> = [self.real_lo(), self.imag_lo()].into();
+    //     let self_hi: Simd<f32, 2> = [self.real_hi(), self.imag_hi()].into();
+    //     let other_lo: Simd<f32, 2> = [other.real_lo(), other.imag_lo()].into();
+    //     let other_hi: Simd<f32, 2> = [other.real_hi(), other.imag_hi()].into();
+    //     let max = self_lo.simd_max(other_lo);
+    //     let min = self_hi.simd_min(other_hi);
+    //     max.simd_gt(min) == Mask::from_bitmask(0)
+    // }
+
+    // #[inline(never)]
+    // fn overlaps(self, other: Self) -> bool {
+    //     !(self.real_hi() < other.real_lo()
+    //         || other.real_hi() < self.real_lo()
+    //         || self.imag_hi() < other.imag_lo()
+    //         || other.imag_hi() < self.imag_lo())
     // }
 }
 impl PartialOrd for Square {
@@ -535,6 +560,7 @@ impl PartialOrd for Square {
 
 /// represents the average of `count` colors
 #[derive(Debug, Default)]
+#[repr(align(32))]
 struct ColorBuilder {
     // count: NonZero<u32>,
     count: u32,
