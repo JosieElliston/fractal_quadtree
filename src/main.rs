@@ -40,11 +40,11 @@ fn bench() {
         Rect::from_min_size(Pos2::ZERO, Vec2::new(600.0, 400.0)),
         camera,
     );
-    for (_, pixel) in camera_map.pixels(stride) {
+    for (_, _, pixel) in camera_map.pixels(stride) {
         tree.ensure_pixel_safe(pixel);
     }
     for _ in 0..600 {
-        for (_, pixel) in camera_map.pixels(stride) {
+        for (_, _, pixel) in camera_map.pixels(stride) {
             black_box(tree.color_in_pixel(pixel));
         }
     }
@@ -287,7 +287,16 @@ impl CameraMap {
         }
     }
 
-    fn pixels(&self, stride: usize) -> impl Iterator<Item = (Rect, Square)> {
+    fn rect_to_window(&self, rect: Rect) -> Window {
+        Window::new(
+            self.x_to_real(rect.min.x),
+            self.x_to_real(rect.max.x),
+            self.y_to_imag(rect.max.y),
+            self.y_to_imag(rect.min.y),
+        )
+    }
+
+    fn pixels(&self, stride: usize) -> impl Iterator<Item = ((usize, usize), Rect, Square)> {
         (0..self.rect.size().y as usize)
             .step_by(stride)
             .flat_map(move |row| {
@@ -295,6 +304,7 @@ impl CameraMap {
                     .step_by(stride)
                     .filter_map(move |col| {
                         Some((
+                            (row / stride, col / stride),
                             Rect::from_min_size(
                                 Pos2::new(col as f32, row as f32),
                                 Vec2::new(stride as f32, stride as f32),
@@ -355,18 +365,26 @@ impl Window {
         (self.real_hi - self.real_lo) * (self.imag_hi - self.imag_lo)
     }
 
-    fn intersect(self, other: impl Into<Self>) -> Option<Self> {
-        todo!()
-    }
+    // fn intersect(self, other: impl Into<Self>) -> Option<Self> {
+    //     todo!()
+    // }
 
+    // fn overlaps(self, other: impl Into<Self>) -> bool {
+    //     self.intersect(other).is_some()
+    // }
     fn overlaps(self, other: impl Into<Self>) -> bool {
-        self.intersect(other).is_some()
+        let other = other.into();
+        let real_lo = f32::max(self.real_lo, other.real_lo);
+        let real_hi = f32::min(self.real_hi, other.real_hi);
+        let imag_lo = f32::max(self.imag_lo, other.imag_lo);
+        let imag_hi = f32::min(self.imag_hi, other.imag_hi);
+        real_lo <= real_hi && imag_lo <= imag_hi
     }
 
-    fn contains(self, other: impl Into<Self>) -> bool {
-        let other = other.into();
-        self.intersect(other) == Some(other)
-    }
+    // fn contains(self, other: impl Into<Self>) -> bool {
+    //     let other = other.into();
+    //     self.intersect(other) == Some(other)
+    // }
 }
 impl From<Square> for Window {
     fn from(value: Square) -> Self {
@@ -492,6 +510,17 @@ impl Square {
         // ) <= self.rad()
     }
 
+    fn approx_contains_point(self, real: f32, imag: f32) -> bool {
+        // (self.real_lo..=self.real_hi).contains(&real)
+        //     && (self.imag_lo..=self.imag_hi).contains(&imag)
+        (self.real_mid() - real).abs() <= self.rad() + 1e-4
+            && (self.imag_mid() - imag).abs() <= self.rad() + 1e-4
+        // f32::max(
+        //     (self.real_mid() - real).abs(),
+        //     (self.imag_mid() - imag).abs(),
+        // ) <= self.rad()
+    }
+
     fn contains_square(self, other: Square) -> bool {
         f32::max(
             (self.real_mid() - other.real_mid()).abs(),
@@ -543,7 +572,7 @@ impl PartialOrd for Square {
 }
 
 /// represents the average of `count` colors
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 #[repr(align(32))]
 struct ColorBuilder {
     // count: NonZero<u32>,
@@ -1027,6 +1056,119 @@ impl Tree {
         })
     }
 
+    #[inline(never)]
+    fn color_in_pixels(
+        &self,
+        window: Window,
+        pixel_rad: f32,
+        debug_camera_map: &CameraMap,
+        debug_stride: usize,
+    ) -> Vec<Vec<ColorBuilder>> {
+        fn update(
+            node: &Tree,
+            window: Window,
+            pixel_rad: f32,
+            ret: &mut [Vec<ColorBuilder>],
+            debug_camera_map: &CameraMap,
+            debug_stride: usize,
+        ) {
+            // TODO: maybe remove this check
+            if !window.overlaps(node.dom) {
+                return;
+            }
+            // let pixel_of_index = |row: usize, col: usize| {};
+
+            // let row = ret.len() as f32
+            //     * (1.0 - inv_lerp(window.imag_lo, window.imag_hi, node.dom.imag_mid()));
+            // let col =
+            //     ret[0].len() as f32 * inv_lerp(window.real_lo, window.real_hi, node.dom.real_mid());
+            let row = (window.imag_rad() / pixel_rad)
+                * (1.0 - inv_lerp(window.imag_lo, window.imag_hi, node.dom.imag_mid()));
+            let col = (window.real_rad() / pixel_rad)
+                * inv_lerp(window.real_lo, window.real_hi, node.dom.real_mid());
+
+            // if (0.0..ret.len() as f32).contains(&row) && (0.0..ret[0].len() as f32).contains(&col) {
+            //     let ((oracle_row, oracle_col), _, _oracle_pixel) = {
+            //         debug_camera_map
+            //             .pixels(debug_stride)
+            //             .find(|((_row, _col), _, pixel)| {
+            //                 pixel.approx_contains_point(node.dom.real_mid(), node.dom.imag_mid())
+            //             })
+            //             .unwrap()
+            //     };
+            //     assert_eq!(oracle_row, row as usize);
+            //     assert_eq!(oracle_col, col as usize);
+            // }
+            for r in [
+                Some(row.floor()),
+                // if row.fract() <= row * 1e-4 {
+                if row.fract() == 0.0 {
+                    // Some(row.floor() + 1.0)
+                    Some(row + 1.0)
+                } else {
+                    None
+                },
+            ]
+            .iter()
+            .flatten()
+            {
+                for c in [
+                    Some(col.floor()),
+                    // if col.fract().abs() <= col * 1e-4 {
+                    if col.fract() == 0.0 {
+                        // Some(col.floor() + 1.0)
+                        Some(col + 1.0)
+                    } else {
+                        None
+                    },
+                ]
+                .iter()
+                .flatten()
+                {
+                    if let Some(e) = ret
+                        .get_mut(*r as usize)
+                        .and_then(|line| line.get_mut(*c as usize))
+                    {
+                        *e += node.color.into();
+                    }
+                }
+            }
+            // if let Some(e) = ret
+            //     .get_mut(row.floor() as usize)
+            //     .and_then(|line| line.get_mut(col.floor() as usize))
+            // {
+            //     *e += node.color.into();
+            // }
+            if let Some(children) = &node.children {
+                for c in children {
+                    update(c, window, pixel_rad, ret, debug_camera_map, debug_stride);
+                }
+            };
+        }
+
+        // ((row, col), rect, pixel) in camera_map.pixels(stride)
+        let width = (window.real_rad() / pixel_rad).ceil();
+        let height = (window.imag_rad() / pixel_rad).ceil();
+        // let width = (window.real_rad() / pixel_rad).floor();
+        // let height = (window.imag_rad() / pixel_rad).floor();
+        let mut ret: Vec<Vec<ColorBuilder>> = (0..height as usize)
+            .map(|_| {
+                (0..width as usize)
+                    .map(|_| ColorBuilder::default())
+                    .collect()
+            })
+            .collect();
+        update(
+            self,
+            window,
+            pixel_rad,
+            &mut ret,
+            debug_camera_map,
+            debug_stride,
+        );
+        ret
+    }
+
     // #[inline(never)]
     // fn color(&self, pixel: Square) -> ColorBuilder {
     //     let mut stack = Vec::with_capacity(64);
@@ -1072,7 +1214,7 @@ impl App {
     fn new(_cc: &eframe::CreationContext<'_>) -> Self {
         Self {
             tree: Tree::new_leaf(Square::try_new(-4.0, 4.0, -4.0, 4.0).unwrap()),
-            stride: 2,
+            stride: 1,
             camera: Camera::new(0.0, 0.0, 2.0),
             velocity: Vec2::ZERO,
             dts: egui::util::History::new(1..100, 0.1),
@@ -1172,7 +1314,7 @@ impl eframe::App for App {
                         let pixels = {
                             let mut pixels = camera_map
                                 .pixels(stride)
-                                .map(|(_, pixel)| pixel)
+                                .map(|(_, _, pixel)| pixel)
                                 .filter(|pixel| !self.tree.contains_sample(*pixel))
                                 .collect::<Vec<_>>();
                             pixels.shuffle(&mut rng);
@@ -1219,7 +1361,7 @@ impl eframe::App for App {
                                 (self.stride.ilog2()..(ui.max_rect().width() as u32).ilog2()).rev()
                             {
                                 let stride = 1 << stride_pow;
-                                for (_, pixel) in camera_map.pixels(stride) {
+                                for (_, _, pixel) in camera_map.pixels(stride) {
                                     if !self.tree.contains_sample(pixel) {
                                         // +2 instead of +1 to fix a weird bug
                                         return stride_pow + 2;
@@ -1231,11 +1373,74 @@ impl eframe::App for App {
                         }
                     }();
 
+                    // for stride_pow in (self.stride.ilog2()..=stride_pow_hi).rev() {
+                    //     let stride = 1 << stride_pow;
+                    //     for (_, rect, pixel) in camera_map.pixels(stride) {
+                    //         if let Some(color) = self.tree.color_in_pixel(pixel).build() {
+                    //             painter.rect_filled(rect, 0.0, color);
+                    //         }
+                    //     }
+                    // }
+
+                    // for stride_pow in [1] {
                     for stride_pow in (self.stride.ilog2()..=stride_pow_hi).rev() {
                         let stride = 1 << stride_pow;
-                        for (rect, pixel) in camera_map.pixels(stride) {
-                            if let Some(color) = self.tree.color_in_pixel(pixel).build() {
+                        assert_eq!(camera_map.rect.min, Pos2::ZERO);
+                        // let pow_2_camera_map = CameraMap::new(
+                        //     Rect {
+                        //         min: Pos2::ZERO,
+                        //         max: Pos2 {
+                        //             x: (1 << (camera_map.rect.max.x as i32).ilog2()) as f32,
+                        //             y: (1 << (camera_map.rect.max.y as i32).ilog2()) as f32,
+                        //         },
+                        //     },
+                        //     camera_map.camera,
+                        // );
+                        // let colors = self.tree.color_in_pixels(
+                        //     pow_2_camera_map.rect_to_window(pow_2_camera_map.rect),
+                        //     (pow_2_camera_map.x_to_real(stride as f32)
+                        //         - pow_2_camera_map.x_to_real(0.0))
+                        //         / 2.0,
+                        // );
+
+                        let colors = self.tree.color_in_pixels(
+                            camera_map.rect_to_window(camera_map.rect),
+                            (camera_map.x_to_real(stride as f32) - camera_map.x_to_real(0.0)) / 2.0,
+                            &camera_map,
+                            stride,
+                        );
+                        for ((row, col), rect, pixel) in camera_map.pixels(stride) {
+                            // for ((row, col), rect, pixel) in pow_2_camera_map.pixels(stride) {
+                            // if let Some(color) = colors[row][col].clone().build() {
+                            //     painter.rect_filled(rect, 0.0, color);
+                            // }
+                            // {
+                            //     let rad = pixel.rad();
+                            //     let actual = (camera_map.x_to_real(stride as f32)
+                            //         - camera_map.x_to_real(0.0))
+                            //         / 2.0;
+                            //     assert!((rad - actual).abs() < 1e-6);
+                            // }
+                            if let Some(color) = colors
+                                .get(row)
+                                .and_then(|line| line.get(col))
+                                .and_then(|c| c.clone().build())
+                            {
+                                // println!("here");
+                                // let Some(oracle) = self.tree.color_in_pixel(pixel).build() else {
+                                //     panic!()
+                                // };
+                                // assert_eq!(oracle, color);
                                 painter.rect_filled(rect, 0.0, color);
+                            } else if let Some(color) = self.tree.color_in_pixel(pixel).build() {
+                                // painter.rect_filled(rect, 0.0, color);
+                                painter.rect_filled(rect, 0.0, Color32::GREEN);
+                                // painter.rect_stroke(
+                                //     rect,
+                                //     0.0,
+                                //     egui::Stroke::new(0.5, Color32::MAGENTA),
+                                //     egui::StrokeKind::Middle,
+                                // );
                             }
                         }
                     }
@@ -1431,5 +1636,14 @@ mod tests {
             let actual = camera_map.pos_to_complex(camera_map.complex_to_pos(c));
             assert!((c.0 - actual.0).abs() + (c.1 - actual.1).abs() < 1e-4);
         }
+
+        let window = Window::new(
+            camera_map.camera.real_lo(),
+            camera_map.camera.real_hi(),
+            camera_map.imag_lo(),
+            camera_map.imag_hi(),
+        );
+        assert_eq!(camera_map.rect, camera_map.window_to_rect(window));
+        assert_eq!(window, camera_map.rect_to_window(rect));
     }
 }
