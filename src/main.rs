@@ -1,15 +1,8 @@
-#![feature(portable_simd)]
-
 use std::{
     cmp::Ordering,
     hint::black_box,
     iter::Sum,
     ops::{Add, AddAssign},
-    simd::{
-        Mask, Simd,
-        cmp::{SimdPartialEq, SimdPartialOrd},
-        num::SimdFloat,
-    },
     time::{Duration, Instant},
 };
 
@@ -17,6 +10,7 @@ use eframe::egui::{self, Color32, Key, Pos2, Rect, RichText, Vec2};
 use rand::seq::SliceRandom;
 
 use mimalloc::MiMalloc;
+use rayon::prelude::*;
 
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
@@ -25,8 +19,8 @@ fn main() -> eframe::Result {
     // std::env::set_var("RUST_BACKTRACE", "1");
     // env_logger::init();
 
-    bench();
-    panic!();
+    // bench();
+    // panic!();
 
     let native_options = eframe::NativeOptions::default();
 
@@ -608,6 +602,46 @@ impl Sum for ColorBuilder {
     }
 }
 
+// #[derive(Debug, Default, Clone, Copy)]
+// struct Trace {
+//     depth: u8,
+//     real_bits: u64,
+//     imag_bits: u64,
+// }
+// impl Trace {
+//     fn top_right(self) -> Self {
+//         Self {
+//             depth: self.depth + 1,
+//             real_bits: self.real_bits << 1,
+//             imag_bits: self.imag_bits << 1,
+//         }
+//     }
+
+//     fn top_left(self) -> Self {
+//         Self {
+//             depth: self.depth + 1,
+//             real_bits: self.real_bits << 1 | 1,
+//             imag_bits: self.imag_bits << 1,
+//         }
+//     }
+
+//     fn bot_right(self) -> Self {
+//         Self {
+//             depth: self.depth + 1,
+//             real_bits: self.real_bits << 1,
+//             imag_bits: self.imag_bits << 1 | 1,
+//         }
+//     }
+
+//     fn bot_left(self) -> Self {
+//         Self {
+//             depth: self.depth + 1,
+//             real_bits: self.real_bits << 1 | 1,
+//             imag_bits: self.imag_bits << 1 | 1,
+//         }
+//     }
+// }
+
 #[derive(Debug)]
 struct Tree {
     dom: Square,
@@ -648,38 +682,81 @@ impl Tree {
         )
     }
 
+    // fn split(&mut self) {
+    //     if let Some(children) = {
+    //         || {
+    //             Some([
+    //                 Box::new(Self::new_leaf(Square::try_new(
+    //                     self.dom.real_lo(),
+    //                     self.dom.real_mid(),
+    //                     self.dom.imag_mid(),
+    //                     self.dom.imag_hi(),
+    //                 )?)),
+    //                 Box::new(Self::new_leaf(Square::try_new(
+    //                     self.dom.real_mid(),
+    //                     self.dom.real_hi(),
+    //                     self.dom.imag_mid(),
+    //                     self.dom.imag_hi(),
+    //                 )?)),
+    //                 Box::new(Self::new_leaf(Square::try_new(
+    //                     self.dom.real_lo(),
+    //                     self.dom.real_mid(),
+    //                     self.dom.imag_lo(),
+    //                     self.dom.imag_mid(),
+    //                 )?)),
+    //                 Box::new(Self::new_leaf(Square::try_new(
+    //                     self.dom.real_mid(),
+    //                     self.dom.real_hi(),
+    //                     self.dom.imag_lo(),
+    //                     self.dom.imag_mid(),
+    //                 )?)),
+    //             ])
+    //         }
+    //     }() {
+    //         self.children = Some(children);
+    //     }
+    // }
+
+    // compute the samples for the four children in parallel
     fn split(&mut self) {
-        if let Some(children) = {
+        if let Some(squares) = {
             || {
                 Some([
-                    Box::new(Self::new_leaf(Square::try_new(
+                    Square::try_new(
                         self.dom.real_lo(),
                         self.dom.real_mid(),
                         self.dom.imag_mid(),
                         self.dom.imag_hi(),
-                    )?)),
-                    Box::new(Self::new_leaf(Square::try_new(
+                    )?,
+                    Square::try_new(
                         self.dom.real_mid(),
                         self.dom.real_hi(),
                         self.dom.imag_mid(),
                         self.dom.imag_hi(),
-                    )?)),
-                    Box::new(Self::new_leaf(Square::try_new(
+                    )?,
+                    Square::try_new(
                         self.dom.real_lo(),
                         self.dom.real_mid(),
                         self.dom.imag_lo(),
                         self.dom.imag_mid(),
-                    )?)),
-                    Box::new(Self::new_leaf(Square::try_new(
+                    )?,
+                    Square::try_new(
                         self.dom.real_mid(),
                         self.dom.real_hi(),
                         self.dom.imag_lo(),
                         self.dom.imag_mid(),
-                    )?)),
+                    )?,
                 ])
             }
         }() {
-            self.children = Some(children);
+            self.children = Some(
+                squares
+                    .into_par_iter()
+                    .map(|square| Box::new(Self::new_leaf(square)))
+                    .collect::<Vec<_>>()
+                    .try_into()
+                    .unwrap(),
+            );
         }
     }
 
@@ -921,35 +998,18 @@ impl Tree {
             }
     }
 
-    /// the color of the first node who's sample is inside the pixel
+    /// average color of samples inside the pixel
     #[inline(never)]
     fn color_in_pixel(&self, pixel: Square) -> ColorBuilder {
-        // let (d_min, d_max) = {
-        //     let real_dist = (self.dom.real_mid() - pixel.real_mid()).abs();
-        //     let imag_dist = (self.dom.imag_mid() - pixel.imag_mid()).abs();
-        //     (
-        //         f32::min(real_dist, imag_dist),
-        //         f32::max(real_dist, imag_dist),
-        //     )
-        // };
         let d = f32::max(
             (self.dom.real_mid() - pixel.real_mid()).abs(),
             (self.dom.imag_mid() - pixel.imag_mid()).abs(),
         );
         // if !self.dom.overlaps(pixel) {
-        //     return ColorBuilder::default();
-        // }
-        // assert_eq!(d > self.dom.rad() + pixel.rad(), !self.dom.overlaps(pixel));
         if d > self.dom.rad() + pixel.rad() {
             return ColorBuilder::default();
         }
         // (if pixel.contains_point(self.dom.real_mid(), self.dom.imag_mid()) {
-        // if (d - pixel.rad()).abs() > 1e-6 {
-        //     assert_eq!(
-        //         d <= pixel.rad(),
-        //         pixel.contains_point(self.dom.real_mid(), self.dom.imag_mid())
-        //     );
-        // }
         (if d <= pixel.rad() {
             self.color.into()
         } else {
@@ -957,10 +1017,6 @@ impl Tree {
         } + match &self.children {
             Some(children) => {
                 // if pixel.contains_square(self.dom) {
-                // assert_eq!(
-                //     d <= pixel.rad() - self.dom.rad(),
-                //     pixel.contains_square(self.dom)
-                // );
                 if d <= pixel.rad() - self.dom.rad() {
                     children.iter().map(|c| c.color()).sum()
                 } else {
@@ -970,6 +1026,7 @@ impl Tree {
             None => ColorBuilder::default(),
         })
     }
+
     // #[inline(never)]
     // fn color(&self, pixel: Square) -> ColorBuilder {
     //     let mut stack = Vec::with_capacity(64);
