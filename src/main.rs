@@ -25,8 +25,8 @@ fn main() -> eframe::Result {
     // std::env::set_var("RUST_BACKTRACE", "1");
     // env_logger::init();
 
-    // bench();
-    // panic!();
+    bench();
+    panic!();
 
     let native_options = eframe::NativeOptions::default();
 
@@ -51,7 +51,7 @@ fn bench() {
     }
     for _ in 0..600 {
         for (_, pixel) in camera_map.pixels(stride) {
-            black_box(tree.color(pixel));
+            black_box(tree.color_in_pixel(pixel));
         }
     }
     black_box(tree);
@@ -411,32 +411,15 @@ impl PartialOrd for Window {
 #[repr(align(32))]
 #[repr(C)]
 struct Square {
-    real_lo: f32,
-    imag_lo: f32,
-    real_hi: f32,
-    imag_hi: f32,
-    // real_mid: f32,
-    // imag_mid: f32,
-    // rad: f32,
+    // real_lo: f32,
+    // imag_lo: f32,
+    // real_hi: f32,
+    // imag_hi: f32,
+    real_mid: f32,
+    imag_mid: f32,
+    rad: f32,
 }
 impl Square {
-    // fn new(real_lo: f32, real_hi: f32, imag_lo: f32, imag_hi: f32) -> Self {
-    //     assert!(real_lo < real_hi);
-    //     assert!(imag_lo < imag_hi);
-    //     {
-    //         let dx = real_hi as f64 - real_lo as f64;
-    //         let dy = imag_hi as f64 - imag_lo as f64;
-    //         let diff = dx - dy;
-    //         let ratio = dx / dy;
-    //         assert!(diff.abs() < 1e-4 || (1.0 - ratio).abs() < 1e-4);
-    //     }
-    //     Self {
-    //         real_lo,
-    //         real_hi,
-    //         imag_lo,
-    //         imag_hi,
-    //     }
-    // }
     const fn try_new(real_lo: f32, real_hi: f32, imag_lo: f32, imag_hi: f32) -> Option<Self> {
         if !(real_lo < real_hi && imag_lo < imag_hi && {
             let dx = real_hi as f64 - real_lo as f64;
@@ -447,53 +430,53 @@ impl Square {
         }) {
             None
         } else {
-            Some(Self {
-                real_lo,
-                real_hi,
-                imag_lo,
-                imag_hi,
-            })
             // Some(Self {
-            //     real_mid: (real_lo + real_hi) / 2.0,
-            //     imag_mid: (imag_lo + imag_hi) / 2.0,
-            //     rad: (real_hi - real_lo) / 2.0,
+            //     real_lo,
+            //     real_hi,
+            //     imag_lo,
+            //     imag_hi,
             // })
+            Some(Self {
+                real_mid: (real_lo + real_hi) / 2.0,
+                imag_mid: (imag_lo + imag_hi) / 2.0,
+                rad: (real_hi - real_lo) / 2.0,
+            })
         }
     }
 
     fn real_mid(self) -> f32 {
-        (self.real_hi + self.real_lo) / 2.0
-        // self.real_mid
+        // (self.real_hi + self.real_lo) / 2.0
+        self.real_mid
     }
 
     fn imag_mid(self) -> f32 {
-        (self.imag_hi + self.imag_lo) / 2.0
-        // self.imag_mid
+        // (self.imag_hi + self.imag_lo) / 2.0
+        self.imag_mid
     }
 
     fn rad(self) -> f32 {
-        (self.real_hi - self.real_lo) / 2.0
-        // self.rad
+        // (self.real_hi - self.real_lo) / 2.0
+        self.rad
     }
 
     fn real_lo(self) -> f32 {
-        self.real_lo
-        // self.real_mid - self.rad
+        // self.real_lo
+        self.real_mid - self.rad
     }
 
     fn real_hi(self) -> f32 {
-        self.real_hi
-        // self.real_mid + self.rad
+        // self.real_hi
+        self.real_mid + self.rad
     }
 
     fn imag_lo(self) -> f32 {
-        self.imag_lo
-        // self.imag_mid - self.rad
+        // self.imag_lo
+        self.imag_mid - self.rad
     }
 
     fn imag_hi(self) -> f32 {
-        self.imag_hi
-        // self.imag_mid + self.rad
+        // self.imag_hi
+        self.imag_mid + self.rad
     }
 
     // fn area(self) -> f32 {
@@ -505,33 +488,40 @@ impl Square {
     //         && (self.imag_lo..=self.imag_hi).contains(&imag)
     // }
     // #[inline(never)]
-    fn contains(self, real: f32, imag: f32) -> bool {
-        (self.real_lo..=self.real_hi).contains(&real)
-            && (self.imag_lo..=self.imag_hi).contains(&imag)
-        // (self.real_mid() - real).abs() <= self.rad() && (self.imag_mid() - imag).abs() <= self.rad()
+    fn contains_point(self, real: f32, imag: f32) -> bool {
+        // (self.real_lo..=self.real_hi).contains(&real)
+        //     && (self.imag_lo..=self.imag_hi).contains(&imag)
+        (self.real_mid() - real).abs() <= self.rad() && (self.imag_mid() - imag).abs() <= self.rad()
         // f32::max(
         //     (self.real_mid() - real).abs(),
         //     (self.imag_mid() - imag).abs(),
         // ) <= self.rad()
     }
 
-    // #[inline(never)]
-    // fn overlaps(self, other: Self) -> bool {
-    //     ((self.real_mid() - other.real_mid()).abs() <= (self.rad() + other.rad()))
-    //         && ((self.imag_mid() - other.imag_mid()).abs() <= (self.rad() + other.rad()))
-    //     // f32::max(
-    //     //     (self.real_mid() - other.real_mid()).abs(),
-    //     //     (self.imag_mid() - other.imag_mid()).abs(),
-    //     // ) <= self.rad() + other.rad()
-    // }
-
-    fn overlaps(self, other: Self) -> bool {
-        let real_lo = f32::max(self.real_lo(), other.real_lo());
-        let real_hi = f32::min(self.real_hi(), other.real_hi());
-        let imag_lo = f32::max(self.imag_lo(), other.imag_lo());
-        let imag_hi = f32::min(self.imag_hi(), other.imag_hi());
-        real_lo <= real_hi && imag_lo <= imag_hi
+    fn contains_square(self, other: Square) -> bool {
+        f32::max(
+            (self.real_mid() - other.real_mid()).abs(),
+            (self.imag_mid() - other.imag_mid()).abs(),
+        ) <= self.rad() - other.rad()
     }
+
+    // #[inline(never)]
+    fn overlaps(self, other: Self) -> bool {
+        ((self.real_mid() - other.real_mid()).abs() <= (self.rad() + other.rad()))
+            && ((self.imag_mid() - other.imag_mid()).abs() <= (self.rad() + other.rad()))
+        // f32::max(
+        //     (self.real_mid() - other.real_mid()).abs(),
+        //     (self.imag_mid() - other.imag_mid()).abs(),
+        // ) <= self.rad() + other.rad()
+    }
+
+    // fn overlaps(self, other: Self) -> bool {
+    //     let real_lo = f32::max(self.real_lo(), other.real_lo());
+    //     let real_hi = f32::min(self.real_hi(), other.real_hi());
+    //     let imag_lo = f32::max(self.imag_lo(), other.imag_lo());
+    //     let imag_hi = f32::min(self.imag_hi(), other.imag_hi());
+    //     real_lo <= real_hi && imag_lo <= imag_hi
+    // }
 
     // #[inline(never)]
     // fn overlaps(self, other: Self) -> bool {
@@ -722,23 +712,23 @@ impl Tree {
     //     })
     // }
 
-    fn count_samples_strong(&self, pixel: Square) -> u32 {
-        if !self.dom.overlaps(pixel) {
-            return 0;
-        }
-        (if pixel.contains(self.dom.real_mid(), self.dom.imag_mid()) {
-            1
-        } else {
-            0
-        } + if self.is_leaf() {
-            0
-        } else {
-            let closest_child_i = self
-                .child_i_closest_to(pixel.real_mid(), pixel.imag_mid())
-                .unwrap();
-            self.children.as_ref().unwrap()[closest_child_i].count_samples_strong(pixel)
-        })
-    }
+    // fn count_samples_strong(&self, pixel: Square) -> u32 {
+    //     if !self.dom.overlaps(pixel) {
+    //         return 0;
+    //     }
+    //     (if pixel.contains_point(self.dom.real_mid(), self.dom.imag_mid()) {
+    //         1
+    //     } else {
+    //         0
+    //     } + if self.is_leaf() {
+    //         0
+    //     } else {
+    //         let closest_child_i = self
+    //             .child_i_closest_to(pixel.real_mid(), pixel.imag_mid())
+    //             .unwrap();
+    //         self.children.as_ref().unwrap()[closest_child_i].count_samples_strong(pixel)
+    //     })
+    // }
 
     /// whether the pixel contains any samples
     #[inline(never)]
@@ -746,7 +736,7 @@ impl Tree {
         if !self.dom.overlaps(pixel) {
             return false;
         }
-        if pixel.contains(self.dom.real_mid(), self.dom.imag_mid()) {
+        if pixel.contains_point(self.dom.real_mid(), self.dom.imag_mid()) {
             return true;
         }
         if self.is_leaf() {
@@ -845,7 +835,7 @@ impl Tree {
         if !self.dom.overlaps(pixel) {
             return;
         }
-        if pixel.contains(self.dom.real_mid(), self.dom.imag_mid()) {
+        if pixel.contains_point(self.dom.real_mid(), self.dom.imag_mid()) {
             return;
         }
         if self.is_leaf() {
@@ -922,40 +912,83 @@ impl Tree {
     //     self.children.as_ref().unwrap()[closest_child_i].color(pixel)
     // }
 
-    // TODO: average of all samples inside the pixel
-    /// the color of the first node who's sample is inside the pixel
-    // fn color(&self, pixel: Square) -> ColorBuilder {
-    //     if !self.dom.overlaps(pixel) {
-    //         return ColorBuilder::default();
-    //     }
-    //     (if pixel.contains(self.dom.real_mid(), self.dom.imag_mid()) {
-    //         self.color.into()
-    //     } else {
-    //         ColorBuilder::default()
-    //     } + match &self.children {
-    //         Some(children) => children.iter().map(|c| c.color(pixel)).sum(),
-    //         None => ColorBuilder::default(),
-    //     })
-    // }
     #[inline(never)]
-    fn color(&self, pixel: Square) -> ColorBuilder {
-        let mut stack = Vec::with_capacity(64);
-        stack.push(self);
-        let mut ret = ColorBuilder::default();
-        while let Some(node) = stack.pop() {
-            if !node.dom.overlaps(pixel) {
-                continue;
+    fn color(&self) -> ColorBuilder {
+        ColorBuilder::from(self.color)
+            + match &self.children {
+                Some(children) => children.iter().map(|c| c.color()).sum(),
+                None => ColorBuilder::default(),
             }
-            if pixel.contains(node.dom.real_mid(), node.dom.imag_mid()) {
-                ret += node.color.into();
-            }
-            if let Some(children) = &node.children {
-                stack.extend(children.iter().map(|c| c.as_ref()));
-            }
-        }
-        // assert_eq!(stack.capacity(), 64);
-        ret
     }
+
+    /// the color of the first node who's sample is inside the pixel
+    #[inline(never)]
+    fn color_in_pixel(&self, pixel: Square) -> ColorBuilder {
+        // let (d_min, d_max) = {
+        //     let real_dist = (self.dom.real_mid() - pixel.real_mid()).abs();
+        //     let imag_dist = (self.dom.imag_mid() - pixel.imag_mid()).abs();
+        //     (
+        //         f32::min(real_dist, imag_dist),
+        //         f32::max(real_dist, imag_dist),
+        //     )
+        // };
+        let d = f32::max(
+            (self.dom.real_mid() - pixel.real_mid()).abs(),
+            (self.dom.imag_mid() - pixel.imag_mid()).abs(),
+        );
+        // if !self.dom.overlaps(pixel) {
+        //     return ColorBuilder::default();
+        // }
+        // assert_eq!(d > self.dom.rad() + pixel.rad(), !self.dom.overlaps(pixel));
+        if d > self.dom.rad() + pixel.rad() {
+            return ColorBuilder::default();
+        }
+        // (if pixel.contains_point(self.dom.real_mid(), self.dom.imag_mid()) {
+        // if (d - pixel.rad()).abs() > 1e-6 {
+        //     assert_eq!(
+        //         d <= pixel.rad(),
+        //         pixel.contains_point(self.dom.real_mid(), self.dom.imag_mid())
+        //     );
+        // }
+        (if d <= pixel.rad() {
+            self.color.into()
+        } else {
+            ColorBuilder::default()
+        } + match &self.children {
+            Some(children) => {
+                // if pixel.contains_square(self.dom) {
+                // assert_eq!(
+                //     d <= pixel.rad() - self.dom.rad(),
+                //     pixel.contains_square(self.dom)
+                // );
+                if d <= pixel.rad() - self.dom.rad() {
+                    children.iter().map(|c| c.color()).sum()
+                } else {
+                    children.iter().map(|c| c.color_in_pixel(pixel)).sum()
+                }
+            }
+            None => ColorBuilder::default(),
+        })
+    }
+    // #[inline(never)]
+    // fn color(&self, pixel: Square) -> ColorBuilder {
+    //     let mut stack = Vec::with_capacity(64);
+    //     stack.push(self);
+    //     let mut ret = ColorBuilder::default();
+    //     while let Some(node) = stack.pop() {
+    //         if !node.dom.overlaps(pixel) {
+    //             continue;
+    //         }
+    //         if pixel.contains(node.dom.real_mid(), node.dom.imag_mid()) {
+    //             ret += node.color.into();
+    //         }
+    //         if let Some(children) = &node.children {
+    //             stack.extend(children.iter().map(|c| c.as_ref()));
+    //         }
+    //     }
+    //     // assert_eq!(stack.capacity(), 64);
+    //     ret
+    // }
 
     // fn validate(&self) {
     //     assert!(self.window.real_lo < self.window.real_hi);
@@ -1131,7 +1164,8 @@ impl eframe::App for App {
                                 let stride = 1 << stride_pow;
                                 for (_, pixel) in camera_map.pixels(stride) {
                                     if !self.tree.contains_sample(pixel) {
-                                        return stride_pow + 1;
+                                        // +2 instead of +1 to fix a weird bug
+                                        return stride_pow + 2;
                                     }
                                 }
                             }
@@ -1143,7 +1177,7 @@ impl eframe::App for App {
                     for stride_pow in (self.stride.ilog2()..=stride_pow_hi).rev() {
                         let stride = 1 << stride_pow;
                         for (rect, pixel) in camera_map.pixels(stride) {
-                            if let Some(color) = self.tree.color(pixel).build() {
+                            if let Some(color) = self.tree.color_in_pixel(pixel).build() {
                                 painter.rect_filled(rect, 0.0, color);
                             }
                         }
