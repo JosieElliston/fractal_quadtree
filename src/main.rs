@@ -57,15 +57,44 @@ struct Sample {
 }
 impl Sample {
     const MAX_DEPTH: u32 = 8192;
+
+    // fn color(&self) -> Color32 {
+    //     let color = if self.depth == 0 {
+    //         255
+    //     } else if self.depth == Self::MAX_DEPTH {
+    //         0
+    //     } else {
+    //         (35.0 * (self.depth as f64).ln()).clamp(0.0, 255.0) as u8
+    //     };
+    //     Color32::from_gray(color)
+    // }
     fn color(&self) -> Color32 {
-        let color = if self.depth == 0 {
-            255
+        fn cubehelix(c: [f32; 3]) -> Color32 {
+            let h = (c[0] + 120.0) * std::f32::consts::PI / 180.0;
+            let l = c[2];
+            let a = c[1] * l * (1.0 - l);
+            let cosh = h.cos();
+            let sinh = h.sin();
+            let r = f32::min(1.0, l - a * (0.14861 * cosh - 1.78277 * sinh));
+            let g = f32::min(1.0, l - a * (0.29227 * cosh + 0.90649 * sinh));
+            let b = f32::min(1.0, l + a * (1.97294 * cosh));
+            Color32::from_rgb((r * 255.0) as u8, (g * 255.0) as u8, (b * 255.0) as u8)
+        }
+        fn rainbow(t: f32) -> Color32 {
+            let ts = (t - 0.5).abs();
+            let h = 360.0 * t - 100.0;
+            let s = 1.5 - 1.5 * ts;
+            let l = 0.8 - 0.9 * ts;
+            cubehelix([h, s, l])
+        }
+        if self.depth == 0 {
+            Color32::WHITE
         } else if self.depth == Self::MAX_DEPTH {
-            0
+            Color32::BLACK
         } else {
-            (35.0 * (self.depth as f64).ln()).clamp(0.0, 255.0) as u8
-        };
-        Color32::from_gray(color)
+            let t = (self.depth as f32).ln().fract();
+            rainbow(t)
+        }
     }
 }
 
