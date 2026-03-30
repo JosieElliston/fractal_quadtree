@@ -745,7 +745,11 @@ impl Tree {
     /// inserts the previously reserved sample into the the tree,
     /// promoting a `LeafReserved` to a `LeafColor`
     // TODO: should the point and color actually be a [_; 4]?
-    pub(crate) fn insert(&mut self, (real, imag): (f32, f32), color: Color32) {
+    pub(crate) fn insert(
+        &mut self,
+        (real, imag): (f32, f32),
+        color: Color32,
+    ) -> Result<(), &'static str> {
         assert!(self.dom.contains_point((real, imag)));
         let mut node = &mut self.root;
         while let Node::Internal(internal) = node {
@@ -758,8 +762,9 @@ impl Tree {
                 dom: leaf_reserved.dom,
                 color,
             });
+            Ok(())
         } else {
-            panic!("tried to insert into a non-reserved leaf");
+            Err("tried to insert into a non-reserved leaf")
         }
     }
 

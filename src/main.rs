@@ -78,6 +78,7 @@ struct App {
     velocity: Vec2,
     dts: egui::util::History<f32>,
     texture: egui::TextureHandle,
+    sampling: bool,
     // pool: Vec<std::thread::JoinHandle<()>>,
 }
 impl App {
@@ -85,7 +86,8 @@ impl App {
         const N_THREADS: usize = 4;
         Self {
             tree: Tree::new(Square::try_new(-4.0, 4.0, -4.0, 4.0).unwrap()),
-            stride: 1,
+            // stride: 1,
+            stride: 8,
             camera: Camera::new(0.0, 0.0, 2.0),
             velocity: Vec2::ZERO,
             dts: egui::util::History::new(1..100, 0.1),
@@ -94,6 +96,7 @@ impl App {
                 egui::ColorImage::example(),
                 egui::TextureOptions::NEAREST,
             ),
+            sampling: true,
             // pool: (0..N_THREADS)
             //     .map(|_| {
             //         std::thread::spawn(|| {
@@ -116,6 +119,8 @@ impl eframe::App for App {
                     ctx.input(|input_state| input_state.time),
                     ctx.input(|input_state| input_state.stable_dt),
                 );
+
+                self.sampling ^= ctx.input(|i| i.key_pressed(Key::Space));
 
                 // panning stuff
                 {
@@ -218,7 +223,7 @@ impl eframe::App for App {
                     }
                 }
 
-                if !ctx.input(|i| i.key_down(Key::Space)) {
+                if self.sampling {
                     const MAX_TIME: Duration = Duration::from_millis(100);
                     let start = Instant::now();
                     while start.elapsed() < MAX_TIME {
@@ -435,6 +440,40 @@ impl eframe::App for App {
                 //     }
                 // }
 
+                // .pixels small square debugging
+                {
+                    let pixels = camera_map.pixels(self.stride).collect::<Vec<_>>();
+                    let expected_len = camera_map.rect().size().x as usize
+                        * camera_map.rect().size().y as usize
+                        / (self.stride * self.stride);
+                    assert!(pixels.len() <= expected_len);
+                    if pixels.len() < expected_len {
+                        let painter = ui.painter_at(ui.max_rect());
+                        for ((row, col), rect, pixel) in &pixels {
+                            painter.rect_filled(
+                                *rect,
+                                0.0,
+                                if (row + col) % 2 == 0 {
+                                    Color32::MAGENTA
+                                } else {
+                                    Color32::LIGHT_GREEN
+                                },
+                            );
+                        }
+                        for ((row, col), rect, pixel) in &pixels {
+                            if rect
+                                .contains(ui.input(|i| i.pointer.latest_pos().unwrap_or_default()))
+                            {
+                                ui.label(format!(
+                                    "real_mid: {}\nimag_mid: {}\nrad: {}\nreal_lo: {}\nreal_hi: {}\nimag_lo: {}\nimag_hi: {}",
+                                    pixel.real_mid(), pixel.imag_mid(), pixel.rad(), pixel.real_lo(), pixel.real_hi(), pixel.imag_lo(), pixel.imag_hi())
+                                );
+                            }
+                        }
+                        return;
+                    }
+                }
+
                 // new drawing
                 {
                     #[cfg(false)]
@@ -488,8 +527,8 @@ impl eframe::App for App {
                         self.texture.set(
                             egui::ColorImage::new(
                                 [
-                                    camera_map.rect().size().x as usize,
-                                    camera_map.rect().size().y as usize,
+                                    camera_map.rect().size().x as usize / self.stride,
+                                    camera_map.rect().size().y as usize / self.stride,
                                 ],
                                 colors,
                             ),

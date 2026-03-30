@@ -157,23 +157,8 @@ impl CameraMap {
             .flat_map(move |row| {
                 (0..self.rect.size().x as usize)
                     .step_by(stride)
-                    // .filter_map(move |col| {
-                    //     Some((
-                    //         (row / stride, col / stride),
-                    //         Rect::from_min_size(
-                    //             Pos2::new(col as f32, row as f32),
-                    //             Vec2::new(stride as f32, stride as f32),
-                    //         ),
-                    //         Square::try_new(
-                    //             self.x_to_real(col as f32),
-                    //             self.x_to_real((col + stride) as f32),
-                    //             self.y_to_imag((row + stride) as f32),
-                    //             self.y_to_imag(row as f32),
-                    //         )?,
-                    //     ))
-                    // })
-                    .map(move |col| {
-                        (
+                    .filter_map(move |col| {
+                        Some((
                             (row / stride, col / stride),
                             Rect::from_min_size(
                                 Pos2::new(col as f32, row as f32),
@@ -184,10 +169,25 @@ impl CameraMap {
                                 self.x_to_real((col + stride) as f32),
                                 self.y_to_imag((row + stride) as f32),
                                 self.y_to_imag(row as f32),
-                            )
-                            .unwrap(),
-                        )
+                            )?,
+                        ))
                     })
+                    // .map(move |col| {
+                    //     (
+                    //         (row / stride, col / stride),
+                    //         Rect::from_min_size(
+                    //             Pos2::new(col as f32, row as f32),
+                    //             Vec2::new(stride as f32, stride as f32),
+                    //         ),
+                    //         Square::try_new(
+                    //             self.x_to_real(col as f32),
+                    //             self.x_to_real((col + stride) as f32),
+                    //             self.y_to_imag((row + stride) as f32),
+                    //             self.y_to_imag(row as f32),
+                    //         )
+                    //         .unwrap(),
+                    //     )
+                    // })
             })
     }
 }
