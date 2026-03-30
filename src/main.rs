@@ -14,6 +14,7 @@ use rayon::prelude::*;
 
 use crate::{
     camera::{Camera, CameraMap, Square},
+    sample::metabrot_sample,
     tree::Tree,
 };
 
@@ -49,26 +50,26 @@ fn inv_lerp(lo: f32, hi: f32, x: f32) -> f32 {
     (x - lo) / (hi - lo)
 }
 
-fn bench() {
-    let start = Instant::now();
-    let mut tree = Tree::new_leaf(Square::try_new(-4.0, 4.0, -4.0, 4.0).unwrap());
-    let stride = 8;
-    let camera = Camera::new(0.0, 0.0, 2.0);
-    let camera_map = CameraMap::new(
-        Rect::from_min_size(Pos2::ZERO, Vec2::new(600.0, 400.0)),
-        camera,
-    );
-    for (_, _, pixel) in camera_map.pixels(stride) {
-        tree.ensure_pixel_safe(pixel);
-    }
-    for _ in 0..600 {
-        for (_, _, pixel) in camera_map.pixels(stride) {
-            black_box(tree.color_in_pixel(pixel));
-        }
-    }
-    black_box(tree);
-    println!("time: {:?}", start.elapsed());
-}
+// fn bench() {
+//     let start = Instant::now();
+//     let mut tree = Tree::new(Square::try_new(-4.0, 4.0, -4.0, 4.0).unwrap());
+//     let stride = 8;
+//     let camera = Camera::new(0.0, 0.0, 2.0);
+//     let camera_map = CameraMap::new(
+//         Rect::from_min_size(Pos2::ZERO, Vec2::new(600.0, 400.0)),
+//         camera,
+//     );
+//     for (_, _, pixel) in camera_map.pixels(stride) {
+//         tree.ensure_pixel_safe(pixel);
+//     }
+//     for _ in 0..600 {
+//         for (_, _, pixel) in camera_map.pixels(stride) {
+//             black_box(tree.color_in_pixel(pixel));
+//         }
+//     }
+//     black_box(tree);
+//     println!("time: {:?}", start.elapsed());
+// }
 
 struct App {
     tree: Tree,
@@ -77,11 +78,13 @@ struct App {
     velocity: Vec2,
     dts: egui::util::History<f32>,
     texture: egui::TextureHandle,
+    // pool: Vec<std::thread::JoinHandle<()>>,
 }
 impl App {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        const N_THREADS: usize = 4;
         Self {
-            tree: Tree::new_leaf(Square::try_new(-4.0, 4.0, -4.0, 4.0).unwrap()),
+            tree: Tree::new(Square::try_new(-4.0, 4.0, -4.0, 4.0).unwrap()),
             stride: 1,
             camera: Camera::new(0.0, 0.0, 2.0),
             velocity: Vec2::ZERO,
@@ -91,6 +94,15 @@ impl App {
                 egui::ColorImage::example(),
                 egui::TextureOptions::NEAREST,
             ),
+            // pool: (0..N_THREADS)
+            //     .map(|_| {
+            //         std::thread::spawn(|| {
+            //             loop {
+            //                 std::thread::sleep(Duration::from_secs(1));
+            //             }
+            //         })
+            //     })
+            //     .collect(),
         }
     }
 }
@@ -175,6 +187,7 @@ impl eframe::App for App {
 
                 // ensure_pixel_safe with time bound
                 // but with a decreasing stride
+                #[cfg(false)]
                 if !ctx.input(|i| i.key_down(Key::Space)) {
                     const MAX_TIME: Duration = Duration::from_millis(100);
                     let start = Instant::now();
@@ -201,6 +214,28 @@ impl eframe::App for App {
                             if !self.tree.contains_sample(pixel) {
                                 self.tree.ensure_pixel_safe(pixel);
                             }
+                        }
+                    }
+                }
+
+                if !ctx.input(|i| i.key_down(Key::Space)) {
+                    const MAX_TIME: Duration = Duration::from_millis(100);
+                    let start = Instant::now();
+                    while start.elapsed() < MAX_TIME {
+                        let Some(points) = self
+                            .tree
+                            .refine(camera_map.rect_to_window(camera_map.rect()))
+                        else {
+                            break;
+                        };
+
+                        let colors = points
+                            .into_par_iter()
+                            .map(|(real, imag)| metabrot_sample(real, imag).color())
+                            .collect::<Vec<_>>();
+
+                        for ((real, imag), color) in points.into_iter().zip(colors.into_iter()) {
+                            self.tree.insert((real, imag), color);
                         }
                     }
                 }

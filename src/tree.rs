@@ -13,44 +13,152 @@ use crate::{
 };
 
 #[derive(Debug)]
-pub(crate) struct Tree {
+struct Internal {
     dom: Square,
     color: Color32,
     /// 0 1
     ///
     /// 2 3
-    children: Option<[Box<Tree>; 4]>,
+    children: [Box<Node>; 4],
 }
-impl Tree {
-    pub(crate) fn new_leaf(window: Square) -> Self {
-        Self {
-            // color: mandelbrot_sample(0.0, 0.0, window.real_mid(), window.imag_mid()).color(),
-            color: metabrot_sample(window.real_mid(), window.imag_mid()).color(),
-            dom: window,
-            children: None,
+
+#[derive(Debug)]
+struct LeafColor {
+    dom: Square,
+    color: Color32,
+}
+
+#[derive(Debug)]
+struct LeafReserved {
+    dom: Square,
+}
+
+#[derive(Debug)]
+enum Node {
+    Internal(Internal),
+    LeafColor(LeafColor),
+    LeafReserved(LeafReserved),
+}
+
+#[derive(Debug)]
+pub(crate) struct Tree {
+    dom: Square,
+    root: Node,
+}
+
+impl Internal {
+    // fn child_i_closest_to(&self, real: f32, imag: f32) -> usize {
+    //     (0..self.children.len())
+    //         .map(|i| {
+    //             let dx = self.children[i].dom().real_mid() - real;
+    //             let dy = self.children[i].dom().imag_mid() - imag;
+    //             (i, dx * dx + dy * dy)
+    //         })
+    //         .min_by(|(_, left), (_, right)| left.total_cmp(right))
+    //         .unwrap()
+    //         .0
+    // }
+
+    /// returns None if the point is outside the domain
+    // fn child_i_containing(&self, real: f32, imag: f32) -> Option<usize> {
+    fn child_i_containing(&self, (real, imag): (f32, f32)) -> Option<usize> {
+        (0..self.children.len()).find(|&i| self.children[i].dom().contains_point((real, imag)))
+    }
+
+    // /// returns None if the point is outside the domain
+    // fn child_containing(&self, (real, imag): (f32, f32)) -> Option<&Node> {
+    //     self.child_i_containing((real, imag))
+    //         .map(|i| self.children[i].as_ref())
+    // }
+}
+
+impl LeafColor {
+    /// fails if the domain gets too small
+    fn try_split(&self) -> Option<Internal> {
+        if let Some(children) = {
+            || {
+                Some(
+                    [
+                        Square::try_new(
+                            self.dom.real_lo(),
+                            self.dom.real_mid(),
+                            self.dom.imag_mid(),
+                            self.dom.imag_hi(),
+                        )?,
+                        Square::try_new(
+                            self.dom.real_mid(),
+                            self.dom.real_hi(),
+                            self.dom.imag_mid(),
+                            self.dom.imag_hi(),
+                        )?,
+                        Square::try_new(
+                            self.dom.real_lo(),
+                            self.dom.real_mid(),
+                            self.dom.imag_lo(),
+                            self.dom.imag_mid(),
+                        )?,
+                        Square::try_new(
+                            self.dom.real_mid(),
+                            self.dom.real_hi(),
+                            self.dom.imag_lo(),
+                            self.dom.imag_mid(),
+                        )?,
+                    ]
+                    .map(LeafReserved::new)
+                    .map(Node::LeafReserved)
+                    .map(Box::new),
+                )
+            }
+        }() {
+            Some(Internal {
+                dom: self.dom,
+                color: self.color,
+                children,
+            })
+        } else {
+            None
+        }
+    }
+}
+
+impl LeafReserved {
+    fn new(dom: Square) -> Self {
+        Self { dom }
+    }
+}
+
+impl Node {
+    fn dom(&self) -> Square {
+        match self {
+            Node::Internal(internal) => internal.dom,
+            Node::LeafColor(leaf_color) => leaf_color.dom,
+            Node::LeafReserved(leaf_reserved) => leaf_reserved.dom,
         }
     }
 
-    fn is_leaf(&self) -> bool {
-        self.children.is_none()
+    fn color(&self) -> Option<Color32> {
+        match self {
+            Node::Internal(internal) => Some(internal.color),
+            Node::LeafColor(leaf_color) => Some(leaf_color.color),
+            Node::LeafReserved(_) => None,
+        }
+    }
+}
+
+impl Tree {
+    pub(crate) fn new(dom: Square) -> Self {
+        Self {
+            dom,
+            root: Node::LeafColor(LeafColor {
+                color: metabrot_sample(dom.real_mid(), dom.imag_mid()).color(),
+                dom,
+            }),
+        }
     }
 
-    fn child_i_closest_to(&self, real: f32, imag: f32) -> Option<usize> {
-        let Some(children) = &self.children else {
-            return None;
-        };
-        Some(
-            (0..children.len())
-                .map(|i| {
-                    let dx = children[i].dom.real_mid() - real;
-                    let dy = children[i].dom.imag_mid() - imag;
-                    (i, dx * dx + dy * dy)
-                })
-                .min_by(|(_, left), (_, right)| left.total_cmp(right))
-                .unwrap()
-                .0,
-        )
-    }
+    // fn is_leaf(&self) -> bool {
+    //     self.children.is_none()
+    // }
 
     // fn split(&mut self) {
     //     if let Some(children) = {
@@ -87,48 +195,48 @@ impl Tree {
     //     }
     // }
 
-    // compute the samples for the four children in parallel
-    fn split(&mut self) {
-        if let Some(squares) = {
-            || {
-                Some([
-                    Square::try_new(
-                        self.dom.real_lo(),
-                        self.dom.real_mid(),
-                        self.dom.imag_mid(),
-                        self.dom.imag_hi(),
-                    )?,
-                    Square::try_new(
-                        self.dom.real_mid(),
-                        self.dom.real_hi(),
-                        self.dom.imag_mid(),
-                        self.dom.imag_hi(),
-                    )?,
-                    Square::try_new(
-                        self.dom.real_lo(),
-                        self.dom.real_mid(),
-                        self.dom.imag_lo(),
-                        self.dom.imag_mid(),
-                    )?,
-                    Square::try_new(
-                        self.dom.real_mid(),
-                        self.dom.real_hi(),
-                        self.dom.imag_lo(),
-                        self.dom.imag_mid(),
-                    )?,
-                ])
-            }
-        }() {
-            self.children = Some(
-                squares
-                    .into_par_iter()
-                    .map(|square| Box::new(Self::new_leaf(square)))
-                    .collect::<Vec<_>>()
-                    .try_into()
-                    .unwrap(),
-            );
-        }
-    }
+    // /// compute the samples for the four children in parallel
+    // fn split(&mut self) {
+    //     if let Some(squares) = {
+    //         || {
+    //             Some([
+    //                 Square::try_new(
+    //                     self.dom.real_lo(),
+    //                     self.dom.real_mid(),
+    //                     self.dom.imag_mid(),
+    //                     self.dom.imag_hi(),
+    //                 )?,
+    //                 Square::try_new(
+    //                     self.dom.real_mid(),
+    //                     self.dom.real_hi(),
+    //                     self.dom.imag_mid(),
+    //                     self.dom.imag_hi(),
+    //                 )?,
+    //                 Square::try_new(
+    //                     self.dom.real_lo(),
+    //                     self.dom.real_mid(),
+    //                     self.dom.imag_lo(),
+    //                     self.dom.imag_mid(),
+    //                 )?,
+    //                 Square::try_new(
+    //                     self.dom.real_mid(),
+    //                     self.dom.real_hi(),
+    //                     self.dom.imag_lo(),
+    //                     self.dom.imag_mid(),
+    //                 )?,
+    //             ])
+    //         }
+    //     }() {
+    //         self.children = Some(
+    //             squares
+    //                 .into_par_iter()
+    //                 .map(|square| Box::new(Self::new_leaf(square)))
+    //                 .collect::<Vec<_>>()
+    //                 .try_into()
+    //                 .unwrap(),
+    //         );
+    //     }
+    // }
 
     // fn count_overlaps(&self, window: Square) -> u32 {
     //     todo!()
@@ -177,24 +285,24 @@ impl Tree {
     //     })
     // }
 
-    /// whether the pixel contains any samples
-    #[inline(never)]
-    pub(crate) fn contains_sample(&self, pixel: Square) -> bool {
-        if !self.dom.overlaps(pixel) {
-            return false;
-        }
-        if pixel.contains_point(self.dom.real_mid(), self.dom.imag_mid()) {
-            return true;
-        }
-        if self.is_leaf() {
-            return false;
-        }
-        self.children
-            .as_ref()
-            .unwrap()
-            .iter()
-            .any(|c| c.contains_sample(pixel))
-    }
+    // /// whether the pixel contains any samples
+    // #[inline(never)]
+    // pub(crate) fn contains_sample(&self, pixel: Square) -> bool {
+    //     if !self.dom.overlaps(pixel) {
+    //         return false;
+    //     }
+    //     if pixel.contains_point(self.dom.real_mid(), self.dom.imag_mid()) {
+    //         return true;
+    //     }
+    //     if self.is_leaf() {
+    //         return false;
+    //     }
+    //     self.children
+    //         .as_ref()
+    //         .unwrap()
+    //         .iter()
+    //         .any(|c| c.contains_sample(pixel))
+    // }
 
     // // TODO: rename
     // /// ensures that every pixel in the window contains at least subsamples leaves
@@ -277,25 +385,25 @@ impl Tree {
     //     self.children.as_mut().unwrap()[closest_child_i].ensure_pixel_safe(pixel);
     // }
 
-    /// every pixel must contain a sample
-    pub(crate) fn ensure_pixel_safe(&mut self, pixel: Square) {
-        if !self.dom.overlaps(pixel) {
-            return;
-        }
-        if pixel.contains_point(self.dom.real_mid(), self.dom.imag_mid()) {
-            return;
-        }
-        if self.is_leaf() {
-            self.split();
-        }
-        // TODO: this isn't really what i want
-        if !self.is_leaf() {
-            let closest_child_i = self
-                .child_i_closest_to(pixel.real_mid(), pixel.imag_mid())
-                .unwrap();
-            self.children.as_mut().unwrap()[closest_child_i].ensure_pixel_safe(pixel);
-        }
-    }
+    // /// every pixel must contain a sample
+    // pub(crate) fn ensure_pixel_safe(&mut self, pixel: Square) {
+    //     if !self.dom.overlaps(pixel) {
+    //         return;
+    //     }
+    //     if pixel.contains_point(self.dom.real_mid(), self.dom.imag_mid()) {
+    //         return;
+    //     }
+    //     if self.is_leaf() {
+    //         self.split();
+    //     }
+    //     // TODO: this isn't really what i want
+    //     if !self.is_leaf() {
+    //         let closest_child_i = self
+    //             .child_i_closest_to(pixel.real_mid(), pixel.imag_mid())
+    //             .unwrap();
+    //         self.children.as_mut().unwrap()[closest_child_i].ensure_pixel_safe(pixel);
+    //     }
+    // }
 
     // fn is_strong_pixel_safe(&self, pixel: Square) -> bool {
     //     if !self.window.overlaps(pixel) {
@@ -330,13 +438,13 @@ impl Tree {
     //         .any(|c| c.is_weak_pixel_safe(pixel))
     // }
 
-    /// ensures that we have < n nodes
-    /// or maybe that each pixel contains at most n leaves
-    /// or maybe if you're in the window, you get at most subsamples leaves,
-    /// if you're not in the window, you all collectively get m leaves
-    fn prune(&mut self, window: Window, pixel_width: f32, n: u32, subsamples: u8) {
-        todo!()
-    }
+    // /// ensures that we have < n nodes
+    // /// or maybe that each pixel contains at most n leaves
+    // /// or maybe if you're in the window, you get at most subsamples leaves,
+    // /// if you're not in the window, you all collectively get m leaves
+    // fn prune(&mut self, window: Window, pixel_width: f32, n: u32, subsamples: u8) {
+    //     todo!()
+    // }
 
     // /// the average color of leaves inside the pixel weighted by area that's overlapping the pixel
     // /// or maybe weighted by distance to the center of the pixel
@@ -359,156 +467,156 @@ impl Tree {
     //     self.children.as_ref().unwrap()[closest_child_i].color(pixel)
     // }
 
-    #[inline(never)]
-    fn color(&self) -> ColorBuilder {
-        ColorBuilder::from(self.color)
-            + match &self.children {
-                Some(children) => children.iter().map(|c| c.color()).sum(),
-                None => ColorBuilder::default(),
-            }
-    }
+    // #[inline(never)]
+    // fn color(&self) -> ColorBuilder {
+    //     ColorBuilder::from(self.color)
+    //         + match &self.children {
+    //             Some(children) => children.iter().map(|c| c.color()).sum(),
+    //             None => ColorBuilder::default(),
+    //         }
+    // }
 
-    /// average color of samples inside the pixel
-    #[inline(never)]
-    pub(crate) fn color_in_pixel(&self, pixel: Square) -> ColorBuilder {
-        let d = f32::max(
-            (self.dom.real_mid() - pixel.real_mid()).abs(),
-            (self.dom.imag_mid() - pixel.imag_mid()).abs(),
-        );
-        // if !self.dom.overlaps(pixel) {
-        if d > self.dom.rad() + pixel.rad() {
-            return ColorBuilder::default();
-        }
-        // (if pixel.contains_point(self.dom.real_mid(), self.dom.imag_mid()) {
-        (if d <= pixel.rad() {
-            self.color.into()
-        } else {
-            ColorBuilder::default()
-        } + match &self.children {
-            Some(children) => {
-                // if pixel.contains_square(self.dom) {
-                if d <= pixel.rad() - self.dom.rad() {
-                    children.iter().map(|c| c.color()).sum()
-                } else {
-                    children.iter().map(|c| c.color_in_pixel(pixel)).sum()
-                }
-            }
-            None => ColorBuilder::default(),
-        })
-    }
+    // /// average color of samples inside the pixel
+    // #[inline(never)]
+    // pub(crate) fn color_in_pixel(&self, pixel: Square) -> ColorBuilder {
+    //     let d = f32::max(
+    //         (self.dom.real_mid() - pixel.real_mid()).abs(),
+    //         (self.dom.imag_mid() - pixel.imag_mid()).abs(),
+    //     );
+    //     // if !self.dom.overlaps(pixel) {
+    //     if d > self.dom.rad() + pixel.rad() {
+    //         return ColorBuilder::default();
+    //     }
+    //     // (if pixel.contains_point(self.dom.real_mid(), self.dom.imag_mid()) {
+    //     (if d <= pixel.rad() {
+    //         self.color.into()
+    //     } else {
+    //         ColorBuilder::default()
+    //     } + match &self.children {
+    //         Some(children) => {
+    //             // if pixel.contains_square(self.dom) {
+    //             if d <= pixel.rad() - self.dom.rad() {
+    //                 children.iter().map(|c| c.color()).sum()
+    //             } else {
+    //                 children.iter().map(|c| c.color_in_pixel(pixel)).sum()
+    //             }
+    //         }
+    //         None => ColorBuilder::default(),
+    //     })
+    // }
 
-    #[inline(never)]
-    pub(crate) fn color_in_pixels(
-        &self,
-        window: Window,
-        pixel_rad: f32,
-        debug_camera_map: &CameraMap,
-        debug_stride: usize,
-    ) -> Vec<Vec<ColorBuilder>> {
-        fn update(
-            node: &Tree,
-            window: Window,
-            pixel_rad: f32,
-            ret: &mut [Vec<ColorBuilder>],
-            debug_camera_map: &CameraMap,
-            debug_stride: usize,
-        ) {
-            // TODO: maybe remove this check
-            if !window.overlaps(node.dom) {
-                return;
-            }
-            // let pixel_of_index = |row: usize, col: usize| {};
+    // #[inline(never)]
+    // pub(crate) fn color_in_pixels(
+    //     &self,
+    //     window: Window,
+    //     pixel_rad: f32,
+    //     debug_camera_map: &CameraMap,
+    //     debug_stride: usize,
+    // ) -> Vec<Vec<ColorBuilder>> {
+    //     fn update(
+    //         node: &Tree,
+    //         window: Window,
+    //         pixel_rad: f32,
+    //         ret: &mut [Vec<ColorBuilder>],
+    //         debug_camera_map: &CameraMap,
+    //         debug_stride: usize,
+    //     ) {
+    //         // TODO: maybe remove this check
+    //         if !window.overlaps(node.dom) {
+    //             return;
+    //         }
+    //         // let pixel_of_index = |row: usize, col: usize| {};
 
-            // let row = ret.len() as f32
-            //     * (1.0 - inv_lerp(window.imag_lo, window.imag_hi, node.dom.imag_mid()));
-            // let col =
-            //     ret[0].len() as f32 * inv_lerp(window.real_lo, window.real_hi, node.dom.real_mid());
-            let row = (window.imag_rad() / pixel_rad)
-                * (1.0 - inv_lerp(window.imag_lo(), window.imag_hi(), node.dom.imag_mid()));
-            let col = (window.real_rad() / pixel_rad)
-                * inv_lerp(window.real_lo(), window.real_hi(), node.dom.real_mid());
+    //         // let row = ret.len() as f32
+    //         //     * (1.0 - inv_lerp(window.imag_lo, window.imag_hi, node.dom.imag_mid()));
+    //         // let col =
+    //         //     ret[0].len() as f32 * inv_lerp(window.real_lo, window.real_hi, node.dom.real_mid());
+    //         let row = (window.imag_rad() / pixel_rad)
+    //             * (1.0 - inv_lerp(window.imag_lo(), window.imag_hi(), node.dom.imag_mid()));
+    //         let col = (window.real_rad() / pixel_rad)
+    //             * inv_lerp(window.real_lo(), window.real_hi(), node.dom.real_mid());
 
-            // if (0.0..ret.len() as f32).contains(&row) && (0.0..ret[0].len() as f32).contains(&col) {
-            //     let ((oracle_row, oracle_col), _, _oracle_pixel) = {
-            //         debug_camera_map
-            //             .pixels(debug_stride)
-            //             .find(|((_row, _col), _, pixel)| {
-            //                 pixel.approx_contains_point(node.dom.real_mid(), node.dom.imag_mid())
-            //             })
-            //             .unwrap()
-            //     };
-            //     assert_eq!(oracle_row, row as usize);
-            //     assert_eq!(oracle_col, col as usize);
-            // }
-            for r in [
-                Some(row.floor()),
-                // if row.fract() <= row * 1e-4 {
-                if row.fract() == 0.0 {
-                    // Some(row.floor() + 1.0)
-                    Some(row + 1.0)
-                } else {
-                    None
-                },
-            ]
-            .iter()
-            .flatten()
-            {
-                for c in [
-                    Some(col.floor()),
-                    // if col.fract().abs() <= col * 1e-4 {
-                    if col.fract() == 0.0 {
-                        // Some(col.floor() + 1.0)
-                        Some(col + 1.0)
-                    } else {
-                        None
-                    },
-                ]
-                .iter()
-                .flatten()
-                {
-                    if let Some(e) = ret
-                        .get_mut(*r as usize)
-                        .and_then(|line| line.get_mut(*c as usize))
-                    {
-                        *e += node.color.into();
-                    }
-                }
-            }
-            // if let Some(e) = ret
-            //     .get_mut(row.floor() as usize)
-            //     .and_then(|line| line.get_mut(col.floor() as usize))
-            // {
-            //     *e += node.color.into();
-            // }
-            if let Some(children) = &node.children {
-                for c in children {
-                    update(c, window, pixel_rad, ret, debug_camera_map, debug_stride);
-                }
-            };
-        }
+    //         // if (0.0..ret.len() as f32).contains(&row) && (0.0..ret[0].len() as f32).contains(&col) {
+    //         //     let ((oracle_row, oracle_col), _, _oracle_pixel) = {
+    //         //         debug_camera_map
+    //         //             .pixels(debug_stride)
+    //         //             .find(|((_row, _col), _, pixel)| {
+    //         //                 pixel.approx_contains_point(node.dom.real_mid(), node.dom.imag_mid())
+    //         //             })
+    //         //             .unwrap()
+    //         //     };
+    //         //     assert_eq!(oracle_row, row as usize);
+    //         //     assert_eq!(oracle_col, col as usize);
+    //         // }
+    //         for r in [
+    //             Some(row.floor()),
+    //             // if row.fract() <= row * 1e-4 {
+    //             if row.fract() == 0.0 {
+    //                 // Some(row.floor() + 1.0)
+    //                 Some(row + 1.0)
+    //             } else {
+    //                 None
+    //             },
+    //         ]
+    //         .iter()
+    //         .flatten()
+    //         {
+    //             for c in [
+    //                 Some(col.floor()),
+    //                 // if col.fract().abs() <= col * 1e-4 {
+    //                 if col.fract() == 0.0 {
+    //                     // Some(col.floor() + 1.0)
+    //                     Some(col + 1.0)
+    //                 } else {
+    //                     None
+    //                 },
+    //             ]
+    //             .iter()
+    //             .flatten()
+    //             {
+    //                 if let Some(e) = ret
+    //                     .get_mut(*r as usize)
+    //                     .and_then(|line| line.get_mut(*c as usize))
+    //                 {
+    //                     *e += node.color.into();
+    //                 }
+    //             }
+    //         }
+    //         // if let Some(e) = ret
+    //         //     .get_mut(row.floor() as usize)
+    //         //     .and_then(|line| line.get_mut(col.floor() as usize))
+    //         // {
+    //         //     *e += node.color.into();
+    //         // }
+    //         if let Some(children) = &node.children {
+    //             for c in children {
+    //                 update(c, window, pixel_rad, ret, debug_camera_map, debug_stride);
+    //             }
+    //         };
+    //     }
 
-        // ((row, col), rect, pixel) in camera_map.pixels(stride)
-        let width = (window.real_rad() / pixel_rad).ceil();
-        let height = (window.imag_rad() / pixel_rad).ceil();
-        // let width = (window.real_rad() / pixel_rad).floor();
-        // let height = (window.imag_rad() / pixel_rad).floor();
-        let mut ret: Vec<Vec<ColorBuilder>> = (0..height as usize)
-            .map(|_| {
-                (0..width as usize)
-                    .map(|_| ColorBuilder::default())
-                    .collect()
-            })
-            .collect();
-        update(
-            self,
-            window,
-            pixel_rad,
-            &mut ret,
-            debug_camera_map,
-            debug_stride,
-        );
-        ret
-    }
+    //     // ((row, col), rect, pixel) in camera_map.pixels(stride)
+    //     let width = (window.real_rad() / pixel_rad).ceil();
+    //     let height = (window.imag_rad() / pixel_rad).ceil();
+    //     // let width = (window.real_rad() / pixel_rad).floor();
+    //     // let height = (window.imag_rad() / pixel_rad).floor();
+    //     let mut ret: Vec<Vec<ColorBuilder>> = (0..height as usize)
+    //         .map(|_| {
+    //             (0..width as usize)
+    //                 .map(|_| ColorBuilder::default())
+    //                 .collect()
+    //         })
+    //         .collect();
+    //     update(
+    //         self,
+    //         window,
+    //         pixel_rad,
+    //         &mut ret,
+    //         debug_camera_map,
+    //         debug_stride,
+    //     );
+    //     ret
+    // }
 
     // #[inline(never)]
     // fn color(&self, pixel: Square) -> ColorBuilder {
@@ -543,6 +651,103 @@ impl Tree {
     //     }
     // }
 
+    /// returns `None` if we shouldn't/can't refine
+    /// returns the points we need to sample
+    /// we split a `LeafColor` into a `Internal([LeafReserved; 4])`)
+    ///
+    /// to select the node, we require that it
+    /// - intersects the window
+    /// - is among the shallowest leafs
+    // TODO: we don't actually need the leaf to be colored to split it
+    pub(crate) fn refine(&mut self, window: Window) -> Option<[(f32, f32); 4]> {
+        // how deep is the shallowest leaf that intersects the window?
+        let target_depth = {
+            // let mut node = self.root;
+            // let mut depth = 0;
+            let mut stack = Vec::with_capacity(64);
+            stack.push((&self.root, 0));
+            let mut target_depth = usize::MAX;
+            while let Some((node, depth)) = stack.pop() {
+                if !window.overlaps(node.dom()) {
+                    continue;
+                }
+                match node {
+                    Node::Internal(internal) => {
+                        stack.extend(internal.children.iter().map(|c| (c.as_ref(), depth + 1)));
+                    }
+                    Node::LeafColor(_) => {
+                        target_depth = target_depth.min(depth);
+                    }
+                    Node::LeafReserved(_) => {}
+                }
+            }
+            target_depth
+        };
+        // probably no nodes overlap the window
+        if target_depth == usize::MAX {
+            return None;
+        }
+
+        // find a leaf that intersects the window and has depth == target_depth
+        {
+            let mut stack = Vec::with_capacity(64);
+            stack.push((&mut self.root, 0));
+            while let Some((node, depth)) = stack.pop() {
+                if !window.overlaps(node.dom()) {
+                    continue;
+                }
+                match node {
+                    Node::Internal(internal) => {
+                        stack.extend(
+                            internal
+                                .children
+                                .iter_mut()
+                                .map(|c| (c.as_mut(), depth + 1)),
+                        );
+                    }
+                    Node::LeafReserved(_) => {}
+                    Node::LeafColor(leaf) => {
+                        if depth == target_depth {
+                            let internal = leaf.try_split()?;
+                            // we can't just `internal.children.map(|c| c.dom().mid())` bc of rust
+                            let points = internal
+                                .children
+                                .iter()
+                                .map(|c| c.dom().mid())
+                                .collect::<Vec<_>>()
+                                .try_into()
+                                .ok()?;
+                            *node = Node::Internal(internal);
+                            return Some(points);
+                        }
+                    }
+                }
+            }
+        }
+        unreachable!();
+    }
+
+    /// inserts the previously reserved sample into the the tree,
+    /// promoting a `LeafReserved` to a `LeafColor`
+    // TODO: should the point and color actually be a [_; 4]?
+    pub(crate) fn insert(&mut self, (real, imag): (f32, f32), color: Color32) {
+        assert!(self.dom.contains_point((real, imag)));
+        let mut node = &mut self.root;
+        while let Node::Internal(internal) = node {
+            let child_i = internal.child_i_containing((real, imag)).unwrap();
+            node = internal.children[child_i].as_mut();
+        }
+        if let Node::LeafReserved(leaf_reserved) = node {
+            assert!(leaf_reserved.dom.contains_point((real, imag)));
+            *node = Node::LeafColor(LeafColor {
+                dom: leaf_reserved.dom,
+                color,
+            });
+        } else {
+            panic!("tried to insert into a non-reserved leaf");
+        }
+    }
+
     // TODO: if the pixel doesn't contain any samples,
     // return the color of the sample closest to the center of the pixel
     // TODO: if the pixel contains any samples, do some weighting of the samples
@@ -556,10 +761,6 @@ impl Tree {
     ///
     /// returns white if not in the trees domain
     pub(crate) fn color_of_pixel(&self, pixel: Square) -> Color32 {
-        if !self.dom.contains_point(pixel.real_mid(), pixel.imag_mid()) {
-            const UNCONTAINED_COLOR: Color32 = Color32::WHITE;
-            return UNCONTAINED_COLOR;
-        }
         fn distance((real_0, imag_0): (f32, f32), (real_1, imag_1): (f32, f32)) -> f32 {
             let real_delta = real_0 - real_1;
             let imag_delta = imag_0 - imag_1;
@@ -570,18 +771,29 @@ impl Tree {
             // real_delta.abs() + imag_delta.abs()
             real_delta.abs().max(imag_delta.abs())
         }
+
         let center = (pixel.real_mid(), pixel.imag_mid());
-        let mut closest_sample_dist = distance(center, (self.dom.real_mid(), self.dom.imag_mid()));
-        let mut closest_sample_color = self.color;
-        let mut node = self;
-        while !node.is_leaf() {
-            let closest_child_i = node.child_i_closest_to(center.0, center.1).unwrap();
-            node = &node.children.as_ref().unwrap()[closest_child_i];
-            assert!(node.dom.contains_point(center.0, center.1));
-            let dist = distance(center, (node.dom.real_mid(), node.dom.imag_mid()));
-            if dist < closest_sample_dist {
+        if !self.dom.contains_point(pixel.mid()) {
+            const UNCONTAINED_COLOR: Color32 = Color32::WHITE;
+            return UNCONTAINED_COLOR;
+        }
+
+        let mut node = &self.root;
+        let mut closest_sample_dist = distance(center, self.dom.mid());
+        let mut closest_sample_color = node
+            .color()
+            .expect("root must be a `LeafColor` or `Internal`");
+
+        while let Node::Internal(internal) = node {
+            let child_i = internal.child_i_containing(center).unwrap();
+            node = internal.children[child_i].as_ref();
+            assert!(node.dom().contains_point(center));
+            let dist = distance(center, node.dom().mid());
+            if dist < closest_sample_dist
+                && let Some(color) = node.color()
+            {
                 closest_sample_dist = dist;
-                closest_sample_color = node.color;
+                closest_sample_color = color;
             }
         }
         closest_sample_color

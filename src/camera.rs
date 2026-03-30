@@ -157,8 +157,23 @@ impl CameraMap {
             .flat_map(move |row| {
                 (0..self.rect.size().x as usize)
                     .step_by(stride)
-                    .filter_map(move |col| {
-                        Some((
+                    // .filter_map(move |col| {
+                    //     Some((
+                    //         (row / stride, col / stride),
+                    //         Rect::from_min_size(
+                    //             Pos2::new(col as f32, row as f32),
+                    //             Vec2::new(stride as f32, stride as f32),
+                    //         ),
+                    //         Square::try_new(
+                    //             self.x_to_real(col as f32),
+                    //             self.x_to_real((col + stride) as f32),
+                    //             self.y_to_imag((row + stride) as f32),
+                    //             self.y_to_imag(row as f32),
+                    //         )?,
+                    //     ))
+                    // })
+                    .map(move |col| {
+                        (
                             (row / stride, col / stride),
                             Rect::from_min_size(
                                 Pos2::new(col as f32, row as f32),
@@ -169,8 +184,9 @@ impl CameraMap {
                                 self.x_to_real((col + stride) as f32),
                                 self.y_to_imag((row + stride) as f32),
                                 self.y_to_imag(row as f32),
-                            )?,
-                        ))
+                            )
+                            .unwrap(),
+                        )
                     })
             })
     }
@@ -303,27 +319,33 @@ impl Square {
         imag_lo: f32,
         imag_hi: f32,
     ) -> Option<Self> {
-        if !(real_lo < real_hi && imag_lo < imag_hi && {
+        if !(real_lo <= real_hi && imag_lo <= imag_hi) {
+            return None;
+        }
+        if !(real_lo < real_hi && imag_lo < imag_hi) {
+            return None;
+        }
+        if !{
             let dx = real_hi as f64 - real_lo as f64;
             let dy = imag_hi as f64 - imag_lo as f64;
             let diff = dx - dy;
             let ratio = dx / dy;
             diff.abs() < 1e-4 || (1.0 - ratio).abs() < 1e-4
-        }) {
-            None
-        } else {
-            // Some(Self {
-            //     real_lo,
-            //     real_hi,
-            //     imag_lo,
-            //     imag_hi,
-            // })
-            Some(Self {
-                real_mid: (real_lo + real_hi) / 2.0,
-                imag_mid: (imag_lo + imag_hi) / 2.0,
-                rad: (real_hi - real_lo) / 2.0,
-            })
+        } {
+            return None;
         }
+
+        // Some(Self {
+        //     real_lo,
+        //     real_hi,
+        //     imag_lo,
+        //     imag_hi,
+        // })
+        Some(Self {
+            real_mid: (real_lo + real_hi) / 2.0,
+            imag_mid: (imag_lo + imag_hi) / 2.0,
+            rad: (real_hi - real_lo) / 2.0,
+        })
     }
 
     pub(crate) fn real_lo(self) -> f32 {
@@ -352,6 +374,9 @@ impl Square {
         self.imag_mid
     }
 
+    pub(crate) fn mid(self) -> (f32, f32) {
+        (self.real_mid(), self.imag_mid())
+    }
     pub(crate) fn rad(self) -> f32 {
         // (self.real_hi - self.real_lo) / 2.0
         self.rad
@@ -366,7 +391,7 @@ impl Square {
     //         && (self.imag_lo..=self.imag_hi).contains(&imag)
     // }
     // #[inline(never)]
-    pub(crate) fn contains_point(self, real: f32, imag: f32) -> bool {
+    pub(crate) fn contains_point(self, (real, imag): (f32, f32)) -> bool {
         // (self.real_lo..=self.real_hi).contains(&real)
         //     && (self.imag_lo..=self.imag_hi).contains(&imag)
         (self.real_mid() - real).abs() <= self.rad() && (self.imag_mid() - imag).abs() <= self.rad()
