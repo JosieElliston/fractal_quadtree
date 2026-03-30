@@ -76,15 +76,21 @@ struct App {
     camera: Camera,
     velocity: Vec2,
     dts: egui::util::History<f32>,
+    texture: egui::TextureHandle,
 }
 impl App {
-    fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+    fn new(cc: &eframe::CreationContext<'_>) -> Self {
         Self {
             tree: Tree::new_leaf(Square::try_new(-4.0, 4.0, -4.0, 4.0).unwrap()),
             stride: 1,
             camera: Camera::new(0.0, 0.0, 2.0),
             velocity: Vec2::ZERO,
             dts: egui::util::History::new(1..100, 0.1),
+            texture: cc.egui_ctx.load_texture(
+                "fractal",
+                egui::ColorImage::example(),
+                egui::TextureOptions::NEAREST,
+            ),
         }
     }
 }
@@ -396,36 +402,71 @@ impl eframe::App for App {
 
                 // new drawing
                 {
-                    let painter = ui.painter_at(ui.max_rect());
-                    painter.rect_filled(ui.max_rect(), 0.0, Color32::RED);
+                    #[cfg(false)]
+                    {
+                        let painter = ui.painter_at(ui.max_rect());
+                        painter.rect_filled(ui.max_rect(), 0.0, Color32::RED);
 
-                    camera_map
-                        .pixels(self.stride)
-                        .collect::<Vec<_>>()
-                        .into_par_iter()
-                        .map(|(_, rect, pixel)| {
-                            // let color = self.tree.color_of_pixel(pixel);
-                            let color = Color32::GREEN;
-                            (rect, color)
-                        })
-                        .collect::<Vec<_>>()
-                        .into_iter()
-                        .for_each(|(rect, color)| {
-                            painter.rect_filled(rect, 0.0, color);
+                        camera_map
+                            .pixels(self.stride)
+                            .collect::<Vec<_>>()
+                            .into_par_iter()
+                            .map(|(_, rect, pixel)| {
+                                let color = self.tree.color_of_pixel(pixel);
+                                // let color = Color32::GREEN;
+                                (rect, color)
+                            })
+                            .collect::<Vec<_>>()
+                            .into_iter()
+                            .for_each(|(rect, color)| {
+                                painter.rect_filled(rect, 0.0, color);
+                            });
+                    }
+
+                    #[cfg(false)]
+                    {
+                        let painter = ui.painter_at(ui.max_rect());
+                        painter.rect_filled(ui.max_rect(), 0.0, Color32::RED);
+
+                        // let num_threads = rayon::current_num_threads();
+                        let num_threads = rayon::max_num_threads();
+                        let pixels = camera_map.pixels(self.stride).collect::<Vec<_>>();
+                        (0..num_threads).into_par_iter().for_each(|thread_i| {
+                            (thread_i..pixels.len())
+                                .step_by(num_threads)
+                                .map(|i| pixels[i])
+                                .for_each(|(_, rect, pixel)| {
+                                    let color = self.tree.color_of_pixel(pixel);
+                                    painter.rect_filled(rect, 0.0, color);
+                                });
                         });
+                    }
 
-                    // // let num_threads = rayon::current_num_threads();
-                    // let num_threads = rayon::max_num_threads();
-                    // let pixels = camera_map.pixels(self.stride).collect::<Vec<_>>();
-                    // (0..num_threads).into_par_iter().for_each(|thread_i| {
-                    //     (thread_i..pixels.len())
-                    //         .step_by(num_threads)
-                    //         .map(|i| pixels[i])
-                    //         .for_each(|(_, rect, pixel)| {
-                    //             let color = self.tree.color_of_pixel(pixel);
-                    //             painter.rect_filled(rect, 0.0, color);
-                    //         });
-                    // });
+                    // #[cfg(false)]
+                    {
+                        let colors = camera_map
+                            .pixels(self.stride)
+                            .collect::<Vec<_>>()
+                            .into_par_iter()
+                            .map(|(_, _rect, pixel)| self.tree.color_of_pixel(pixel))
+                            .collect::<Vec<_>>();
+                        self.texture.set(
+                            egui::ColorImage::new(
+                                [
+                                    camera_map.rect().size().x as usize,
+                                    camera_map.rect().size().y as usize,
+                                ],
+                                colors,
+                            ),
+                            egui::TextureOptions::NEAREST,
+                        );
+                        ui.painter().image(
+                            self.texture.id(),
+                            camera_map.rect(),
+                            Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0)),
+                            Color32::WHITE,
+                        );
+                    }
                 }
 
                 // area is to allow the frame to be drawn on top of the fractal
