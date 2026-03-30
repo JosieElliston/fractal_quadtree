@@ -8,8 +8,8 @@ use rayon::prelude::*;
 
 use crate::{
     camera::{CameraMap, Square, Window},
+    inv_lerp,
     sample::metabrot_sample,
-    util::inv_lerp,
 };
 
 #[derive(Debug)]

@@ -1,7 +1,6 @@
 mod camera;
 mod sample;
 mod tree;
-mod util;
 
 use std::{
     hint::black_box,
@@ -34,6 +33,19 @@ fn main() -> eframe::Result {
         native_options,
         Box::new(|cc| Ok(Box::new(App::new(cc)))),
     )
+}
+
+fn lerp(lo: f32, hi: f32, t: f32) -> f32 {
+    assert!(lo < hi);
+    // assert!((0.0..=1.0).contains(&t));
+    // lo * (1.0 - t) + hi * t
+    lo + (hi - lo) * t
+}
+
+fn inv_lerp(lo: f32, hi: f32, x: f32) -> f32 {
+    assert!(lo < hi);
+    // assert!((lo..=hi).contains(&x));
+    (x - lo) / (hi - lo)
 }
 
 fn bench() {

@@ -2,7 +2,7 @@ use std::cmp::Ordering;
 
 use eframe::egui::{Pos2, Rect, Vec2};
 
-use crate::util::{inv_lerp, lerp};
+use crate::{inv_lerp, lerp};
 
 // TODO: make this a mapping from egui rect to complex window
 #[derive(Debug, Clone, Copy)]

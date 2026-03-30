@@ -1,6 +1,6 @@
 use eframe::egui::Color32;
 
-use crate::{camera::Square, util::*};
+use crate::{camera::Square, lerp};
 
 pub(crate) struct Sample {
     depth: u32,
