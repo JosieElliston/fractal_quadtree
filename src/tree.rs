@@ -62,7 +62,22 @@ impl Internal {
     /// returns None if the point is outside the domain
     // fn child_i_containing(&self, real: f32, imag: f32) -> Option<usize> {
     fn child_i_containing(&self, (real, imag): (f32, f32)) -> Option<usize> {
-        (0..self.children.len()).find(|&i| self.children[i].dom().contains_point((real, imag)))
+        // (0..self.children.len()).find(|&i| self.children[i].dom().contains_point((real, imag)))
+
+        // do it this way for better stability
+        if !self.dom.contains_point((real, imag)) {
+            None
+        } else {
+            let actual = (if real <= self.dom.real_mid() { 0 } else { 1 })
+                + (if imag >= self.dom.imag_mid() { 0 } else { 2 });
+            // let oracle = (0..self.children.len())
+            //     .find(|&i| self.children[i].dom().contains_point((real, imag)))
+            //     .unwrap();
+            // if oracle != actual {
+            //     println!("oracle: {oracle}, actual: {actual}");
+            // }
+            Some(actual)
+        }
     }
 
     // /// returns None if the point is outside the domain
@@ -75,7 +90,7 @@ impl Internal {
 impl LeafColor {
     /// fails if the domain gets too small
     fn try_split(&self) -> Option<Internal> {
-        if let Some(children) = {
+        ({
             || {
                 Some(
                     [
@@ -109,15 +124,12 @@ impl LeafColor {
                     .map(Box::new),
                 )
             }
-        }() {
-            Some(Internal {
-                dom: self.dom,
-                color: self.color,
-                children,
-            })
-        } else {
-            None
-        }
+        }())
+        .map(|children| Internal {
+            dom: self.dom,
+            color: self.color,
+            children,
+        })
     }
 }
 
@@ -659,6 +671,9 @@ impl Tree {
     /// - intersects the window
     /// - is among the shallowest leafs
     // TODO: we don't actually need the leaf to be colored to split it
+    // TODO: better ordering
+    // TODO: refine things that disagree on color
+    // TODO: max depth delta between deepest and shallowest leaf that's bigger than 1
     pub(crate) fn refine(&mut self, window: Window) -> Option<[(f32, f32); 4]> {
         // how deep is the shallowest leaf that intersects the window?
         let target_depth = {
@@ -785,6 +800,7 @@ impl Tree {
             .expect("root must be a `LeafColor` or `Internal`");
 
         while let Node::Internal(internal) = node {
+            assert!(internal.dom.contains_point(center));
             let child_i = internal.child_i_containing(center).unwrap();
             node = internal.children[child_i].as_ref();
             assert!(node.dom().contains_point(center));
