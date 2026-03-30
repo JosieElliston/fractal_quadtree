@@ -542,6 +542,67 @@ impl Tree {
     //         }
     //     }
     // }
+
+    // TODO: if the pixel doesn't contain any samples,
+    // return the color of the sample closest to the center of the pixel
+    // TODO: if the pixel contains any samples, do some weighting of the samples
+    // TODO: if the pixel doesn't contain any samples, do some weighting of some nearby samples
+    // TODO: if the pixel contains any samples, returns the average color of the samples inside the pixel
+    // /// if the pixel contains any samples,
+    // /// else,
+    // /// for now, return the color of the sample of the leaf that contains the center of the pixel
+    /// follow the path down to the leaf containing the center of the pixel,
+    /// return the color of the sample closest to the center of the pixel.
+    ///
+    /// returns white if not in the trees domain
+    pub(crate) fn color_of_pixel(&self, pixel: Square) -> Color32 {
+        if !self.dom.contains_point(pixel.real_mid(), pixel.imag_mid()) {
+            const UNCONTAINED_COLOR: Color32 = Color32::WHITE;
+            return UNCONTAINED_COLOR;
+        }
+        fn square_distance((real_0, imag_0): (f32, f32), (real_1, imag_1): (f32, f32)) -> f32 {
+            let real_delta = real_0 - real_1;
+            let imag_delta = imag_0 - imag_1;
+            real_delta * real_delta + imag_delta * imag_delta
+        }
+        let center = (pixel.real_mid(), pixel.imag_mid());
+        let mut closest_sample_dist =
+            square_distance(center, (self.dom.real_mid(), self.dom.imag_mid()));
+        let mut closest_sample_color = self.color;
+        let mut node = self;
+        while !node.is_leaf() {
+            let closest_child_i = node.child_i_closest_to(center.0, center.1).unwrap();
+            node = &node.children.as_ref().unwrap()[closest_child_i];
+            assert!(node.dom.contains_point(center.0, center.1));
+            let dist = square_distance(center, (node.dom.real_mid(), node.dom.imag_mid()));
+            if dist < closest_sample_dist {
+                closest_sample_dist = dist;
+                closest_sample_color = node.color;
+            }
+        }
+        closest_sample_color
+    }
+
+    // pub(crate) fn rasterize(&self, map: &CameraMap) -> Vec<Vec<Color32>> {
+    //     (0..height)
+    //         .map(|row| {
+    //             (0..width)
+    //                 .map(|col| {
+    //                     let pixel = Square::try_new(
+    //                         camera.real_lo() + col as f32 * camera.real_rad() * 2.0 / width as f32,
+    //                         camera.real_lo()
+    //                             + (col as f32 + 1.0) * camera.real_rad() * 2.0 / width as f32,
+    //                         camera.imag_hi()
+    //                             - (row as f32 + 1.0) * camera.imag_rad() * 2.0 / height as f32,
+    //                         camera.imag_hi() - row as f32 * camera.imag_rad() * 2.0 / height as f32,
+    //                     )
+    //                     .unwrap();
+    //                     self.color_of_pixel(pixel)
+    //                 })
+    //                 .collect()
+    //         })
+    //         .collect()
+    // }
 }
 
 // TODO: once we factor drawing into tree.rs, this should become private

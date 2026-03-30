@@ -7,3 +7,4 @@
 - get colors batched
 - documentation (at least for structs)
 - update dependencies
+- fix failing to draw pixel at high zoom

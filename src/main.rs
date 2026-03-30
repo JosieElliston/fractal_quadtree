@@ -10,6 +10,7 @@ use std::{
 use eframe::egui::{self, Color32, Key, Pos2, Rect, RichText, Vec2};
 use mimalloc::MiMalloc;
 use rand::seq::SliceRandom;
+use rayon::prelude::*;
 
 use crate::{
     camera::{Camera, CameraMap, Square},
@@ -216,6 +217,7 @@ impl eframe::App for App {
                 // draw the fractal,
                 // but instead of drawing error magenta,
                 // draw pixels decreasing in stride
+                #[cfg(false)]
                 {
                     let painter = ui.painter_at(ui.max_rect());
 
@@ -392,6 +394,38 @@ impl eframe::App for App {
                 //     }
                 // }
 
+                // new drawing
+                {
+                    let painter = ui.painter_at(ui.max_rect());
+                    painter.rect_filled(ui.max_rect(), 0.0, Color32::RED);
+
+                    // for (_, rect, pixel) in camera_map.pixels(self.stride) {
+                    //     let color = self.tree.color_of_pixel(pixel);
+                    //     painter.rect_filled(rect, 0.0, color);
+                    // }
+                    camera_map
+                        .pixels(self.stride)
+                        .collect::<Vec<_>>()
+                        .into_par_iter()
+                        .map(|(_, rect, pixel)| {
+                            let color = self.tree.color_of_pixel(pixel);
+                            (rect, color)
+                        })
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                        .for_each(|(rect, color)| {
+                            painter.rect_filled(rect, 0.0, color);
+                        });
+                    // camera_map
+                    //     .pixels(self.stride)
+                    //     .collect::<Vec<_>>()
+                    //     .into_par_iter()
+                    //     .for_each(|(_, rect, pixel)| {
+                    //         let color = self.tree.color_of_pixel(pixel);
+                    //         // std::hint::black_box(color);
+                    //         painter.rect_filled(rect, 0.0, color);
+                    //     });
+                }
                 // area is to allow the frame to be drawn on top of the fractal
                 egui::Area::new(egui::Id::new("area"))
                     .constrain_to(ctx.screen_rect())
