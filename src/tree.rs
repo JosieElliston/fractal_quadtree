@@ -560,21 +560,25 @@ impl Tree {
             const UNCONTAINED_COLOR: Color32 = Color32::WHITE;
             return UNCONTAINED_COLOR;
         }
-        fn square_distance((real_0, imag_0): (f32, f32), (real_1, imag_1): (f32, f32)) -> f32 {
+        fn distance((real_0, imag_0): (f32, f32), (real_1, imag_1): (f32, f32)) -> f32 {
             let real_delta = real_0 - real_1;
             let imag_delta = imag_0 - imag_1;
-            real_delta * real_delta + imag_delta * imag_delta
+            // real_delta * real_delta + imag_delta * imag_delta
+
+            // i think they give the same result
+            // except manhattan maybe gives weird lines
+            // real_delta.abs() + imag_delta.abs()
+            real_delta.abs().max(imag_delta.abs())
         }
         let center = (pixel.real_mid(), pixel.imag_mid());
-        let mut closest_sample_dist =
-            square_distance(center, (self.dom.real_mid(), self.dom.imag_mid()));
+        let mut closest_sample_dist = distance(center, (self.dom.real_mid(), self.dom.imag_mid()));
         let mut closest_sample_color = self.color;
         let mut node = self;
         while !node.is_leaf() {
             let closest_child_i = node.child_i_closest_to(center.0, center.1).unwrap();
             node = &node.children.as_ref().unwrap()[closest_child_i];
             assert!(node.dom.contains_point(center.0, center.1));
-            let dist = square_distance(center, (node.dom.real_mid(), node.dom.imag_mid()));
+            let dist = distance(center, (node.dom.real_mid(), node.dom.imag_mid()));
             if dist < closest_sample_dist {
                 closest_sample_dist = dist;
                 closest_sample_color = node.color;

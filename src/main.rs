@@ -399,16 +399,13 @@ impl eframe::App for App {
                     let painter = ui.painter_at(ui.max_rect());
                     painter.rect_filled(ui.max_rect(), 0.0, Color32::RED);
 
-                    // for (_, rect, pixel) in camera_map.pixels(self.stride) {
-                    //     let color = self.tree.color_of_pixel(pixel);
-                    //     painter.rect_filled(rect, 0.0, color);
-                    // }
                     camera_map
                         .pixels(self.stride)
                         .collect::<Vec<_>>()
                         .into_par_iter()
                         .map(|(_, rect, pixel)| {
-                            let color = self.tree.color_of_pixel(pixel);
+                            // let color = self.tree.color_of_pixel(pixel);
+                            let color = Color32::GREEN;
                             (rect, color)
                         })
                         .collect::<Vec<_>>()
@@ -416,16 +413,21 @@ impl eframe::App for App {
                         .for_each(|(rect, color)| {
                             painter.rect_filled(rect, 0.0, color);
                         });
-                    // camera_map
-                    //     .pixels(self.stride)
-                    //     .collect::<Vec<_>>()
-                    //     .into_par_iter()
-                    //     .for_each(|(_, rect, pixel)| {
-                    //         let color = self.tree.color_of_pixel(pixel);
-                    //         // std::hint::black_box(color);
-                    //         painter.rect_filled(rect, 0.0, color);
-                    //     });
+
+                    // // let num_threads = rayon::current_num_threads();
+                    // let num_threads = rayon::max_num_threads();
+                    // let pixels = camera_map.pixels(self.stride).collect::<Vec<_>>();
+                    // (0..num_threads).into_par_iter().for_each(|thread_i| {
+                    //     (thread_i..pixels.len())
+                    //         .step_by(num_threads)
+                    //         .map(|i| pixels[i])
+                    //         .for_each(|(_, rect, pixel)| {
+                    //             let color = self.tree.color_of_pixel(pixel);
+                    //             painter.rect_filled(rect, 0.0, color);
+                    //         });
+                    // });
                 }
+
                 // area is to allow the frame to be drawn on top of the fractal
                 egui::Area::new(egui::Id::new("area"))
                     .constrain_to(ctx.screen_rect())
