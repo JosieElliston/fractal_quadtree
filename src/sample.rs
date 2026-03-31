@@ -42,7 +42,8 @@ impl Sample {
         } else if self.depth == Self::MAX_DEPTH {
             Color32::BLACK
         } else {
-            let t = (self.depth as f32).ln().fract();
+            // let t = (self.depth as f32).ln().fract();
+            let t = (self.depth as f32).ln().ln().fract();
             rainbow(t)
         }
     }

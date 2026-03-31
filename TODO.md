@@ -17,4 +17,5 @@
 - rewrite `Node` to use typestate?
 - Real, Imag, egui::f32 type safety?
 - cancel splitting a node if we pan away
-- note that we're refining 256 times with a constant window, maybe we can use that
+- note that we're refining 256/4 times with a constant window, maybe we can use that
+- alt quadtree architecture where you store samples at the corners of the domain, not the center, which allows for bilinear interpolation, at the cost of probably redundancy or complexity. like consider a sample on the edge of the domain, it on the corner of multiple leafs that aren't near cousins, and aren't guaranteed to exist in some order.

@@ -694,6 +694,26 @@ impl Tree {
     // TODO: max depth delta between deepest and shallowest leaf that's bigger than 1
     #[inline(never)]
     pub(crate) fn refine(&mut self, window: Window) -> Option<[(Real, Imag); 4]> {
+        // actually this would require ~cloning the entire tree
+        // #[derive(Debug, PartialEq, Eq)]
+        // struct Element {
+        //     node: *mut Node,
+        //     depth: usize,
+        //     color_diff: i16,
+        // }
+        // impl PartialOrd for Element {
+        //     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        //         Some(self.cmp(other))
+        //     }
+        // }
+        // impl Ord for Element {
+        //     /// smaller depth is smaller
+        //     /// then larger color diff is smaller
+        //     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        //         self.partial_cmp(other).unwrap()
+        //     }
+        // }
+
         #[inline(never)]
         fn get_shallowest_leaf_depth(tree: &Tree, window: Window) -> usize {
             // let mut node = self.root;
