@@ -1,4 +1,5 @@
 use std::{
+    collections::VecDeque,
     iter::Sum,
     ops::{Add, AddAssign},
 };
@@ -167,6 +168,21 @@ impl Tree {
                 dom,
             }),
         }
+    }
+
+    pub(crate) fn node_count(&self) -> usize {
+        let mut count = 0;
+        let mut stack = Vec::with_capacity(64);
+        stack.push(&self.root);
+        while let Some(node) = stack.pop() {
+            count += 1;
+            if let Node::Internal(internal) = node {
+                for child in &internal.children {
+                    stack.push(child);
+                }
+            }
+        }
+        count
     }
 
     // fn is_leaf(&self) -> bool {
@@ -675,21 +691,26 @@ impl Tree {
     // TODO: better ordering
     // TODO: refine things that disagree on color
     // TODO: max depth delta between deepest and shallowest leaf that's bigger than 1
+    #[inline(never)]
     pub(crate) fn refine(&mut self, window: Window) -> Option<[(Real, Imag); 4]> {
-        // how deep is the shallowest leaf that intersects the window?
-        let target_depth = {
+        #[inline(never)]
+        fn get_target_depth(tree: &Tree, window: Window) -> usize {
             // let mut node = self.root;
             // let mut depth = 0;
-            let mut stack = Vec::with_capacity(64);
-            stack.push((&self.root, 0));
+            // queue instead of stack bc we want to visit shallower nodes first
+            let mut queue = VecDeque::with_capacity(64);
+            queue.push_back((&tree.root, 0));
             let mut target_depth = usize::MAX;
-            while let Some((node, depth)) = stack.pop() {
+            while let Some((node, depth)) = queue.pop_front() {
                 if !window.overlaps(node.dom()) {
+                    continue;
+                }
+                if depth >= target_depth {
                     continue;
                 }
                 match node {
                     Node::Internal(internal) => {
-                        stack.extend(internal.children.iter().map(|c| (c.as_ref(), depth + 1)));
+                        queue.extend(internal.children.iter().map(|c| (c.as_ref(), depth + 1)));
                     }
                     Node::LeafColor(_) => {
                         target_depth = target_depth.min(depth);
@@ -698,18 +719,29 @@ impl Tree {
                 }
             }
             target_depth
-        };
+        }
+
+        // how deep is the shallowest leaf that intersects the window?
+        let target_depth = get_target_depth(&self, window);
         // probably no nodes overlap the window
         if target_depth == usize::MAX {
             return None;
         }
 
-        // find a leaf that intersects the window and has depth == target_depth
-        {
+        /// find a leaf that intersects the window and has depth == target_depth
+        #[inline(never)]
+        fn select_node(
+            tree: &mut Tree,
+            window: Window,
+            target_depth: usize,
+        ) -> Option<[(Real, Imag); 4]> {
             let mut stack = Vec::with_capacity(64);
-            stack.push((&mut self.root, 0));
+            stack.push((&mut tree.root, 0));
             while let Some((node, depth)) = stack.pop() {
                 if !window.overlaps(node.dom()) {
+                    continue;
+                }
+                if depth > target_depth {
                     continue;
                 }
                 match node {
@@ -739,8 +771,9 @@ impl Tree {
                     }
                 }
             }
+            unreachable!();
         }
-        unreachable!();
+        select_node(self, window, target_depth)
     }
 
     /// inserts the previously reserved sample into the the tree,
@@ -781,6 +814,7 @@ impl Tree {
     /// return the color of the sample closest to the center of the pixel.
     ///
     /// returns white if not in the trees domain
+    #[inline(never)]
     pub(crate) fn color_of_pixel(&self, pixel: Square) -> Color32 {
         fn distance((real_0, imag_0): (Real, Imag), (real_1, imag_1): (Real, Imag)) -> Fixed {
             let real_delta = real_0 - real_1;

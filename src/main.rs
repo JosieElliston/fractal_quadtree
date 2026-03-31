@@ -1,5 +1,6 @@
 mod camera;
 mod fixed;
+mod pool;
 mod sample;
 mod tree;
 
@@ -12,7 +13,7 @@ use rayon::prelude::*;
 use crate::{
     camera::{Camera, CameraMap, Square},
     fixed::*,
-    sample::metabrot_sample,
+    pool::Pool,
     tree::Tree,
 };
 
@@ -75,13 +76,17 @@ struct App {
     camera: Camera,
     velocity: Vec2,
     dts: egui::util::History<f32>,
+    /// how many samples we received on each frame
+    sample_counts: egui::util::History<usize>,
     texture: egui::TextureHandle,
     sampling: bool,
-    // pool: Vec<std::thread::JoinHandle<()>>,
+    pool: Pool,
+    // in_flight_target: usize,
 }
 impl App {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        const N_THREADS: usize = 4;
+        // const N_THREADS: usize = 8;
+        const N_THREADS: usize = 32;
         Self {
             tree: Tree::new(
                 Square::new_exact((-4.0).into(), 4.0.into(), (-4.0).into(), 4.0.into()).unwrap(),
@@ -91,21 +96,15 @@ impl App {
             camera: Camera::new(0.0.into(), 0.0.into(), 2.0.into()),
             velocity: Vec2::ZERO,
             dts: egui::util::History::new(1..100, 0.1),
+            sample_counts: egui::util::History::new(1..100, 1.0),
             texture: cc.egui_ctx.load_texture(
                 "fractal",
                 egui::ColorImage::example(),
                 egui::TextureOptions::NEAREST,
             ),
             sampling: true,
-            // pool: (0..N_THREADS)
-            //     .map(|_| {
-            //         std::thread::spawn(|| {
-            //             loop {
-            //                 std::thread::sleep(Duration::from_secs(1));
-            //             }
-            //         })
-            //     })
-            //     .collect(),
+            pool: Pool::new(N_THREADS),
+            // in_flight_target: 2 * N_THREADS,
         }
     }
 }
@@ -223,6 +222,7 @@ impl eframe::App for App {
                     }
                 }
 
+                #[cfg(false)]
                 if self.sampling {
                     const MAX_TIME: Duration = Duration::from_millis(100);
                     let start = Instant::now();
@@ -240,7 +240,62 @@ impl eframe::App for App {
                             .collect::<Vec<_>>();
 
                         for ((real, imag), color) in points.into_iter().zip(colors.into_iter()) {
+                            // TODO: handle error
                             self.tree.insert((real, imag), color);
+                        }
+                    }
+                }
+
+                // sampling with pool
+                if self.sampling {
+                    // if self.pool.in_flight() == 0 {
+                    //     println!("pool has nothing in flight");
+                    // }
+
+                    // take samples out of the pool
+                    let mut sample_count = 0;
+                    while let Some(((real, imag), color)) = self.pool.recv() {
+                        self.tree.insert((real, imag), color);
+                        sample_count += 1;
+                    }
+                    self.sample_counts.add(ctx.input(|i| i.time), sample_count);
+
+                    // they're always unsaturated, ~bc the main thread is also a thread
+                    // println!(
+                    //     "in_flight: {}, in_flight_target: {}, thread_count: {}",
+                    //     self.pool.in_flight(),
+                    //     self.in_flight_target,
+                    //     self.pool.thread_count()
+                    // );
+                    // if self.pool.in_flight() < self.pool.thread_count() {
+                    //     println!(
+                    //         "threads are unsaturated: in_flight: {}, thread_count: {}",
+                    //         self.pool.in_flight(),
+                    //         self.pool.thread_count()
+                    //     );
+                    //     // self.in_flight_target *= 2;
+                    // }
+                    // if self.pool.in_flight() > 2 * self.pool.thread_count() {
+                    //     println!(
+                    //         "threads are oversaturated: in_flight: {}, thread_count: {}",
+                    //         self.pool.in_flight(),
+                    //         self.pool.thread_count()
+                    //     );
+                    //     self.in_flight_target /= 2;
+                    // }
+
+                    // request samples
+                    // TODO: various canceling stuff
+                    // while self.pool.in_flight() < self.in_flight_target {
+                    while self.pool.in_flight() < 256 {
+                        let Some(points) = self
+                            .tree
+                            .refine(camera_map.rect_to_window(camera_map.rect()))
+                        else {
+                            break;
+                        };
+                        for (real, imag) in points {
+                            self.pool.send((real, imag));
                         }
                     }
                 }
@@ -562,9 +617,11 @@ impl eframe::App for App {
                             // ));
                             ui.label(
                                 RichText::new(format!(
-                                    "    dt: {:08.04}\n1/dt: {:08.04}",
+                                    "    dt: {:08.04}\n1/dt: {:08.04}\nsamples: {:08.04}\nnodes: {}",
                                     average_dt,
                                     1.0 / average_dt,
+                                    self.sample_counts.values().sum::<usize>() as f32 / self.sample_counts.len() as f32,
+                                    self.tree.node_count(),
                                 ))
                                 .background_color(Color32::BLACK),
                             );

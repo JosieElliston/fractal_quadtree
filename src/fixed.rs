@@ -71,6 +71,7 @@ impl Fixed {
         Self(self.0 / 2)
     }
 
+    #[track_caller]
     pub(crate) fn mul(self, other: Self) -> Self {
         Self(
             (self.0 as i128)
@@ -113,6 +114,7 @@ impl From<Fixed> for f64 {
     }
 }
 impl From<f64> for Fixed {
+    #[track_caller]
     fn from(f: f64) -> Self {
         Self::try_from_f64(f).unwrap()
     }
@@ -123,6 +125,7 @@ impl From<Fixed> for f32 {
     }
 }
 impl From<f32> for Fixed {
+    #[track_caller]
     fn from(f: f32) -> Self {
         Self::try_from_f32(f).unwrap()
     }
