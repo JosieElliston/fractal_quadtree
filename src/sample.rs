@@ -1,6 +1,6 @@
 use eframe::egui::Color32;
 
-use crate::{camera::Square, lerp};
+use crate::{camera::Square, fixed::*, lerp};
 
 pub(crate) struct Sample {
     depth: u32,
@@ -48,7 +48,12 @@ impl Sample {
     }
 }
 
-fn mandelbrot_sample(z0_real: f32, z0_imag: f32, c_real: f32, c_imag: f32) -> Sample {
+fn mandelbrot_sample(z0_real: Real, z0_imag: Real, c_real: Real, c_imag: Real) -> Sample {
+    // TODO: consider using fixed point for this
+    let z0_real: f32 = z0_real.into();
+    let z0_imag: f32 = z0_imag.into();
+    let c_real: f32 = c_real.into();
+    let c_imag: f32 = c_imag.into();
     const Z_ESCAPE_RAD2: f32 = 4.0;
     let mut z_real = z0_real;
     let mut z_imag = z0_imag;
@@ -114,21 +119,22 @@ fn mandelbrot_sample(z0_real: f32, z0_imag: f32, c_real: f32, c_imag: f32) -> Sa
 }
 
 #[inline(never)]
-pub(crate) fn metabrot_sample(z0_real: f32, z0_imag: f32) -> Sample {
+pub(crate) fn metabrot_sample((z0_real, z0_imag): (Real, Imag)) -> Sample {
     const WIDTH: usize = 128;
-    const WINDOW: Square = Square::try_new(-2.0, 2.0, -2.0, 2.0).unwrap();
+    let window: Square =
+        Square::new_exact((-2.0).into(), 2.0.into(), (-2.0).into(), 2.0.into()).unwrap();
     let mut deepest = 0;
     for row in 0..WIDTH {
-        let c_imag = lerp(
-            WINDOW.imag_lo(),
-            WINDOW.imag_hi(),
-            1.0 - row as f32 / WIDTH as f32,
+        let c_imag = Fixed::lerp(
+            window.imag_lo(),
+            window.imag_hi(),
+            1.0 - row as f64 / WIDTH as f64,
         );
         for col in 0..WIDTH {
-            let c_real = lerp(
-                WINDOW.real_lo(),
-                WINDOW.real_hi(),
-                col as f32 / WIDTH as f32,
+            let c_real = Fixed::lerp(
+                window.real_lo(),
+                window.real_hi(),
+                col as f64 / WIDTH as f64,
             );
             let sample = mandelbrot_sample(z0_real, z0_imag, c_real, c_imag);
             if sample.depth == Sample::MAX_DEPTH {

@@ -1,19 +1,17 @@
 mod camera;
+mod fixed;
 mod sample;
 mod tree;
 
-use std::{
-    hint::black_box,
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Color32, Key, Pos2, Rect, RichText, Vec2};
 use mimalloc::MiMalloc;
-use rand::seq::SliceRandom;
 use rayon::prelude::*;
 
 use crate::{
     camera::{Camera, CameraMap, Square},
+    fixed::*,
     sample::metabrot_sample,
     tree::Tree,
 };
@@ -37,14 +35,14 @@ fn main() -> eframe::Result {
     )
 }
 
-fn lerp(lo: f32, hi: f32, t: f32) -> f32 {
+fn lerp(lo: f64, hi: f64, t: f64) -> f64 {
     assert!(lo < hi);
     // assert!((0.0..=1.0).contains(&t));
     // lo * (1.0 - t) + hi * t
     lo + (hi - lo) * t
 }
 
-fn inv_lerp(lo: f32, hi: f32, x: f32) -> f32 {
+fn inv_lerp(lo: f64, hi: f64, x: f64) -> f64 {
     assert!(lo < hi);
     // assert!((lo..=hi).contains(&x));
     (x - lo) / (hi - lo)
@@ -85,10 +83,12 @@ impl App {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         const N_THREADS: usize = 4;
         Self {
-            tree: Tree::new(Square::try_new(-4.0, 4.0, -4.0, 4.0).unwrap()),
-            // stride: 1,
-            stride: 8,
-            camera: Camera::new(0.0, 0.0, 2.0),
+            tree: Tree::new(
+                Square::new_exact((-4.0).into(), 4.0.into(), (-4.0).into(), 4.0.into()).unwrap(),
+            ),
+            stride: 1,
+            // stride: 8,
+            camera: Camera::new(0.0.into(), 0.0.into(), 2.0.into()),
             velocity: Vec2::ZERO,
             dts: egui::util::History::new(1..100, 0.1),
             texture: cc.egui_ctx.load_texture(
@@ -127,10 +127,10 @@ impl eframe::App for App {
                     let rect = ui.available_rect_before_wrap();
                     let r = ui.allocate_rect(rect, egui::Sense::click_and_drag());
 
-                    let pan_offset = |pan_vec: Vec2, real_rad: f32| -> (f32, f32) {
+                    let pan_offset = |pan_vec: Vec2, real_rad: Real| -> (Real, Imag) {
                         (
-                            -2.0 * pan_vec.x / rect.size().x * real_rad,
-                            2.0 * pan_vec.y * (real_rad / rect.size().x),
+                           ( -2.0 * pan_vec.x / rect.size().x * f32::from(real_rad)).into(),
+                           ( 2.0 * pan_vec.y * (f32::from(real_rad) / rect.size().x)).into(),
                         )
                     };
 
@@ -153,7 +153,7 @@ impl eframe::App for App {
                         let mouse = mouse_pos - rect.center();
                         let zoom = ctx.input(|i| (i.smooth_scroll_delta.y / 300.0).exp());
                         self.camera += pan_offset(-mouse, self.camera.real_rad());
-                        *self.camera.real_rad_mut() /= zoom;
+                        *self.camera.real_rad_mut() = self.camera.real_rad().div_f32(zoom);
                         self.camera += pan_offset(mouse, self.camera.real_rad());
                     }
                 }
@@ -236,7 +236,7 @@ impl eframe::App for App {
 
                         let colors = points
                             .into_par_iter()
-                            .map(|(real, imag)| metabrot_sample(real, imag).color())
+                            .map(|(real, imag)| metabrot_sample((real, imag)).color())
                             .collect::<Vec<_>>();
 
                         for ((real, imag), color) in points.into_iter().zip(colors.into_iter()) {
@@ -440,7 +440,8 @@ impl eframe::App for App {
                 //     }
                 // }
 
-                // .pixels small square debugging
+                // camera_map.pixels small square debugging
+                // #[cfg(false)]
                 {
                     let pixels = camera_map.pixels(self.stride).collect::<Vec<_>>();
                     let expected_len = camera_map.rect().size().x as usize
@@ -465,7 +466,7 @@ impl eframe::App for App {
                                 .contains(ui.input(|i| i.pointer.latest_pos().unwrap_or_default()))
                             {
                                 ui.label(format!(
-                                    "real_mid: {}\nimag_mid: {}\nrad: {}\nreal_lo: {}\nreal_hi: {}\nimag_lo: {}\nimag_hi: {}",
+                                    "real_mid: {:?}\nimag_mid: {:?}\nrad: {:?}\nreal_lo: {:?}\nreal_hi: {:?}\nimag_lo: {:?}\nimag_hi: {:?}",
                                     pixel.real_mid(), pixel.imag_mid(), pixel.rad(), pixel.real_lo(), pixel.real_hi(), pixel.imag_lo(), pixel.imag_hi())
                                 );
                             }

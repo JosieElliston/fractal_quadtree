@@ -8,6 +8,7 @@ use rayon::prelude::*;
 
 use crate::{
     camera::{CameraMap, Square, Window},
+    fixed::*,
     inv_lerp,
     sample::metabrot_sample,
 };
@@ -61,7 +62,7 @@ impl Internal {
 
     /// returns None if the point is outside the domain
     // fn child_i_containing(&self, real: f32, imag: f32) -> Option<usize> {
-    fn child_i_containing(&self, (real, imag): (f32, f32)) -> Option<usize> {
+    fn child_i_containing(&self, (real, imag): (Real, Imag)) -> Option<usize> {
         // (0..self.children.len()).find(|&i| self.children[i].dom().contains_point((real, imag)))
 
         // do it this way for better stability
@@ -94,25 +95,25 @@ impl LeafColor {
             || {
                 Some(
                     [
-                        Square::try_new(
+                        Square::new_exact(
                             self.dom.real_lo(),
                             self.dom.real_mid(),
                             self.dom.imag_mid(),
                             self.dom.imag_hi(),
                         )?,
-                        Square::try_new(
+                        Square::new_exact(
                             self.dom.real_mid(),
                             self.dom.real_hi(),
                             self.dom.imag_mid(),
                             self.dom.imag_hi(),
                         )?,
-                        Square::try_new(
+                        Square::new_exact(
                             self.dom.real_lo(),
                             self.dom.real_mid(),
                             self.dom.imag_lo(),
                             self.dom.imag_mid(),
                         )?,
-                        Square::try_new(
+                        Square::new_exact(
                             self.dom.real_mid(),
                             self.dom.real_hi(),
                             self.dom.imag_lo(),
@@ -162,7 +163,7 @@ impl Tree {
         Self {
             dom,
             root: Node::LeafColor(LeafColor {
-                color: metabrot_sample(dom.real_mid(), dom.imag_mid()).color(),
+                color: metabrot_sample(dom.mid()).color(),
                 dom,
             }),
         }
@@ -674,7 +675,7 @@ impl Tree {
     // TODO: better ordering
     // TODO: refine things that disagree on color
     // TODO: max depth delta between deepest and shallowest leaf that's bigger than 1
-    pub(crate) fn refine(&mut self, window: Window) -> Option<[(f32, f32); 4]> {
+    pub(crate) fn refine(&mut self, window: Window) -> Option<[(Real, Imag); 4]> {
         // how deep is the shallowest leaf that intersects the window?
         let target_depth = {
             // let mut node = self.root;
@@ -747,7 +748,7 @@ impl Tree {
     // TODO: should the point and color actually be a [_; 4]?
     pub(crate) fn insert(
         &mut self,
-        (real, imag): (f32, f32),
+        (real, imag): (Real, Imag),
         color: Color32,
     ) -> Result<(), &'static str> {
         assert!(self.dom.contains_point((real, imag)));
@@ -781,7 +782,7 @@ impl Tree {
     ///
     /// returns white if not in the trees domain
     pub(crate) fn color_of_pixel(&self, pixel: Square) -> Color32 {
-        fn distance((real_0, imag_0): (f32, f32), (real_1, imag_1): (f32, f32)) -> f32 {
+        fn distance((real_0, imag_0): (Real, Imag), (real_1, imag_1): (Real, Imag)) -> Fixed {
             let real_delta = real_0 - real_1;
             let imag_delta = imag_0 - imag_1;
             // real_delta * real_delta + imag_delta * imag_delta
