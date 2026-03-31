@@ -17,3 +17,4 @@
 - rewrite `Node` to use typestate?
 - Real, Imag, egui::f32 type safety?
 - cancel splitting a node if we pan away
+- note that we're refining 256 times with a constant window, maybe we can use that
