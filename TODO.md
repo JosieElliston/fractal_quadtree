@@ -19,3 +19,9 @@
 - cancel splitting a node if we pan away
 - note that we're refining 256/4 times with a constant window, maybe we can use that
 - alt quadtree architecture where you store samples at the corners of the domain, not the center, which allows for bilinear interpolation, at the cost of probably redundancy or complexity. like consider a sample on the edge of the domain, it on the corner of multiple leafs that aren't near cousins, and aren't guaranteed to exist in some order.
+- reread comments on my project, i think i deleted my notes
+- to interpolate between samples, make a delaunay triangulation on the samples, go to the dual voronoi diagram, then do some interpolation on the vertices of each cell. you could also maybe make a voronoi diagram with the samples as the seeds and do a different interpolation.
+- profile with cargo instruments
+- more precision so we can zoom farther
+- refactor to allow for comparing different fractals
+- it's actually really important to sample the mandelbrot at a high width

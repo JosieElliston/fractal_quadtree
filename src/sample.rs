@@ -1,12 +1,16 @@
 use eframe::egui::Color32;
 
-use crate::{camera::Square, fixed::*, lerp};
+use crate::{
+    camera::{Square, Window},
+    fixed::*,
+};
 
 pub(crate) struct Sample {
     depth: u32,
 }
 impl Sample {
-    const MAX_DEPTH: u32 = 8192;
+    // const MAX_DEPTH: u32 = 8192;
+    const MAX_DEPTH: u32 = 131072;
 
     // fn color(&self) -> Color32 {
     //     let color = if self.depth == 0 {
@@ -122,8 +126,40 @@ fn mandelbrot_sample(z0_real: Real, z0_imag: Real, c_real: Real, c_imag: Real) -
 #[inline(never)]
 pub(crate) fn metabrot_sample((z0_real, z0_imag): (Real, Imag)) -> Sample {
     const WIDTH: usize = 128;
-    let window: Square =
-        Square::new_exact((-2.0).into(), 2.0.into(), (-2.0).into(), 2.0.into()).unwrap();
+    // const WIDTH: usize = 512;
+
+    let Some(window) = ({
+        // TODO: actually these comments are wrong,
+        // and the escape circles are more subtle,
+        // but the results are probably still correct bc the mandelbrots are a lot smaller than the circles
+
+        // points outside of circle with radius 2 centered at the origin escape
+        let window0 = Window::from_center_size(0.0.into(), 0.0.into(), 4.0.into(), 4.0.into());
+
+        // on the first iteration, the points that were outside of
+        // the circle with radius 2 centered at (z0_imag*z0_imag - z0_real*z0_real, -2.0*z0_real*z0_imag)
+        // will escape
+        let window1 = Window::from_center_size(0.0.into(), 0.0.into(), 4.0.into(), 4.0.into());
+
+        // their intersection gives a tighter bound on the area that can escape
+        // which lets us use our samples on a more important area
+        // window0.intersect(window1)
+
+        // don't use the fancy stuff,
+        // wait until i can have debug tools for comparing fractals
+        Some(window0)
+    }) else {
+        // if the windows don't intersect,
+        // then we know that all points escape immediately
+        return Sample {
+            depth: 0,
+            // this is for debug
+            // depth: Sample::MAX_DEPTH,
+        };
+    };
+
+    let window = Square::new_exact((-2.0).into(), 2.0.into(), (-2.0).into(), 2.0.into()).unwrap();
+
     let mut deepest = 0;
     for row in 0..WIDTH {
         let c_imag = Fixed::lerp(
@@ -138,6 +174,8 @@ pub(crate) fn metabrot_sample((z0_real, z0_imag): (Real, Imag)) -> Sample {
                 col as f64 / WIDTH as f64,
             );
             let sample = mandelbrot_sample(z0_real, z0_imag, c_real, c_imag);
+            // metajulia set
+            // let sample = mandelbrot_sample(c_real, c_imag, z0_real, z0_imag);
             if sample.depth == Sample::MAX_DEPTH {
                 return sample;
             }

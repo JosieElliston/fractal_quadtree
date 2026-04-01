@@ -36,7 +36,6 @@ impl Pool {
             in_flight: 0,
         }
     }
-
     pub(crate) fn in_flight(&self) -> usize {
         self.in_flight
     }

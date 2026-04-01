@@ -205,6 +205,24 @@ pub(crate) struct Window {
     imag_hi: Imag,
 }
 impl Window {
+    /// fails if the window would be empty
+    /// including if it would have zero width or height
+    pub(crate) fn try_new(
+        real_lo: Real,
+        real_hi: Real,
+        imag_lo: Imag,
+        imag_hi: Imag,
+    ) -> Option<Self> {
+        if !(real_lo < real_hi && imag_lo < imag_hi) {
+            return None;
+        }
+        Some(Self {
+            real_lo,
+            real_hi,
+            imag_lo,
+            imag_hi,
+        })
+    }
     pub(crate) fn new(real_lo: Real, real_hi: Real, imag_lo: Imag, imag_hi: Imag) -> Self {
         // assert!(real_lo.is_finite());
         // assert!(real_hi.is_finite());
@@ -218,6 +236,22 @@ impl Window {
             imag_lo,
             imag_hi,
         }
+    }
+    pub(crate) fn from_center_size(
+        real_mid: Real,
+        imag_mid: Imag,
+        real_diam: Real,
+        imag_diam: Imag,
+    ) -> Self {
+        assert!(real_diam > Fixed::ZERO);
+        assert!(imag_diam > Fixed::ZERO);
+        let real_rad = real_diam.div2_floor();
+        let imag_rad = imag_diam.div2_floor();
+        let real_lo = real_mid - real_rad;
+        let real_hi = real_mid + real_rad;
+        let imag_lo = imag_mid - imag_rad;
+        let imag_hi = imag_mid + imag_rad;
+        Self::new(real_lo, real_hi, imag_lo, imag_hi)
     }
 
     pub(crate) fn real_lo(self) -> Real {
@@ -250,9 +284,14 @@ impl Window {
     //     (self.real_hi - self.real_lo) * (self.imag_hi - self.imag_lo)
     // }
 
-    // fn intersect(self, other: impl Into<Self>) -> Option<Self> {
-    //     todo!()
-    // }
+    pub(crate) fn intersect(self, other: impl Into<Self>) -> Option<Self> {
+        let other = other.into();
+        let real_lo = Fixed::max(self.real_lo, other.real_lo);
+        let real_hi = Fixed::min(self.real_hi, other.real_hi);
+        let imag_lo = Fixed::max(self.imag_lo, other.imag_lo);
+        let imag_hi = Fixed::min(self.imag_hi, other.imag_hi);
+        Self::try_new(real_lo, real_hi, imag_lo, imag_hi)
+    }
 
     // fn overlaps(self, other: impl Into<Self>) -> bool {
     //     self.intersect(other).is_some()
