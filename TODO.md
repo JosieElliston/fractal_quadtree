@@ -24,4 +24,7 @@
 - profile with cargo instruments
 - more precision so we can zoom farther
 - refactor to allow for comparing different fractals
+    - metabrots (need same camera)
+    - mandelbrots (need different camera)
+    - button for "mouse is now controlling camera 1 / 2"
 - it's actually really important to sample the mandelbrot at a high width

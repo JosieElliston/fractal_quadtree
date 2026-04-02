@@ -39,6 +39,9 @@ impl Camera {
     pub(crate) fn real_rad_mut(&mut self) -> &mut Real {
         &mut self.real_rad
     }
+    pub(crate) fn mid(self) -> (Real, Imag) {
+        (self.real_mid, self.imag_mid)
+    }
 
     // these are undefined for a `Camera`,
     // they need an aspect ratio,
@@ -309,6 +312,31 @@ impl Window {
     //     let other = other.into();
     //     self.intersect(other) == Some(other)
     // }
+
+    /// returns an iterator over the centers of rectangles of a width by height grid
+    /// so each point will be inside the window
+    /// and the average of the points will be the center of the window
+    pub(crate) fn grid(
+        self,
+        width: usize,
+        height: usize,
+    ) -> impl Iterator<Item = impl Iterator<Item = (Real, Imag)>> {
+        (0..height).map(move |row| {
+            let imag = Fixed::lerp(
+                self.imag_lo(),
+                self.imag_hi(),
+                1.0 - (row as f64 + 0.5) / height as f64,
+            );
+            (0..width).map(move |col| {
+                let real = Fixed::lerp(
+                    self.real_lo(),
+                    self.real_hi(),
+                    (col as f64 + 0.5) / width as f64,
+                );
+                (real, imag)
+            })
+        })
+    }
 }
 impl From<Square> for Window {
     fn from(value: Square) -> Self {

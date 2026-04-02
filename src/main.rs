@@ -11,9 +11,10 @@ use mimalloc::MiMalloc;
 use rayon::prelude::*;
 
 use crate::{
-    camera::{Camera, CameraMap, Square},
+    camera::{Camera, CameraMap, Square, Window},
     fixed::*,
     pool::Pool,
+    sample::quadratic_map,
     tree::Tree,
 };
 
@@ -80,6 +81,7 @@ struct App {
     sample_counts: egui::util::History<usize>,
     texture: egui::TextureHandle,
     sampling: bool,
+    current_fractal: usize,
     pool: Pool,
     // in_flight_target: usize,
 }
@@ -103,6 +105,7 @@ impl App {
                 egui::TextureOptions::NEAREST,
             ),
             sampling: true,
+            current_fractal: 0,
             pool: Pool::new(N_THREADS),
             // in_flight_target: 2 * N_THREADS,
         }
@@ -120,6 +123,10 @@ impl eframe::App for App {
                 );
 
                 self.sampling ^= ctx.input(|i| i.key_pressed(Key::Space));
+
+                if let Some(key) = [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6, Key::Num7, Key::Num8, Key::Num9, Key::Num0].into_iter().position(|k| ctx.input(|i| i.key_pressed(k))) {
+                    self.current_fractal = key;
+                }
 
                 // panning stuff
                 {
@@ -496,7 +503,7 @@ impl eframe::App for App {
                 // }
 
                 // camera_map.pixels small square debugging
-                // #[cfg(false)]
+                #[cfg(false)]
                 {
                     let pixels = camera_map.pixels(self.stride).collect::<Vec<_>>();
                     let expected_len = camera_map.rect().size().x as usize
@@ -574,12 +581,25 @@ impl eframe::App for App {
 
                     // #[cfg(false)]
                     {
-                        let colors = camera_map
+                        let screen_center = ui.max_rect().center();
+                        let z0 = camera_map.pos_to_complex(screen_center);
+                        let colors = if self.current_fractal == 0 {
+                        camera_map
                             .pixels(self.stride)
                             .collect::<Vec<_>>()
                             .into_par_iter()
                             .map(|(_, _rect, pixel)| self.tree.color_of_pixel(pixel))
-                            .collect::<Vec<_>>();
+                            .collect::<Vec<_>>()} else {
+                                 camera_map
+                            .pixels(self.stride)
+                            .collect::<Vec<_>>()
+                            .into_par_iter()
+                            .map(|(_, _rect, pixel)| {
+                                let c = pixel.mid();
+                                quadratic_map(z0, c).color()
+                            })
+                            .collect::<Vec<_>>()
+                            };
                         self.texture.set(
                             egui::ColorImage::new(
                                 [
@@ -590,12 +610,39 @@ impl eframe::App for App {
                             ),
                             egui::TextureOptions::NEAREST,
                         );
-                        ui.painter().image(
+                        let painter = ui.painter_at(ui.max_rect());
+                        painter.image(
                             self.texture.id(),
                             camera_map.rect(),
                             Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0)),
                             Color32::WHITE,
                         );
+
+                        // draw dots where we took samples, to debug aliasing
+                        if self.current_fractal != 0 {
+                            // let window = Window::from_center_size(0.0.into(), 0.0.into(), 4.0.into(), 4.0.into());
+                            let (z0_real, z0_imag ) = z0;
+                            let window =Window::from_center_size(
+                                (f64::from(z0_imag) * f64::from(z0_imag) - f64::from(z0_real) * f64::from(z0_real))
+                                    .into(),
+                                (-2.0 * f64::from(z0_real) * f64::from(z0_imag)).into(),
+                                4.0.into(),
+                                4.0.into(),
+                            );
+
+                        for line in window.grid(sample::WIDTH,sample::WIDTH) {
+                            for (c_real, c_imag) in line {
+                                painter.circle_filled(camera_map.complex_to_pos((c_real, c_imag)), 2.0, Color32::MAGENTA);     }
+                        }}
+
+
+                        // draw a dot at the center of the screen or at z0
+                        painter.circle_filled(if self.current_fractal == 0 {
+                            screen_center
+                        } else {
+                            camera_map.complex_to_pos((0.0.into(), 0.0.into()))
+                        }, 5.0, Color32::WHITE);
+
                     }
                 }
 

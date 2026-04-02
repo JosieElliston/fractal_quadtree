@@ -22,9 +22,13 @@ impl Pool {
                 let request_receiver = request_receiver.clone();
                 let response_sender = response_sender.clone();
                 std::thread::spawn(move || {
-                    while let Ok(point) = request_receiver.lock().unwrap().recv() {
+                    while let Ok(receiver) = request_receiver.lock()
+                        && let Ok(point) = receiver.recv()
+                    {
                         let color = metabrot_sample(point).color();
-                        response_sender.send((point, color)).unwrap();
+                        let Ok(_) = response_sender.send((point, color)) else {
+                            break;
+                        };
                     }
                 })
             })
