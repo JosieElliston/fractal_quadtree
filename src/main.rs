@@ -486,51 +486,120 @@ impl eframe::App for App {
                             egui::StrokeKind::Middle,
                         );
 
-                        // draw deepest_on_grid
-                        let (deepest_c, _sample) = deepest_on_grid((z0_real, z0_imag), window);
-                        painter.circle_filled(
-                            secondary_camera_map.complex_to_pos(deepest_c),
-                            5.0,
-                            Color32::LIGHT_GREEN,
-                        );
-
-                        // how many times should we iterate?
                         // draw dots where we took samples, to debug aliasing
-                        let gradient_steps = {
-                            let delta: isize = ctx.input(|i| i.key_pressed(Key::ArrowRight))
-                                as isize
-                                - ctx.input(|i| i.key_pressed(Key::ArrowLeft)) as isize;
-                            ctx.data_mut(|map| {
-                                let id = egui::Id::new("gradient_steps");
-                                let gradient_steps = map.get_temp_mut_or::<usize>(id, 0);
-                                *gradient_steps = gradient_steps.saturating_add_signed(delta);
-                                *gradient_steps
-                            })
-                        };
-
-                        for line in window.grid(sample::WIDTH, sample::WIDTH) {
-                            for (c_real, c_imag) in line {
-                                // painter.circle_filled(
-                                //     secondary_camera_map.complex_to_pos((c_real, c_imag)),
-                                //     1.0,
-                                //     Color32::WHITE,
-                                // );
-                                // the image of the sample under a few gradient descent steps
-                                if let Some(stepped_c) = (|| {
-                                    let (mut c_real, mut c_imag) = (c_real, c_imag);
-                                    for step in 0..gradient_steps {
-                                        (c_real, c_imag) = gradient_step(z0, (c_real, c_imag))?;
+                        #[cfg(false)]
+                        {
+                            // how many times should we iterate?
+                            let gradient_steps = {
+                                let delta: isize = ctx.input(|i| i.key_pressed(Key::ArrowRight))
+                                    as isize
+                                    - ctx.input(|i| i.key_pressed(Key::ArrowLeft)) as isize;
+                                ctx.data_mut(|map| {
+                                    let id = egui::Id::new("gradient_steps");
+                                    let gradient_steps = map.get_temp_mut_or::<usize>(id, 0);
+                                    *gradient_steps = gradient_steps.saturating_add_signed(delta);
+                                    *gradient_steps
+                                })
+                            };
+                            for line in window.grid(sample::WIDTH0, sample::WIDTH0) {
+                                for (c_real, c_imag) in line {
+                                    // painter.circle_filled(
+                                    //     secondary_camera_map.complex_to_pos((c_real, c_imag)),
+                                    //     1.0,
+                                    //     Color32::WHITE,
+                                    // );
+                                    // the image of the sample under a few gradient descent steps
+                                    if let Some(stepped_c) = (|| {
+                                        let (mut c_real, mut c_imag) = (c_real, c_imag);
+                                        for step in 0..gradient_steps {
+                                            (c_real, c_imag) = gradient_step(z0, (c_real, c_imag))?;
+                                        }
+                                        Some((c_real, c_imag))
+                                    })(
+                                    ) {
+                                        painter.circle_filled(
+                                            secondary_camera_map.complex_to_pos(stepped_c),
+                                            1.0,
+                                            Color32::WHITE,
+                                        );
                                     }
-                                    Some((c_real, c_imag))
-                                })() {
+                                    // draw_distance_estimator((c_real, c_imag));
+                                }
+                            }
+                        }
+
+                        // // draw deepest_on_grid
+                        // let (deepest_c, _sample) = deepest_on_grid((z0_real, z0_imag), window);
+                        // painter.circle_filled(
+                        //     secondary_camera_map.complex_to_pos(deepest_c),
+                        //     5.0,
+                        //     Color32::RED,
+                        // );
+
+                        // draw points that got resampled in a small window around them
+                        // TODO: less code reuse
+                        {
+                            let mut deepest: f32 = 0.0;
+                            let mut deepest_point = (0.0.into(), 0.0.into());
+                            // we want to look through all the points at a coarse grain before resampling
+                            let mut to_resample = Vec::with_capacity(WIDTH0 * WIDTH0);
+                            let cell_diameter = {
+                                (window.real_rad().mul2().div_f64(WIDTH0 as f64))
+                                    .max(window.imag_rad().mul2().div_f64(WIDTH0 as f64))
+                            };
+                            // draw initial points
+                            for (c_real, c_imag) in window.grid(WIDTH0, WIDTH0).flatten() {
+                                let (sample, distance) =
+                                    distance_estimator((z0_real, z0_imag), (c_real, c_imag));
+                                if sample.depth > deepest {
+                                    deepest = sample.depth;
+                                    deepest_point = (c_real, c_imag);
+                                }
+                                if let Some(distance) = distance
+                                    && distance < cell_diameter
+                                {
+                                    to_resample.push((c_real, c_imag));
+                                }
+                                painter.circle_filled(
+                                    secondary_camera_map.complex_to_pos((c_real, c_imag)),
+                                    2.0,
+                                    Color32::YELLOW,
+                                );
+                            }
+                            // TODO: try sorting the vec by distance estimate
+                            // draw points that got resampled
+                            for (c0_real, c0_imag) in to_resample {
+                                let resample_window = Window::from_center_size(
+                                    c0_real,
+                                    c0_imag,
+                                    cell_diameter,
+                                    cell_diameter,
+                                );
+                                for (c_real, c_imag) in
+                                    resample_window.grid(WIDTH1, WIDTH1).flatten()
+                                {
+                                    if (c0_real, c0_imag) == (c_real, c_imag) {
+                                        continue;
+                                    }
+                                    let sample =
+                                        quadratic_map((z0_real, z0_imag), (c_real, c_imag));
+                                    if sample.depth > deepest {
+                                        deepest = sample.depth;
+                                        deepest_point = (c_real, c_imag);
+                                    }
                                     painter.circle_filled(
-                                        secondary_camera_map.complex_to_pos(stepped_c),
-                                        1.0,
-                                        Color32::WHITE,
+                                        secondary_camera_map.complex_to_pos((c_real, c_imag)),
+                                        2.0,
+                                        Color32::ORANGE,
                                     );
                                 }
-                                // draw_distance_estimator((c_real, c_imag));
                             }
+                            // draw the deepest point
+                            painter.circle_filled(
+                                secondary_camera_map.complex_to_pos(deepest_point),
+                                5.0,
+                                Color32::RED,
+                            );
                         }
                     }
 
@@ -606,7 +675,7 @@ impl eframe::App for App {
                             //     1.0 / average_dt,
                             // ));
                             let t = format!(
-                                "    dt: {:08.04}\n1/dt: {:08.04}\nsamples: {:08.04}\nnodes: {}",
+                                "    dt: {:08.04}\n1/dt: {:08.04}\nsamples/s: {:08.04}\nnodes: {}",
                                 average_dt,
                                 1.0 / average_dt,
                                 self.sample_counts.values().sum::<usize>() as f32

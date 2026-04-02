@@ -32,3 +32,5 @@
     - jitter z0, store both z0 and color, if you get split, give it to the child which contains the sample, and internal nodes don't store samples
     - jitter each c
 - split and sample and insert on a parallel datastructure, gc can be really slow, whatever
+- find a new, smaller window, and repeat inside that one
+- fixed point DomainError

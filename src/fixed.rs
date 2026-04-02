@@ -116,6 +116,17 @@ impl Fixed {
     pub(crate) fn div_f32(self, f: f32) -> Self {
         self.mul(f.recip().into())
     }
+
+    /// returns None if the length is zero
+    /// TODO: returns None if it can't be represented as Fixed
+    pub(crate) fn normalized(real: Real, imag: Imag) -> Option<(Real, Imag) >{
+        let length = (real.into_f64() * real.into_f64() + imag.into_f64() * imag.into_f64()).sqrt();
+        if length == 0.0 {
+            None
+        } else {
+            Some((real.div_f64(length), imag.div_f64(length)))
+        }
+    }
 }
 
 impl Display for Fixed {
