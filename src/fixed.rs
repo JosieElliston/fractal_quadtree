@@ -1,6 +1,6 @@
 use std::{
     fmt::{self, Display},
-    ops::{Add, AddAssign, Neg, Sub},
+    ops::{Add, AddAssign, Neg, Sub, SubAssign},
 };
 
 /// a fixed point number in [-RANGE, RANGE)
@@ -79,6 +79,15 @@ impl Fixed {
     pub(crate) fn div2_floor_n(mut self, n: u32) -> Self {
         for _ in 0..n {
             self = self.div2_floor();
+        }
+        self
+    }
+    pub(crate) fn mul2(self) -> Self {
+        Self(self.0 * 2)
+    }
+    pub(crate) fn mul2_n(mut self, n: u32) -> Self {
+        for _ in 0..n {
+            self = self.mul2();
         }
         self
     }
@@ -162,6 +171,11 @@ impl Sub for Fixed {
     #[track_caller]
     fn sub(self, rhs: Self) -> Self::Output {
         Self(self.0 - rhs.0)
+    }
+}
+impl SubAssign for Fixed {
+    fn sub_assign(&mut self, rhs: Self) {
+        self.0 -= rhs.0;
     }
 }
 impl Neg for Fixed {

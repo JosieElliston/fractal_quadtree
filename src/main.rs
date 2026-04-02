@@ -465,7 +465,7 @@ impl eframe::App for App {
                     //     );
                     // };
 
-                    // draw dots where we took samples, to debug aliasing
+                    // draw stuff that uses the window we're sampling the mandelbrot in
                     if self.current_fractal != 0 {
                         // let window = Window::from_center_size(0.0.into(), 0.0.into(), 4.0.into(), 4.0.into());
                         let (z0_real, z0_imag) = z0;
@@ -478,19 +478,58 @@ impl eframe::App for App {
                             4.0.into(),
                         );
 
+                        // draw the outline of the window
+                        painter.rect_stroke(
+                            secondary_camera_map.window_to_rect(window),
+                            0.0,
+                            egui::Stroke::new(2.0, Color32::WHITE),
+                            egui::StrokeKind::Middle,
+                        );
+
+                        // draw deepest_on_grid
+                        let (deepest_c, _sample) = deepest_on_grid((z0_real, z0_imag), window);
+                        painter.circle_filled(
+                            secondary_camera_map.complex_to_pos(deepest_c),
+                            5.0,
+                            Color32::LIGHT_GREEN,
+                        );
+
+                        // how many times should we iterate?
+                        // draw dots where we took samples, to debug aliasing
+                        let gradient_steps = {
+                            let delta: isize = ctx.input(|i| i.key_pressed(Key::ArrowRight))
+                                as isize
+                                - ctx.input(|i| i.key_pressed(Key::ArrowLeft)) as isize;
+                            ctx.data_mut(|map| {
+                                let id = egui::Id::new("gradient_steps");
+                                let gradient_steps = map.get_temp_mut_or::<usize>(id, 0);
+                                *gradient_steps = gradient_steps.saturating_add_signed(delta);
+                                *gradient_steps
+                            })
+                        };
+
                         for line in window.grid(sample::WIDTH, sample::WIDTH) {
                             for (c_real, c_imag) in line {
-                                if secondary_camera_map
-                                    .window()
-                                    .contains_point((c_real, c_imag))
-                                {
+                                // painter.circle_filled(
+                                //     secondary_camera_map.complex_to_pos((c_real, c_imag)),
+                                //     1.0,
+                                //     Color32::WHITE,
+                                // );
+                                // the image of the sample under a few gradient descent steps
+                                if let Some(stepped_c) = (|| {
+                                    let (mut c_real, mut c_imag) = (c_real, c_imag);
+                                    for step in 0..gradient_steps {
+                                        (c_real, c_imag) = gradient_step(z0, (c_real, c_imag))?;
+                                    }
+                                    Some((c_real, c_imag))
+                                })() {
                                     painter.circle_filled(
-                                        secondary_camera_map.complex_to_pos((c_real, c_imag)),
+                                        secondary_camera_map.complex_to_pos(stepped_c),
                                         1.0,
-                                        Color32::MAGENTA,
+                                        Color32::WHITE,
                                     );
-                                    // draw_distance_estimator((c_real, c_imag));
                                 }
+                                // draw_distance_estimator((c_real, c_imag));
                             }
                         }
                     }
