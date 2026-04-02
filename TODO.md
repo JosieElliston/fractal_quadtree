@@ -20,7 +20,7 @@
 - note that we're refining 256/4 times with a constant window, maybe we can use that
 - alt quadtree architecture where you store samples at the corners of the domain, not the center, which allows for bilinear interpolation, at the cost of probably redundancy or complexity. like consider a sample on the edge of the domain, it on the corner of multiple leafs that aren't near cousins, and aren't guaranteed to exist in some order.
 - reread comments on my project, i think i deleted my notes
-- to interpolate between samples, make a delaunay triangulation on the samples, go to the dual voronoi diagram, then do some interpolation on the vertices of each cell. you could also maybe make a voronoi diagram with the samples as the seeds and do a different interpolation.
+- to interpolate between samples, make a delaunay triangulation on the samples, go to the dual voronoi diagram, then do some interpolation on the vertices of each cell. you could also maybe make a voronoi diagram with the samples as the seeds and do a different interpolation. the delaunay triangulation could include constraints based on parents/children/siblings, if that makes it faster.
 - profile with cargo instruments
 - more precision so we can zoom farther
 - refactor to allow for comparing different fractals
@@ -29,7 +29,7 @@
     - button for "mouse is now controlling camera 1 / 2"
 - it's actually really important to sample the mandelbrot at a high width
 - to avoid aliasing artifacts, jitter the samples
-    - jitter z0, store both z0 and color, if you get split, give it to the child which contains the sample, and internal nodes don't store samples
+    - jitter z0, store both z0 and color, if you get split, give it to the child which contains the sample, and internal nodes don't store samples, (different quadtree architecture)
     - jitter each c
 - split and sample and insert on a parallel datastructure, gc can be really slow, whatever
     - note that the deepest parent of all the active nodes for a given window is kinda deep, this is a pseudo root, maybe we can use this somehow
@@ -45,3 +45,11 @@
     - camera_map.fixed_to_vec1(fixed)
     - camera_map.complex_to_vec2((real, imag))
     - don't draw if camera_map.fixed_to_vec1(node.dom().rad()) < 4 * pixel_size
+- when we split a node, instead of filling all the children with a sample/color, only fill the children that intersect the window. (the parent is guaranteed to intersect the window, but it's not guaranteed that all of its children do too)
+- refactor: make `ExactFixed` and `Domain`
+    - `ExactFixed` guarantees that it's never been rounded, and has been constructed
+        - you can only add, sub, mul2, and div2
+    - `Domain` is a square but with `ExactFixed`
+    - square will probably be unused
+- turn on O3 for release and debug
+- organize `TODO.md`
