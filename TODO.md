@@ -1,5 +1,7 @@
 # TODO
 
+## unorganized
+
 - refine samples that have children that disagree in color first
 - prune tree by double window sizes and doubling allowed domain radius
 - garbage collect nodes
@@ -51,5 +53,12 @@
         - you can only add, sub, mul2, and div2
     - `Domain` is a square but with `ExactFixed`
     - square will probably be unused
-- turn on O3 for release and debug
 - organize `TODO.md`
+
+## optimization
+
+- try putting `align` on stuff
+
+## style/correctness
+
+- change `lerp` to `lerp_bounded` and `lerp_unbounded` or `lerp<const bounds_check: bool>` for whether do the bounds check

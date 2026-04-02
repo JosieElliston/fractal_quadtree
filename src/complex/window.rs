@@ -1,0 +1,180 @@
+use std::cmp::Ordering;
+
+use super::{Square, fixed::*};
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+// #[repr(align(32))]
+pub(crate) struct Window {
+    real_lo: Real,
+    real_hi: Real,
+    imag_lo: Imag,
+    imag_hi: Imag,
+}
+impl Window {
+    /// fails if the window would be empty
+    /// including if it would have zero width or height
+    pub(crate) fn try_new(
+        real_lo: Real,
+        real_hi: Real,
+        imag_lo: Imag,
+        imag_hi: Imag,
+    ) -> Option<Self> {
+        if !(real_lo < real_hi && imag_lo < imag_hi) {
+            return None;
+        }
+        Some(Self {
+            real_lo,
+            real_hi,
+            imag_lo,
+            imag_hi,
+        })
+    }
+    pub(crate) fn new(real_lo: Real, real_hi: Real, imag_lo: Imag, imag_hi: Imag) -> Self {
+        // assert!(real_lo.is_finite());
+        // assert!(real_hi.is_finite());
+        // assert!(imag_lo.is_finite());
+        // assert!(imag_hi.is_finite());
+        assert!(real_lo < real_hi);
+        assert!(imag_lo < imag_hi);
+        Self {
+            real_lo,
+            real_hi,
+            imag_lo,
+            imag_hi,
+        }
+    }
+    pub(crate) fn from_center_size(
+        real_mid: Real,
+        imag_mid: Imag,
+        real_diam: Real,
+        imag_diam: Imag,
+    ) -> Self {
+        assert!(real_diam > Fixed::ZERO);
+        assert!(imag_diam > Fixed::ZERO);
+        let real_rad = real_diam.div2_floor();
+        let imag_rad = imag_diam.div2_floor();
+        let real_lo = real_mid - real_rad;
+        let real_hi = real_mid + real_rad;
+        let imag_lo = imag_mid - imag_rad;
+        let imag_hi = imag_mid + imag_rad;
+        Self::new(real_lo, real_hi, imag_lo, imag_hi)
+    }
+
+    pub(crate) fn real_lo(self) -> Real {
+        self.real_lo
+    }
+    pub(crate) fn real_hi(self) -> Real {
+        self.real_hi
+    }
+    pub(crate) fn real_mid(self) -> Real {
+        (self.real_hi + self.real_lo).div2_exact().unwrap()
+    }
+    pub(crate) fn real_rad(self) -> Real {
+        (self.real_hi - self.real_lo).div2_exact().unwrap()
+    }
+
+    pub(crate) fn imag_lo(self) -> Imag {
+        self.imag_lo
+    }
+    pub(crate) fn imag_hi(self) -> Imag {
+        self.imag_hi
+    }
+    pub(crate) fn imag_rad(self) -> Imag {
+        (self.imag_hi - self.imag_lo).div2_exact().unwrap()
+    }
+    pub(crate) fn imag_mid(self) -> Imag {
+        (self.imag_hi + self.imag_lo).div2_exact().unwrap()
+    }
+
+    // pub(crate) fn area(self) -> f32 {
+    //     (self.real_hi - self.real_lo) * (self.imag_hi - self.imag_lo)
+    // }
+
+    pub(crate) fn intersect(self, other: impl Into<Self>) -> Option<Self> {
+        let other = other.into();
+        let real_lo = Fixed::max(self.real_lo, other.real_lo);
+        let real_hi = Fixed::min(self.real_hi, other.real_hi);
+        let imag_lo = Fixed::max(self.imag_lo, other.imag_lo);
+        let imag_hi = Fixed::min(self.imag_hi, other.imag_hi);
+        Self::try_new(real_lo, real_hi, imag_lo, imag_hi)
+    }
+
+    // fn overlaps(self, other: impl Into<Self>) -> bool {
+    //     self.intersect(other).is_some()
+    // }
+    pub(crate) fn overlaps(self, other: impl Into<Self>) -> bool {
+        let other = other.into();
+        let real_lo = Fixed::max(self.real_lo, other.real_lo);
+        let real_hi = Fixed::min(self.real_hi, other.real_hi);
+        let imag_lo = Fixed::max(self.imag_lo, other.imag_lo);
+        let imag_hi = Fixed::min(self.imag_hi, other.imag_hi);
+        real_lo <= real_hi && imag_lo <= imag_hi
+    }
+
+    pub(crate) fn contains_point(self, (real, imag): (Real, Imag)) -> bool {
+        (self.real_lo..=self.real_hi).contains(&real)
+            && (self.imag_lo..=self.imag_hi).contains(&imag)
+    }
+
+    // fn contains(self, other: impl Into<Self>) -> bool {
+    //     let other = other.into();
+    //     self.intersect(other) == Some(other)
+    // }
+
+    /// returns an iterator over the centers of rectangles of a width by height grid
+    /// so each point will be inside the window
+    /// and the average of the points will be the center of the window
+    pub(crate) fn grid(
+        self,
+        width: usize,
+        height: usize,
+    ) -> impl Iterator<Item = impl Iterator<Item = (Real, Imag)>> {
+        (0..height).map(move |row| {
+            let imag = Fixed::lerp(
+                self.imag_lo(),
+                self.imag_hi(),
+                1.0 - (row as f64 + 0.5) / height as f64,
+            );
+            (0..width).map(move |col| {
+                let real = Fixed::lerp(
+                    self.real_lo(),
+                    self.real_hi(),
+                    (col as f64 + 0.5) / width as f64,
+                );
+                (real, imag)
+            })
+        })
+    }
+}
+impl From<Square> for Window {
+    fn from(value: Square) -> Self {
+        Window {
+            real_lo: value.real_lo(),
+            real_hi: value.real_hi(),
+            imag_lo: value.imag_lo(),
+            imag_hi: value.imag_hi(),
+        }
+    }
+}
+impl PartialOrd for Window {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        if self == other {
+            return Some(Ordering::Equal);
+        }
+        if other.real_lo <= self.real_lo
+            && self.real_hi <= other.real_hi
+            && other.imag_lo <= self.imag_lo
+            && self.imag_hi <= other.imag_hi
+        {
+            return Some(Ordering::Less);
+        }
+        if self.real_lo <= other.real_lo
+            && other.real_hi <= self.real_hi
+            && self.imag_lo <= other.imag_lo
+            && other.imag_hi <= self.imag_hi
+        {
+            return Some(Ordering::Greater);
+        }
+        None
+    }
+}

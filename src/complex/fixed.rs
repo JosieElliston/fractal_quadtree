@@ -1,7 +1,4 @@
-use std::{
-    fmt::{self, Display},
-    ops::{Add, AddAssign, Neg, Sub, SubAssign},
-};
+use std::{fmt, ops};
 
 /// a fixed point number in [-RANGE, RANGE)
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -129,7 +126,7 @@ impl Fixed {
     }
 }
 
-impl Display for Fixed {
+impl fmt::Display for Fixed {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&format!("{:.6}", f64::from(*self)))
     }
@@ -163,7 +160,7 @@ impl From<f32> for Fixed {
     }
 }
 
-impl Add for Fixed {
+impl ops::Add for Fixed {
     type Output = Self;
 
     #[track_caller]
@@ -171,12 +168,12 @@ impl Add for Fixed {
         Self(self.0 + rhs.0)
     }
 }
-impl AddAssign for Fixed {
+impl ops::AddAssign for Fixed {
     fn add_assign(&mut self, rhs: Self) {
         self.0 += rhs.0;
     }
 }
-impl Sub for Fixed {
+impl ops::Sub for Fixed {
     type Output = Self;
 
     #[track_caller]
@@ -184,12 +181,12 @@ impl Sub for Fixed {
         Self(self.0 - rhs.0)
     }
 }
-impl SubAssign for Fixed {
+impl ops::SubAssign for Fixed {
     fn sub_assign(&mut self, rhs: Self) {
         self.0 -= rhs.0;
     }
 }
-impl Neg for Fixed {
+impl ops::Neg for Fixed {
     type Output = Self;
 
     fn neg(self) -> Self::Output {

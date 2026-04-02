@@ -1,6 +1,5 @@
 mod app;
-mod camera;
-mod fixed;
+mod complex;
 mod pool;
 mod sample;
 mod tree;
@@ -27,19 +26,6 @@ fn main() -> eframe::Result {
         native_options,
         Box::new(|cc| Ok(Box::new(app::App::new(cc)))),
     )
-}
-
-fn lerp(lo: f64, hi: f64, t: f64) -> f64 {
-    assert!(lo < hi);
-    // assert!((0.0..=1.0).contains(&t));
-    // lo * (1.0 - t) + hi * t
-    lo + (hi - lo) * t
-}
-
-fn inv_lerp(lo: f64, hi: f64, x: f64) -> f64 {
-    assert!(lo < hi);
-    // assert!((lo..=hi).contains(&x));
-    (x - lo) / (hi - lo)
 }
 
 // fn bench() {

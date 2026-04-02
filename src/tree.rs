@@ -5,12 +5,9 @@ use std::{
 };
 
 use eframe::egui::Color32;
-use rayon::prelude::*;
 
 use crate::{
-    camera::{CameraMap, Square, Window},
-    fixed::*,
-    inv_lerp,
+    complex::{Square, Window, fixed::*},
     sample::metabrot_sample,
 };
 

@@ -2,7 +2,7 @@ use std::sync::{Arc, Mutex, mpsc};
 
 use eframe::egui::Color32;
 
-use crate::{fixed::*, sample::metabrot_sample};
+use crate::{complex::fixed::*, sample};
 
 pub(crate) struct Pool {
     threads: Vec<std::thread::JoinHandle<()>>,
@@ -25,7 +25,7 @@ impl Pool {
                     while let Ok(receiver) = request_receiver.lock()
                         && let Ok(point) = receiver.recv()
                     {
-                        let color = metabrot_sample(point).color();
+                        let color = sample::metabrot_sample(point).color();
                         let Ok(_) = response_sender.send((point, color)) else {
                             break;
                         };

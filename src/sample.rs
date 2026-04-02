@@ -1,6 +1,6 @@
 use eframe::egui::Color32;
 
-use crate::{camera::Window, fixed::*};
+use crate::complex::{Window, fixed::*};
 
 pub(crate) struct Sample {
     pub(crate) depth: f32,

@@ -2,8 +2,7 @@ use eframe::egui::{self, Color32, Key, Pos2, Rect, RichText, Vec2};
 use rayon::prelude::*;
 
 use crate::{
-    camera::{Camera, CameraMap, Square, Window},
-    fixed::*,
+    complex::{Camera, CameraMap, Square, Window, fixed::*},
     pool::Pool,
     sample,
     tree::Tree,
