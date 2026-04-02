@@ -9,8 +9,8 @@ pub(crate) struct Sample {
     depth: f32,
 }
 impl Sample {
-    // const MAX_DEPTH: u32 = 8192;
-    const MAX_DEPTH: u32 = 131072;
+    const MAX_DEPTH: u32 = 8192;
+    // const MAX_DEPTH: u32 = 131072;
 
     // fn color(&self) -> Color32 {
     //     let color = if self.depth == 0 {
@@ -60,12 +60,12 @@ pub(crate) fn quadratic_map(
     // const Z_ESCAPE_RAD2: f32 = 4.0;
     const Z_ESCAPE_RAD2: f32 = 64.0;
 
-    // TODO: consider using fixed point for this
     let z0_real: f32 = z0_real.into();
     let z0_imag: f32 = z0_imag.into();
     let c_real: f32 = c_real.into();
     let c_imag: f32 = c_imag.into();
 
+    // TODO: consider using fixed point for all the computation
     let mut z_real = z0_real;
     let mut z_imag = z0_imag;
     let mut old_real = z_real;
@@ -124,21 +124,152 @@ pub(crate) fn quadratic_map(
     // )
 }
 
+/// fails if the fixed point can't be constructed from the float
+pub(crate) fn distance_estimator(
+    (z0_real, z0_imag): (Real, Imag),
+    (c_real, c_imag): (Real, Imag),
+) -> Option<Fixed> {
+    // const Z_ESCAPE_RAD2: f32 = 4.0;
+    // TODO: probably make this bigger
+    const Z_ESCAPE_RAD2: f32 = 64.0;
+
+    //
+    // P_c^0(c) = c
+    // P_c^1(c) = c^2 + c
+    // z_0 = 0
+    // z_1 = c
+    // z_2 = c^2 + c
+    //
+    // z_n = P_c^{n-1}(c)
+    // z_{n+1} = P_c^n(c)
+    // z_n = P_c^{n}(0)
+
+    /// 2 * |P_c^n(c)| * ln|P^n_c(c)| / |∂/∂c P_c^n(c)|
+    /// 2 * Abs[f[c]]*Log[Abs[f[c]]]/Abs[Partial[f[c],c]]
+    fn estimate(z_real: f32, z_imag: f32, dz_real: f32, dz_imag: f32) -> Option<Fixed> {
+        let z_abs = (z_real * z_real + z_imag * z_imag).sqrt();
+        let dz_abs = (dz_real * dz_real + dz_imag * dz_imag).sqrt();
+        Fixed::try_from_f32(2.0 * z_abs * z_abs.ln() / dz_abs)
+    }
+
+    // // f(c) = |P_c^n(c)|
+    // // g(c) = |∂/∂c P_c^n(c)|
+    // // Partial[2*f(c)*Log[f(c)]/g(c),c] = (2 g[c] (1 + Log[f[c]]) f'[c] - 2 f[c] Log[f[c]] g'[c])/g[c]^2
+    // /// the derivative of the estimate with respect to c
+    // // z_{n+1} = z_n^2 + c
+    // // dz_{n+1} = 2 * z_n * dz_n
+    // // adz_n = |dz_n| = Real(dz_n)^2 + Imag(dz_n)^2
+    // // dadz_n = 2 * Real(dz_n) *
+    // g probably isn't differentiable actually
+    // fn gradient() -> (Real, Imag) {}
+
+    let z0_real: f32 = z0_real.into();
+    let z0_imag: f32 = z0_imag.into();
+    let c_real: f32 = c_real.into();
+    let c_imag: f32 = c_imag.into();
+
+    let mut z_real = z0_real;
+    let mut z_imag = z0_imag;
+    let mut old_real = z_real;
+    let mut old_imag = z_imag;
+    let mut z_real2 = z_real * z_real;
+    let mut z_imag2 = z_imag * z_imag;
+    // TODO: not sure about this
+    let mut dz_real = 1.0;
+    // let mut dz_real = 0.0;
+    let mut dz_imag = 0.0;
+    let mut period_i = 0;
+    let mut period_len = 1;
+    for depth in 0..Sample::MAX_DEPTH {
+        if z_real2 + z_imag2 > Z_ESCAPE_RAD2 {
+            return estimate(z_real, z_imag, dz_real, dz_imag);
+        }
+
+        // 2 * z * dz + 1
+        (dz_real, dz_imag) = (
+            2.0 * (z_real * dz_real - z_imag * dz_imag) + 1.0,
+            2.0 * (z_real * dz_imag + z_imag * dz_real),
+        );
+        z_imag = (z_real + z_real) * z_imag + c_imag;
+        z_real = z_real2 - z_imag2 + c_real;
+        z_real2 = z_real * z_real;
+        z_imag2 = z_imag * z_imag;
+
+        if (old_real == z_real) && (old_imag == z_imag) {
+            // return estimate(z_real, z_imag, dz_real, dz_imag);
+            return Some(0.0.into());
+        }
+
+        period_i += 1;
+        if period_i > period_len {
+            period_i = 0;
+            period_len += 1;
+            old_real = z_real;
+            old_imag = z_imag;
+        };
+        assert!(z_real.is_finite());
+        assert!(z_imag.is_finite());
+    }
+    estimate(z_real, z_imag, dz_real, dz_imag)
+    // 0.0
+}
+
+/// returns the estimated distance and gradient of the estimated distance
+/// TODO: compute the gradient exactly, not with finite difference
+pub(crate) fn distance_estimator_gradient(
+    z0: (Real, Imag),
+    (c_real, c_imag): (Real, Imag),
+) -> Option<(Fixed, (Real, Imag))> {
+    let delta = 0.00001.into();
+    let distance = distance_estimator(z0, (c_real, c_imag))?;
+    let distance_right = distance_estimator(z0, (c_real + delta, c_imag))?;
+    let distance_up = distance_estimator(z0, (c_real, c_imag + delta))?;
+    let grad_real = Fixed::try_from_f32((distance_right - distance).into_f32() / delta.into_f32())?;
+    let grad_imag = Fixed::try_from_f32((distance_up - distance).into_f32() / delta.into_f32())?;
+    Some((distance, (grad_real, grad_imag)))
+}
+
+/// one iteration of ~gradient descent
+/// except that we know how far to step
+pub(crate) fn gradient_step(
+    (z0_real, z0_imag): (Real, Imag),
+    (c_real, c_imag): (Real, Imag),
+) -> Option<(Real, Imag)> {
+    let (distance, (grad_real, grad_imag)) =
+        distance_estimator_gradient((z0_real, z0_imag), (c_real, c_imag))?;
+    let distance: f32 = distance.into();
+    let grad_real: f32 = grad_real.into();
+    let grad_imag: f32 = grad_imag.into();
+    let grad_len = (grad_real * grad_real + grad_imag * grad_imag).sqrt();
+    if grad_len == 0.0 {
+        return None;
+    }
+    let step_size = distance / grad_len;
+    Some((
+        (c_real.into_f32() - grad_real * step_size).into(),
+        (c_imag.into_f32() - grad_imag * step_size).into(),
+    ))
+}
+
 pub(crate) const WIDTH: usize = 128;
-fn deepest_on_grid((z0_real, z0_imag): (Real, Imag), window: Window) -> Sample {
+fn deepest_on_grid((z0_real, z0_imag): (Real, Imag), window: Window) -> ((Real, Imag), Sample) {
     let mut deepest: f32 = 0.0;
+    let mut deepest_point = (0.0.into(), 0.0.into());
     for line in window.grid(WIDTH, WIDTH) {
         for (c_real, c_imag) in line {
             let sample = quadratic_map((z0_real, z0_imag), (c_real, c_imag));
             // metajulia
             // let sample = mandelbrot_sample(c_real, c_imag, z0_real, z0_imag);
             if sample.depth == Sample::MAX_DEPTH as f32 {
-                return sample;
+                return ((c_real, c_imag), sample);
             }
-            deepest = deepest.max(sample.depth);
+            if sample.depth > deepest {
+                deepest = sample.depth;
+                deepest_point = (c_real, c_imag);
+            }
         }
     }
-    Sample { depth: deepest }
+    (deepest_point, Sample { depth: deepest })
 }
 
 #[inline(never)]
@@ -186,5 +317,6 @@ pub(crate) fn metabrot_sample((z0_real, z0_imag): (Real, Imag)) -> Sample {
         };
     };
 
-    deepest_on_grid((z0_real, z0_imag), window)
+    let (c, sample) = deepest_on_grid((z0_real, z0_imag), window);
+    sample
 }

@@ -83,6 +83,15 @@ impl CameraMap {
     pub(crate) fn rect(&self) -> Rect {
         self.rect
     }
+    /// equivalent to `self.rect_to_window(self.rect())`
+    pub(crate) fn window(&self) -> Window {
+        Window::new(
+            self.camera.real_lo(),
+            self.camera.real_hi(),
+            self.imag_lo(),
+            self.imag_hi(),
+        )
+    }
 
     pub(crate) fn imag_lo(&self) -> Imag {
         self.camera.imag_mid - self.imag_rad()
@@ -104,7 +113,6 @@ impl CameraMap {
             inv_lerp(self.rect.min.x as f64, self.rect.max.x as f64, x as f64),
         )
     }
-
     pub(crate) fn y_to_imag(&self, y: f32) -> Imag {
         // 2.0 * y * (self.camera.real_rad / self.rect.size().x)
         Fixed::lerp(
@@ -113,11 +121,6 @@ impl CameraMap {
             1.0 - inv_lerp(self.rect.min.y as f64, self.rect.max.y as f64, y as f64),
         )
     }
-
-    pub(crate) fn pos_to_complex(&self, pos: Pos2) -> (Real, Imag) {
-        (self.x_to_real(pos.x), self.y_to_imag(pos.y))
-    }
-
     pub(crate) fn real_to_x(&self, real: Real) -> f32 {
         lerp(
             self.rect.min.x as f64,
@@ -125,7 +128,6 @@ impl CameraMap {
             Fixed::inv_lerp(self.camera.real_lo(), self.camera.real_hi(), real),
         ) as f32
     }
-
     pub(crate) fn imag_to_y(&self, imag: Imag) -> f32 {
         lerp(
             self.rect.min.y as f64,
@@ -134,16 +136,11 @@ impl CameraMap {
         ) as f32
     }
 
+    pub(crate) fn pos_to_complex(&self, pos: Pos2) -> (Real, Imag) {
+        (self.x_to_real(pos.x), self.y_to_imag(pos.y))
+    }
     pub(crate) fn complex_to_pos(&self, (real, imag): (Real, Imag)) -> Pos2 {
         Pos2::new(self.real_to_x(real), self.imag_to_y(imag))
-    }
-
-    pub(crate) fn window_to_rect(&self, window: impl Into<Window>) -> Rect {
-        let window = window.into();
-        Rect {
-            min: self.complex_to_pos((window.real_lo, window.imag_hi)),
-            max: self.complex_to_pos((window.real_hi, window.imag_lo)),
-        }
     }
 
     pub(crate) fn rect_to_window(&self, rect: Rect) -> Window {
@@ -153,6 +150,13 @@ impl CameraMap {
             self.y_to_imag(rect.max.y),
             self.y_to_imag(rect.min.y),
         )
+    }
+    pub(crate) fn window_to_rect(&self, window: impl Into<Window>) -> Rect {
+        let window = window.into();
+        Rect {
+            min: self.complex_to_pos((window.real_lo, window.imag_hi)),
+            max: self.complex_to_pos((window.real_hi, window.imag_lo)),
+        }
     }
 
     pub(crate) fn pixels(
@@ -306,6 +310,11 @@ impl Window {
         let imag_lo = Fixed::max(self.imag_lo, other.imag_lo);
         let imag_hi = Fixed::min(self.imag_hi, other.imag_hi);
         real_lo <= real_hi && imag_lo <= imag_hi
+    }
+
+    pub(crate) fn contains_point(self, (real, imag): (Real, Imag)) -> bool {
+        (self.real_lo..=self.real_hi).contains(&real)
+            && (self.imag_lo..=self.imag_hi).contains(&imag)
     }
 
     // fn contains(self, other: impl Into<Self>) -> bool {

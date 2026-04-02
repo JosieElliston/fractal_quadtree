@@ -14,7 +14,7 @@ use crate::{
     camera::{Camera, CameraMap, Square, Window},
     fixed::*,
     pool::Pool,
-    sample::quadratic_map,
+    sample::*,
     tree::Tree,
 };
 
@@ -188,8 +188,8 @@ impl eframe::App for App {
                         *camera += pan_offset(mouse, camera.real_rad());
                     }
                 }
-                // move the secondary camera when holding backtick
-                if !ctx.input(|i| i.key_down(Key::Backtick)) {
+                // move other camera when holding backtick
+                if ctx.input(|i| i.key_down(Key::Backtick)) != (self.current_fractal == 0) {
                     pan(
                         ui,
                         ctx,
@@ -255,10 +255,7 @@ impl eframe::App for App {
                     // TODO: various canceling stuff
                     // while self.pool.in_flight() < self.in_flight_target {
                     while self.pool.in_flight() < 256 {
-                        let Some(points) = self
-                            .tree
-                            .refine(primary_camera_map.rect_to_window(primary_camera_map.rect()))
-                        else {
+                        let Some(points) = self.tree.refine(primary_camera_map.window()) else {
                             break;
                         };
                         for (real, imag) in points {
@@ -423,6 +420,51 @@ impl eframe::App for App {
                         Color32::WHITE,
                     );
 
+                    let draw_complex_circle =
+                        |(c_real, c_imag): (Real, Imag), rad: Fixed, stroke: egui::Stroke| {
+                            painter.circle_stroke(
+                                secondary_camera_map.complex_to_pos((c_real, c_imag)),
+                                secondary_camera_map.real_to_x(rad)
+                                    - secondary_camera_map.real_to_x(0.0.into()),
+                                stroke,
+                            );
+                        };
+                    let draw_complex_segment =
+                        |(c1_real, c1_imag): (Real, Imag),
+                         (c2_real, c2_imag): (Real, Imag),
+                         stroke: egui::Stroke| {
+                            painter.line_segment(
+                                [
+                                    secondary_camera_map.complex_to_pos((c1_real, c1_imag)),
+                                    secondary_camera_map.complex_to_pos((c2_real, c2_imag)),
+                                ],
+                                stroke,
+                            );
+                        };
+                    // let draw_distance_estimator = |(c_real, c_imag)| {
+                    //     // TODO: get derivative and draw line towards the estimated fractal location
+
+                    //     let Some((distance, (grad_real, grad_imag))) =
+                    //         distance_estimator_gradient(z0, (c_real, c_imag))
+                    //     else {
+                    //         return;
+                    //     };
+                    //     painter.circle_stroke(
+                    //         secondary_camera_map.complex_to_pos((c_real, c_imag)),
+                    //         secondary_camera_map.real_to_x(distance)
+                    //             - secondary_camera_map.real_to_x(0.0.into()),
+                    //         egui::Stroke::new(2.0, Color32::RED),
+                    //     );
+                    //     painter.line_segment(
+                    //         [
+                    //             secondary_camera_map.complex_to_pos((c_real, c_imag)),
+                    //             secondary_camera_map
+                    //                 .complex_to_pos((c_real - grad_real, c_imag - grad_imag)),
+                    //         ],
+                    //         egui::Stroke::new(2.0, Color32::RED),
+                    //     );
+                    // };
+
                     // draw dots where we took samples, to debug aliasing
                     if self.current_fractal != 0 {
                         // let window = Window::from_center_size(0.0.into(), 0.0.into(), 4.0.into(), 4.0.into());
@@ -438,14 +480,63 @@ impl eframe::App for App {
 
                         for line in window.grid(sample::WIDTH, sample::WIDTH) {
                             for (c_real, c_imag) in line {
-                                painter.circle_filled(
-                                    secondary_camera_map.complex_to_pos((c_real, c_imag)),
-                                    2.0,
-                                    Color32::MAGENTA,
-                                );
+                                if secondary_camera_map
+                                    .window()
+                                    .contains_point((c_real, c_imag))
+                                {
+                                    painter.circle_filled(
+                                        secondary_camera_map.complex_to_pos((c_real, c_imag)),
+                                        1.0,
+                                        Color32::MAGENTA,
+                                    );
+                                    // draw_distance_estimator((c_real, c_imag));
+                                }
                             }
                         }
                     }
+
+                    // // draw distance estimator
+                    // if self.current_fractal != 0 {
+                    //     draw_distance_estimator(secondary_camera_map.pos_to_complex(
+                    //         ctx.input(|i| i.pointer.latest_pos().unwrap_or_default()),
+                    //     ));
+                    // }
+                    // draw distance estimator with gradient descent steps
+                    (|| -> Option<()> {
+                        if self.current_fractal != 0 {
+                            let mut c = secondary_camera_map.pos_to_complex(
+                                ctx.input(|i| i.pointer.latest_pos().unwrap_or_default()),
+                            );
+                            for _ in 0..4 {
+                                let (distance, (grad_real, grad_imag)) =
+                                    distance_estimator_gradient(z0, c)?;
+                                draw_complex_circle(
+                                    c,
+                                    distance,
+                                    egui::Stroke::new(1.0, Color32::RED),
+                                );
+                                // let scale = distance / ((grad_real * grad_real + grad_imag * grad_imag).into_f32()).sqrt();
+                                // draw_complex_segment(
+                                //     c,
+                                //     (c_real - grad_real * scale, c_imag - grad_imag * scale),
+                                //     egui::Stroke::new(1.0, Color32::RED),
+                                // );
+                                let next_c = gradient_step(z0, c)?;
+                                draw_complex_segment(
+                                    c,
+                                    next_c,
+                                    egui::Stroke::new(1.0, Color32::RED),
+                                );
+                                painter.circle_filled(
+                                    secondary_camera_map.complex_to_pos(next_c),
+                                    3.0,
+                                    Color32::RED,
+                                );
+                                c = next_c;
+                            }
+                        }
+                        Some(())
+                    })();
 
                     // draw a dot at the center of the screen or at z0
                     painter.circle_filled(
@@ -454,7 +545,7 @@ impl eframe::App for App {
                         } else {
                             secondary_camera_map.complex_to_pos((0.0.into(), 0.0.into()))
                         },
-                        5.0,
+                        3.0,
                         Color32::WHITE,
                     );
                 }

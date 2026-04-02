@@ -28,3 +28,7 @@
     - mandelbrots (need different camera)
     - button for "mouse is now controlling camera 1 / 2"
 - it's actually really important to sample the mandelbrot at a high width
+- to avoid aliasing artifacts, jitter the samples
+    - jitter z0, store both z0 and color, if you get split, give it to the child which contains the sample, and internal nodes don't store samples
+    - jitter each c
+- split and sample and insert on a parallel datastructure, gc can be really slow, whatever

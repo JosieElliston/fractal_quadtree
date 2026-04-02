@@ -30,6 +30,12 @@ impl Fixed {
     pub(crate) fn try_from_f32(f: f32) -> Option<Self> {
         Self::try_from_f64(f as f64)
     }
+    pub(crate) fn into_f64(self) -> f64 {
+        f64::from(self)
+    }
+    pub(crate) fn into_f32(self) -> f32 {
+        f32::from(self)
+    }
 
     /// note that this is approximate
     pub(crate) fn lerp(lo: Self, hi: Self, t: f64) -> Self {
@@ -69,6 +75,12 @@ impl Fixed {
     }
     pub(crate) fn div2_floor(self) -> Self {
         Self(self.0 / 2)
+    }
+    pub(crate) fn div2_floor_n(mut self, n: u32) -> Self {
+        for _ in 0..n {
+            self = self.div2_floor();
+        }
+        self
     }
 
     #[track_caller]
