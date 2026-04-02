@@ -7,13 +7,13 @@ use std::{
 use eframe::egui::Color32;
 
 use crate::{
-    complex::{Square, Window, fixed::*},
+    complex::{Domain, Pixel, Window, fixed::*},
     sample::metabrot_sample,
 };
 
 #[derive(Debug)]
 struct Internal {
-    dom: Square,
+    dom: Domain,
     color: Color32,
     /// 0 1
     ///
@@ -23,13 +23,13 @@ struct Internal {
 
 #[derive(Debug)]
 struct LeafColor {
-    dom: Square,
+    dom: Domain,
     color: Color32,
 }
 
 #[derive(Debug)]
 struct LeafReserved {
-    dom: Square,
+    dom: Domain,
 }
 
 #[derive(Debug)]
@@ -41,7 +41,7 @@ enum Node {
 
 #[derive(Debug)]
 pub(crate) struct Tree {
-    dom: Square,
+    dom: Domain,
     root: Node,
 }
 
@@ -61,14 +61,23 @@ impl Internal {
     /// returns None if the point is outside the domain
     // fn child_i_containing(&self, real: f32, imag: f32) -> Option<usize> {
     fn child_i_containing(&self, (real, imag): (Real, Imag)) -> Option<usize> {
+        let real = real.into();
+        let imag = imag.into();
         // (0..self.children.len()).find(|&i| self.children[i].dom().contains_point((real, imag)))
 
         // do it this way for better stability
         if !self.dom.contains_point((real, imag)) {
             None
         } else {
-            let actual = (if real <= self.dom.real_mid() { 0 } else { 1 })
-                + (if imag >= self.dom.imag_mid() { 0 } else { 2 });
+            let actual = (if real <= self.dom.real_mid().into() {
+                0
+            } else {
+                1
+            }) + (if imag >= self.dom.imag_mid().into() {
+                0
+            } else {
+                2
+            });
             // let oracle = (0..self.children.len())
             //     .find(|&i| self.children[i].dom().contains_point((real, imag)))
             //     .unwrap();
@@ -89,42 +98,13 @@ impl Internal {
 impl LeafColor {
     /// fails if the domain gets too small
     fn try_split(&self) -> Option<Internal> {
-        ({
-            || {
-                Some(
-                    [
-                        Square::new_exact(
-                            self.dom.real_lo(),
-                            self.dom.real_mid(),
-                            self.dom.imag_mid(),
-                            self.dom.imag_hi(),
-                        )?,
-                        Square::new_exact(
-                            self.dom.real_mid(),
-                            self.dom.real_hi(),
-                            self.dom.imag_mid(),
-                            self.dom.imag_hi(),
-                        )?,
-                        Square::new_exact(
-                            self.dom.real_lo(),
-                            self.dom.real_mid(),
-                            self.dom.imag_lo(),
-                            self.dom.imag_mid(),
-                        )?,
-                        Square::new_exact(
-                            self.dom.real_mid(),
-                            self.dom.real_hi(),
-                            self.dom.imag_lo(),
-                            self.dom.imag_mid(),
-                        )?,
-                    ]
-                    .map(LeafReserved::new)
-                    .map(Node::LeafReserved)
-                    .map(Box::new),
-                )
-            }
-        }())
-        .map(|children| Internal {
+        let children = self
+            .dom
+            .split()?
+            .map(LeafReserved::new)
+            .map(Node::LeafReserved)
+            .map(Box::new);
+        Some(Internal {
             dom: self.dom,
             color: self.color,
             children,
@@ -133,13 +113,13 @@ impl LeafColor {
 }
 
 impl LeafReserved {
-    fn new(dom: Square) -> Self {
+    fn new(dom: Domain) -> Self {
         Self { dom }
     }
 }
 
 impl Node {
-    fn dom(&self) -> Square {
+    fn dom(&self) -> Domain {
         match self {
             Node::Internal(internal) => internal.dom,
             Node::LeafColor(leaf_color) => leaf_color.dom,
@@ -157,11 +137,11 @@ impl Node {
 }
 
 impl Tree {
-    pub(crate) fn new(dom: Square) -> Self {
+    pub(crate) fn new(dom: Domain) -> Self {
         Self {
             dom,
             root: Node::LeafColor(LeafColor {
-                color: metabrot_sample(dom.mid()).color(),
+                color: metabrot_sample(dom.mid().into()).color(),
                 dom,
             }),
         }
@@ -190,25 +170,25 @@ impl Tree {
     //     if let Some(children) = {
     //         || {
     //             Some([
-    //                 Box::new(Self::new_leaf(Square::try_new(
+    //                 Box::new(Self::new_leaf(Domain::try_new(
     //                     self.dom.real_lo(),
     //                     self.dom.real_mid(),
     //                     self.dom.imag_mid(),
     //                     self.dom.imag_hi(),
     //                 )?)),
-    //                 Box::new(Self::new_leaf(Square::try_new(
+    //                 Box::new(Self::new_leaf(Domain::try_new(
     //                     self.dom.real_mid(),
     //                     self.dom.real_hi(),
     //                     self.dom.imag_mid(),
     //                     self.dom.imag_hi(),
     //                 )?)),
-    //                 Box::new(Self::new_leaf(Square::try_new(
+    //                 Box::new(Self::new_leaf(Domain::try_new(
     //                     self.dom.real_lo(),
     //                     self.dom.real_mid(),
     //                     self.dom.imag_lo(),
     //                     self.dom.imag_mid(),
     //                 )?)),
-    //                 Box::new(Self::new_leaf(Square::try_new(
+    //                 Box::new(Self::new_leaf(Domain::try_new(
     //                     self.dom.real_mid(),
     //                     self.dom.real_hi(),
     //                     self.dom.imag_lo(),
@@ -226,25 +206,25 @@ impl Tree {
     //     if let Some(squares) = {
     //         || {
     //             Some([
-    //                 Square::try_new(
+    //                 Domain::try_new(
     //                     self.dom.real_lo(),
     //                     self.dom.real_mid(),
     //                     self.dom.imag_mid(),
     //                     self.dom.imag_hi(),
     //                 )?,
-    //                 Square::try_new(
+    //                 Domain::try_new(
     //                     self.dom.real_mid(),
     //                     self.dom.real_hi(),
     //                     self.dom.imag_mid(),
     //                     self.dom.imag_hi(),
     //                 )?,
-    //                 Square::try_new(
+    //                 Domain::try_new(
     //                     self.dom.real_lo(),
     //                     self.dom.real_mid(),
     //                     self.dom.imag_lo(),
     //                     self.dom.imag_mid(),
     //                 )?,
-    //                 Square::try_new(
+    //                 Domain::try_new(
     //                     self.dom.real_mid(),
     //                     self.dom.real_hi(),
     //                     self.dom.imag_lo(),
@@ -264,16 +244,16 @@ impl Tree {
     //     }
     // }
 
-    // fn count_overlaps(&self, window: Square) -> u32 {
+    // fn count_overlaps(&self, window: Domain) -> u32 {
     //     todo!()
     // }
 
-    // fn count_contained(&self, window: Square) -> u32 {
+    // fn count_contained(&self, window: Domain) -> u32 {
     //     todo!()
     // }
 
     // actually i think this basically just returns 1
-    // fn count_samples_weak(&self, pixel: Square) -> u32 {
+    // fn count_samples_weak(&self, pixel: Domain) -> u32 {
     //     if !self.window.overlaps(pixel) {
     //         return 0;
     //     }
@@ -293,7 +273,7 @@ impl Tree {
     //     })
     // }
 
-    // fn count_samples_strong(&self, pixel: Square) -> u32 {
+    // fn count_samples_strong(&self, pixel: Domain) -> u32 {
     //     if !self.dom.overlaps(pixel) {
     //         return 0;
     //     }
@@ -313,7 +293,7 @@ impl Tree {
 
     // /// whether the pixel contains any samples
     // #[inline(never)]
-    // pub(crate) fn contains_sample(&self, pixel: Square) -> bool {
+    // pub(crate) fn contains_sample(&self, pixel: Domain) -> bool {
     //     if !self.dom.overlaps(pixel) {
     //         return false;
     //     }
@@ -344,7 +324,7 @@ impl Tree {
     //     todo!()
     // }
 
-    // fn ensure_pixel_safe(&mut self, pixel: Square) {
+    // fn ensure_pixel_safe(&mut self, pixel: Domain) {
     //     if !self.window.overlaps(pixel) {
     //         return;
     //     }
@@ -362,7 +342,7 @@ impl Tree {
     //     todo!()
     // }
 
-    // fn ensure_pixel_safe(&mut self, pixel: Square) {
+    // fn ensure_pixel_safe(&mut self, pixel: Domain) {
     //     if self.count_overlaps(pixel) >= 4 {
     //         return;
     //     }
@@ -370,7 +350,7 @@ impl Tree {
 
     // TODO: subsampling / area average
     // every pixel must contain a node
-    // fn ensure_pixel_safe(&mut self, pixel: Square) {
+    // fn ensure_pixel_safe(&mut self, pixel: Domain) {
     //     // println!("ensure_pixel_safe: {self:?}");
     //     if !self.window.overlaps(pixel) {
     //         // println!("!self.window.overlaps(pixel)");
@@ -412,7 +392,7 @@ impl Tree {
     // }
 
     // /// every pixel must contain a sample
-    // pub(crate) fn ensure_pixel_safe(&mut self, pixel: Square) {
+    // pub(crate) fn ensure_pixel_safe(&mut self, pixel: Domain) {
     //     if !self.dom.overlaps(pixel) {
     //         return;
     //     }
@@ -431,7 +411,7 @@ impl Tree {
     //     }
     // }
 
-    // fn is_strong_pixel_safe(&self, pixel: Square) -> bool {
+    // fn is_strong_pixel_safe(&self, pixel: Domain) -> bool {
     //     if !self.window.overlaps(pixel) {
     //         return false;
     //     }
@@ -447,7 +427,7 @@ impl Tree {
     //     self.children.as_ref().unwrap()[closest_child_i].is_strong_pixel_safe(pixel)
     // }
 
-    // fn is_weak_pixel_safe(&self, pixel: Square) -> bool {
+    // fn is_weak_pixel_safe(&self, pixel: Domain) -> bool {
     //     if !self.window.overlaps(pixel) {
     //         return false;
     //     }
@@ -475,7 +455,7 @@ impl Tree {
     // /// the average color of leaves inside the pixel weighted by area that's overlapping the pixel
     // /// or maybe weighted by distance to the center of the pixel
     // /// the color of the highest node contained in pixel
-    // fn color(&self, pixel: Square) -> Option<Color32> {
+    // fn color(&self, pixel: Domain) -> Option<Color32> {
     //     if !self.window.overlaps(pixel) {
     //         return None;
     //     }
@@ -504,7 +484,7 @@ impl Tree {
 
     // /// average color of samples inside the pixel
     // #[inline(never)]
-    // pub(crate) fn color_in_pixel(&self, pixel: Square) -> ColorBuilder {
+    // pub(crate) fn color_in_pixel(&self, pixel: Domain) -> ColorBuilder {
     //     let d = f32::max(
     //         (self.dom.real_mid() - pixel.real_mid()).abs(),
     //         (self.dom.imag_mid() - pixel.imag_mid()).abs(),
@@ -645,7 +625,7 @@ impl Tree {
     // }
 
     // #[inline(never)]
-    // fn color(&self, pixel: Square) -> ColorBuilder {
+    // fn color(&self, pixel: Domain) -> ColorBuilder {
     //     let mut stack = Vec::with_capacity(64);
     //     stack.push(self);
     //     let mut ret = ColorBuilder::default();
@@ -899,7 +879,8 @@ impl Tree {
     ///
     /// returns white if not in the trees domain
     #[inline(never)]
-    pub(crate) fn color_of_pixel(&self, pixel: Square) -> Color32 {
+    pub(crate) fn color_of_pixel(&self, pixel: Pixel) -> Color32 {
+        // fn distance((real_0, imag_0): (Real, Imag), (real_1, imag_1): (Real, Imag)) -> Fixed {
         fn distance((real_0, imag_0): (Real, Imag), (real_1, imag_1): (Real, Imag)) -> Fixed {
             let real_delta = real_0 - real_1;
             let imag_delta = imag_0 - imag_1;
@@ -944,7 +925,7 @@ impl Tree {
     //         .map(|row| {
     //             (0..width)
     //                 .map(|col| {
-    //                     let pixel = Square::try_new(
+    //                     let pixel = Domain::try_new(
     //                         camera.real_lo() + col as f32 * camera.real_rad() * 2.0 / width as f32,
     //                         camera.real_lo()
     //                             + (col as f32 + 1.0) * camera.real_rad() * 2.0 / width as f32,

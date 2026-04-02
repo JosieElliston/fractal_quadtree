@@ -58,10 +58,10 @@ pub(crate) fn quadratic_map(
     // const Z_ESCAPE_RAD2: f32 = 4.0;
     const Z_ESCAPE_RAD2: f32 = 64.0;
 
-    let z0_real: f32 = z0_real.into();
-    let z0_imag: f32 = z0_imag.into();
-    let c_real: f32 = c_real.into();
-    let c_imag: f32 = c_imag.into();
+    let z0_real: f32 = z0_real.into_f64() as f32;
+    let z0_imag: f32 = z0_imag.into_f64() as f32;
+    let c_real: f32 = c_real.into_f64() as f32;
+    let c_imag: f32 = c_imag.into_f64() as f32;
 
     // TODO: consider using fixed point for all the computation
     let mut z_real = z0_real;
@@ -148,7 +148,7 @@ pub(crate) fn distance_estimator(
     fn estimate(z_real: f32, z_imag: f32, dz_real: f32, dz_imag: f32) -> Option<Fixed> {
         let z_abs = (z_real * z_real + z_imag * z_imag).sqrt();
         let dz_abs = (dz_real * dz_real + dz_imag * dz_imag).sqrt();
-        Fixed::try_from_f32(2.0 * z_abs * z_abs.ln() / dz_abs)
+        Fixed::try_from_f64((2.0 * z_abs * z_abs.ln() / dz_abs) as f64)
     }
 
     // // f(c) = |P_c^n(c)|
@@ -162,10 +162,10 @@ pub(crate) fn distance_estimator(
     // g probably isn't differentiable actually
     // fn gradient() -> (Real, Imag) {}
 
-    let z0_real: f32 = z0_real.into();
-    let z0_imag: f32 = z0_imag.into();
-    let c_real: f32 = c_real.into();
-    let c_imag: f32 = c_imag.into();
+    let z0_real: f32 = z0_real.into_f64() as f32;
+    let z0_imag: f32 = z0_imag.into_f64() as f32;
+    let c_real: f32 = c_real.into_f64() as f32;
+    let c_imag: f32 = c_imag.into_f64() as f32;
 
     let mut z_real = z0_real;
     let mut z_imag = z0_imag;
@@ -228,6 +228,7 @@ pub(crate) fn distance_estimator(
 
 /// returns the estimated distance and gradient of the estimated distance
 /// TODO: compute the gradient exactly, not with finite difference
+// TODO: if we immediate;y normalize the gradient, we don't have to deal with fixed point domain errors
 pub(crate) fn distance_estimator_gradient(
     z0: (Real, Imag),
     (c_real, c_imag): (Real, Imag),
@@ -237,9 +238,9 @@ pub(crate) fn distance_estimator_gradient(
     let distance_right = distance_estimator(z0, (c_real + delta, c_imag)).1?;
     let distance_up = distance_estimator(z0, (c_real, c_imag + delta)).1?;
     let grad_real =
-        Fixed::try_from_f32((distance_right - distance_init).into_f32() / delta.into_f32())?;
+        Fixed::try_from_f64((distance_right - distance_init).into_f64() / delta.into_f64())?;
     let grad_imag =
-        Fixed::try_from_f32((distance_up - distance_init).into_f32() / delta.into_f32())?;
+        Fixed::try_from_f64((distance_up - distance_init).into_f64() / delta.into_f64())?;
     Some((distance_init, (grad_real, grad_imag)))
 }
 
@@ -251,17 +252,17 @@ pub(crate) fn gradient_step(
 ) -> Option<(Real, Imag)> {
     let (distance, (grad_real, grad_imag)) =
         distance_estimator_gradient((z0_real, z0_imag), (c_real, c_imag))?;
-    let distance: f32 = distance.into();
-    let grad_real: f32 = grad_real.into();
-    let grad_imag: f32 = grad_imag.into();
+    let distance = distance.into_f64();
+    let grad_real = grad_real.into_f64();
+    let grad_imag = grad_imag.into_f64();
     let grad_len = (grad_real * grad_real + grad_imag * grad_imag).sqrt();
     if grad_len == 0.0 {
         return None;
     }
     let step_size = distance / grad_len;
     Some((
-        (c_real.into_f32() - grad_real * step_size).into(),
-        (c_imag.into_f32() - grad_imag * step_size).into(),
+        (c_real.into_f64() - grad_real * step_size).into(),
+        (c_imag.into_f64() - grad_imag * step_size).into(),
     ))
 }
 
@@ -275,10 +276,10 @@ pub(crate) fn deepest_on_grid(
     gradient_steps: usize,
 ) -> ((Real, Imag), Sample) {
     let log_delta = 8;
-    let delta = Fixed::from(1.0).div2_floor_n(log_delta);
+    let delta = Fixed::from(1.0).div2_n_floor(log_delta);
     let mut deepest: f32 = 0.0;
     let mut deepest_point = (0.0.into(), 0.0.into());
-    for line in window.grid(width, height) {
+    for line in window.grid_centers(width, height) {
         for (mut c_real, mut c_imag) in line {
             // TODO: less recomputation
             for _ in 0..gradient_steps {
@@ -376,18 +377,31 @@ pub(crate) fn metabrot_sample((z0_real, z0_imag): (Real, Imag)) -> Sample {
         // also the non-fixed window works better
 
         // points outside of circle with radius 2 centered at the origin escape
-        let window0 = Window::from_center_size(0.0.into(), 0.0.into(), 4.0.into(), 4.0.into());
+        let window0 = Window::from_mid_diam(0.0.into(), 0.0.into(), 4.0.into(), 4.0.into());
 
         // on the first iteration, the points that were outside of
         // the circle with radius 2 centered at (z0_imag*z0_imag - z0_real*z0_real, -2.0*z0_real*z0_imag)
         // will escape
-        let window1 = Window::from_center_size(
-            (f64::from(z0_imag) * f64::from(z0_imag) - f64::from(z0_real) * f64::from(z0_real))
-                .into(),
-            (-2.0 * f64::from(z0_real) * f64::from(z0_imag)).into(),
-            4.0.into(),
-            4.0.into(),
-        );
+        let window1 = {
+            let real = z0_imag.mul(z0_imag) - z0_real.mul(z0_real);
+            let imag = -z0_real.mul(z0_imag).mul2();
+            let rad = 2.0;
+            if !Fixed::in_domain(2.0 * (real.into_f64() - rad))
+                || !Fixed::in_domain(2.0 * (real.into_f64() + rad))
+                || !Fixed::in_domain(2.0 * (imag.into_f64() - rad))
+                || !Fixed::in_domain(2.0 * (imag.into_f64() + rad))
+            {
+                return Sample { depth: 0.0 };
+            }
+            Window::from_mid_rad(real, imag, rad.into(), rad.into())
+        };
+        // let window1 = Window::from_mid_diam(
+        //     (f64::from(z0_imag) * f64::from(z0_imag) - f64::from(z0_real) * f64::from(z0_real))
+        //         .into(),
+        //     (-2.0 * f64::from(z0_real) * f64::from(z0_imag)).into(),
+        //     4.0.into(),
+        //     4.0.into(),
+        // );
 
         // their intersection gives a tighter bound on the area that can escape
         // which lets us use our samples on a more important area
@@ -432,7 +446,7 @@ pub(crate) fn metabrot_sample((z0_real, z0_imag): (Real, Imag)) -> Sample {
             .max(window.imag_rad().mul2().div_f64(WIDTH0 as f64))
     };
     // initial samples
-    for (c_real, c_imag) in window.grid(WIDTH0, WIDTH0).flatten() {
+    for (c_real, c_imag) in window.grid_centers(WIDTH0, WIDTH0).flatten() {
         let (sample, distance) = distance_estimator((z0_real, z0_imag), (c_real, c_imag));
         if sample.depth > deepest {
             if sample.depth >= Sample::MAX_DEPTH as f32 {
@@ -450,9 +464,8 @@ pub(crate) fn metabrot_sample((z0_real, z0_imag): (Real, Imag)) -> Sample {
     // TODO: try sorting the vec by distance estimate
     // windows around the points that triggered a resample
     for (c0_real, c0_imag) in to_resample {
-        let resample_window =
-            Window::from_center_size(c0_real, c0_imag, cell_diameter, cell_diameter);
-        for (c_real, c_imag) in resample_window.grid(WIDTH1, WIDTH1).flatten() {
+        let resample_window = Window::from_mid_diam(c0_real, c0_imag, cell_diameter, cell_diameter);
+        for (c_real, c_imag) in resample_window.grid_centers(WIDTH1, WIDTH1).flatten() {
             if (c0_real, c0_imag) == (c_real, c_imag) {
                 continue;
             }

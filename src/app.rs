@@ -2,7 +2,7 @@ use eframe::egui::{self, Color32, Key, Pos2, Rect, RichText, Vec2};
 use rayon::prelude::*;
 
 use crate::{
-    complex::{Camera, CameraMap, Square, Window, fixed::*},
+    complex::{Camera, CameraMap, Domain, Window, fixed::*},
     pool::Pool,
     sample,
     tree::Tree,
@@ -12,7 +12,7 @@ use crate::{
 /// so that if you're zoomed out, points don't cover everything
 fn dynamic_draw_size(camera_map: &CameraMap, max_rad: f32) -> f32 {
     const BASE_RAD: Fixed = Fixed::try_from_f64(0.001).unwrap();
-    let rad = BASE_RAD.mul_f32(max_rad);
+    let rad = BASE_RAD.mul_f64(max_rad as f64);
     (camera_map.delta_real_to_vec1(rad)).min(max_rad)
 }
 
@@ -37,9 +37,7 @@ impl App {
         // const N_THREADS: usize = 8;
         const N_THREADS: usize = 32;
         Self {
-            tree: Tree::new(
-                Square::new_exact((-4.0).into(), 4.0.into(), (-4.0).into(), 4.0.into()).unwrap(),
-            ),
+            tree: Tree::new(Domain::default()),
             stride: 1,
             // stride: 8,
             primary_camera: Camera::new(0.0.into(), 0.0.into(), 2.0.into()),
@@ -103,8 +101,10 @@ impl eframe::App for App {
 
                     let pan_offset = |pan_vec: Vec2, real_rad: Real| -> (Real, Imag) {
                         (
-                            (-2.0 * pan_vec.x / rect.size().x * f32::from(real_rad)).into(),
-                            (2.0 * pan_vec.y * (f32::from(real_rad) / rect.size().x)).into(),
+                            (-2.0 * pan_vec.x as f64 / rect.size().x as f64 * f64::from(real_rad))
+                                .into(),
+                            (2.0 * pan_vec.y as f64 * (f64::from(real_rad) / rect.size().x as f64))
+                                .into(),
                         )
                     };
 
@@ -127,7 +127,7 @@ impl eframe::App for App {
                         let mouse = mouse_pos - rect.center();
                         let zoom = ctx.input(|i| (i.smooth_scroll_delta.y / 300.0).exp());
                         *camera += pan_offset(-mouse, camera.real_rad());
-                        *camera.real_rad_mut() = camera.real_rad().div_f32(zoom);
+                        *camera.real_rad_mut() = camera.real_rad().div_f64(zoom as f64);
                         *camera += pan_offset(mouse, camera.real_rad());
                     }
                 }
@@ -335,7 +335,13 @@ impl eframe::App for App {
                                 .pixels(self.stride)
                                 .collect::<Vec<_>>()
                                 .into_par_iter()
-                                .map(|(_, _rect, pixel)| self.tree.color_of_pixel(pixel))
+                                .map(|(_, _rect, pixel)| {
+                                    if let Some(pixel) = pixel {
+                                        self.tree.color_of_pixel(pixel)
+                                    } else {
+                                        Color32::MAGENTA
+                                    }
+                                })
                                 .collect::<Vec<_>>()
                         } else {
                             secondary_camera_map
@@ -343,8 +349,12 @@ impl eframe::App for App {
                                 .collect::<Vec<_>>()
                                 .into_par_iter()
                                 .map(|(_, _rect, pixel)| {
-                                    let c = pixel.mid();
-                                    sample::quadratic_map(z0, c).color()
+                                    if let Some(pixel) = pixel {
+                                        let c = pixel.mid();
+                                        sample::quadratic_map(z0, c).color()
+                                    } else {
+                                        Color32::MAGENTA
+                                    }
                                 })
                                 .collect::<Vec<_>>()
                         };
@@ -391,7 +401,7 @@ impl eframe::App for App {
                     if self.current_fractal != 0 {
                         // let window = Window::from_center_size(0.0.into(), 0.0.into(), 4.0.into(), 4.0.into());
                         let (z0_real, z0_imag) = z0;
-                        let window = Window::from_center_size(
+                        let window = Window::from_mid_diam(
                             (f64::from(z0_imag) * f64::from(z0_imag)
                                 - f64::from(z0_real) * f64::from(z0_real))
                             .into(),
@@ -425,7 +435,7 @@ impl eframe::App for App {
                                     *gradient_steps
                                 })
                             };
-                            for line in window.grid(sample::WIDTH0, sample::WIDTH0) {
+                            for line in window.grid_centers(sample::WIDTH0, sample::WIDTH0) {
                                 for (c_real, c_imag) in line {
                                     // painter.circle_filled(
                                     //     secondary_camera_map.complex_to_pos((c_real, c_imag)),
@@ -467,8 +477,9 @@ impl eframe::App for App {
                                     .max(window.imag_rad().mul2().div_f64(sample::WIDTH0 as f64))
                             };
                             // draw initial points
-                            for (c_real, c_imag) in
-                                window.grid(sample::WIDTH0, sample::WIDTH0).flatten()
+                            for (c_real, c_imag) in window
+                                .grid_centers(sample::WIDTH0, sample::WIDTH0)
+                                .flatten()
                             {
                                 let (sample, distance) = sample::distance_estimator(
                                     (z0_real, z0_imag),
@@ -492,14 +503,14 @@ impl eframe::App for App {
                             // TODO: try sorting the vec by distance estimate
                             // draw points that got resampled
                             for (c0_real, c0_imag) in to_resample {
-                                let resample_window = Window::from_center_size(
+                                let resample_window = Window::from_mid_diam(
                                     c0_real,
                                     c0_imag,
                                     cell_diameter,
                                     cell_diameter,
                                 );
                                 for (c_real, c_imag) in resample_window
-                                    .grid(sample::WIDTH1, sample::WIDTH1)
+                                    .grid_centers(sample::WIDTH1, sample::WIDTH1)
                                     .flatten()
                                 {
                                     if (c0_real, c0_imag) == (c_real, c_imag) {

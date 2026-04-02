@@ -7,7 +7,9 @@
 ## optimization
 
 - try putting `align` on stuff
+- review whether things should be `Copy`
 - profile with cargo instruments
+- fixed point arithmetic with less redundant checks
 
 ## sampling
 
@@ -65,6 +67,8 @@
 - `Real`, `Imag`, `egui::f32` type safety?
 - have a lifetime on `rect` and maybe `camera` in `CameraMap` for better semantics
     - maybe put pan/zoom into `CameraMap`
+- use type alias Complex for (Real, Imag)?
+- type for `Pixel`
 
 ## bugs
 

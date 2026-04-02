@@ -2,7 +2,9 @@ use eframe::egui::{Pos2, Rect, Vec2};
 
 use super::{Square, Window, fixed::*};
 
-// TODO: make this a mapping from egui rect to complex window
+// TODO: maybe `Square`?
+pub(crate) type Pixel = Window;
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Camera {
     real_mid: Real,
@@ -10,6 +12,7 @@ pub(crate) struct Camera {
     real_rad: Real,
 }
 impl Camera {
+    /// panics if `real_rad` is not positive
     pub(crate) fn new(real_mid: Fixed, imag_mid: Fixed, real_rad: Fixed) -> Self {
         assert!(real_rad > Fixed::ZERO);
         Self {
@@ -83,7 +86,7 @@ impl CameraMap {
     }
     /// equivalent to `self.rect_to_window(self.rect())`
     pub(crate) fn window(&self) -> Window {
-        Window::new(
+        Window::from_lo_hi(
             self.camera.real_lo(),
             self.camera.real_hi(),
             self.imag_lo(),
@@ -100,11 +103,10 @@ impl CameraMap {
     pub(crate) fn imag_rad(&self) -> Imag {
         self.camera
             .real_rad
-            .mul_f32(self.rect.height() / self.rect.width())
+            .mul_f64(self.rect.height() as f64 / self.rect.width() as f64)
     }
 
     pub(crate) fn x_to_real(&self, x: f32) -> Real {
-        // -2.0 * x / self.rect.size().x * self.camera.real_rad
         Fixed::lerp(
             self.camera.real_lo(),
             self.camera.real_hi(),
@@ -112,7 +114,6 @@ impl CameraMap {
         )
     }
     pub(crate) fn y_to_imag(&self, y: f32) -> Imag {
-        // 2.0 * y * (self.camera.real_rad / self.rect.size().x)
         Fixed::lerp(
             self.imag_lo(),
             self.imag_hi(),
@@ -159,7 +160,7 @@ impl CameraMap {
     // }
 
     pub(crate) fn rect_to_window(&self, rect: Rect) -> Window {
-        Window::new(
+        Window::from_lo_hi(
             self.x_to_real(rect.min.x),
             self.x_to_real(rect.max.x),
             self.y_to_imag(rect.max.y),
@@ -174,29 +175,31 @@ impl CameraMap {
         }
     }
 
+    /// pixel is None if it couldn't be constructed,
+    /// so it would be too small or outside the fixed point domain
     pub(crate) fn pixels(
         &self,
         stride: usize,
-    ) -> impl Iterator<Item = ((usize, usize), Rect, Square)> {
+    ) -> impl Iterator<Item = ((usize, usize), Rect, Option<Pixel>)> {
         (0..self.rect.size().y as usize)
             .step_by(stride)
             .flat_map(move |row| {
                 (0..self.rect.size().x as usize)
                     .step_by(stride)
-                    .filter_map(move |col| {
-                        Some((
+                    .map(move |col| {
+                        (
                             (row / stride, col / stride),
                             Rect::from_min_size(
                                 Pos2::new(col as f32, row as f32),
                                 Vec2::new(stride as f32, stride as f32),
                             ),
-                            Square::try_new(
+                            Pixel::try_from_lo_hi(
                                 self.x_to_real(col as f32),
                                 self.x_to_real((col + stride) as f32),
                                 self.y_to_imag((row + stride) as f32),
                                 self.y_to_imag(row as f32),
-                            )?,
-                        ))
+                            ),
+                        )
                     })
                 // .map(move |col| {
                 //     (
@@ -319,7 +322,7 @@ mod tests {
         let (rect, camera) = get_rect_camera();
         let camera_map = CameraMap::new(rect, camera);
 
-        let window = Window::new(
+        let window = Window::from_lo_hi(
             camera_map.camera.real_lo(),
             camera_map.camera.real_hi(),
             camera_map.imag_lo(),

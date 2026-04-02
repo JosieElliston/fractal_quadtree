@@ -78,9 +78,9 @@ impl Square {
             return None;
         }
         Some(Self {
-            real_mid: (real_lo + real_hi).div2_exact()?,
-            imag_mid: (imag_lo + imag_hi).div2_exact()?,
-            rad: (real_hi - real_lo).div2_exact()?,
+            real_mid: (real_lo + real_hi).div2_exact_checked()?,
+            imag_mid: (imag_lo + imag_hi).div2_exact_checked()?,
+            rad: (real_hi - real_lo).div2_exact_checked()?,
         })
     }
 

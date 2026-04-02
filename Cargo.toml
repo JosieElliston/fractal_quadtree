@@ -13,4 +13,6 @@ rayon = "1.11.0"
 opt-level = 3
 
 [profile.dev]
+debug = true
+split-debuginfo = "packed"
 opt-level = 3
