@@ -124,7 +124,21 @@ impl eframe::App for App {
 
                 self.sampling ^= ctx.input(|i| i.key_pressed(Key::Space));
 
-                if let Some(key) = [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6, Key::Num7, Key::Num8, Key::Num9, Key::Num0].into_iter().position(|k| ctx.input(|i| i.key_pressed(k))) {
+                if let Some(key) = [
+                    Key::Num1,
+                    Key::Num2,
+                    Key::Num3,
+                    Key::Num4,
+                    Key::Num5,
+                    Key::Num6,
+                    Key::Num7,
+                    Key::Num8,
+                    Key::Num9,
+                    Key::Num0,
+                ]
+                .into_iter()
+                .position(|k| ctx.input(|i| i.key_pressed(k)))
+                {
                     self.current_fractal = key;
                 }
 
@@ -135,8 +149,8 @@ impl eframe::App for App {
 
                     let pan_offset = |pan_vec: Vec2, real_rad: Real| -> (Real, Imag) {
                         (
-                           ( -2.0 * pan_vec.x / rect.size().x * f32::from(real_rad)).into(),
-                           ( 2.0 * pan_vec.y * (f32::from(real_rad) / rect.size().x)).into(),
+                            (-2.0 * pan_vec.x / rect.size().x * f32::from(real_rad)).into(),
+                            (2.0 * pan_vec.y * (f32::from(real_rad) / rect.size().x)).into(),
                         )
                     };
 
@@ -502,95 +516,55 @@ impl eframe::App for App {
                 //     }
                 // }
 
-                // camera_map.pixels small square debugging
-                #[cfg(false)]
-                {
-                    let pixels = camera_map.pixels(self.stride).collect::<Vec<_>>();
-                    let expected_len = camera_map.rect().size().x as usize
-                        * camera_map.rect().size().y as usize
-                        / (self.stride * self.stride);
-                    assert!(pixels.len() <= expected_len);
-                    if pixels.len() < expected_len {
-                        let painter = ui.painter_at(ui.max_rect());
-                        for ((row, col), rect, pixel) in &pixels {
-                            painter.rect_filled(
-                                *rect,
-                                0.0,
-                                if (row + col) % 2 == 0 {
-                                    Color32::MAGENTA
-                                } else {
-                                    Color32::LIGHT_GREEN
-                                },
-                            );
-                        }
-                        for ((row, col), rect, pixel) in &pixels {
-                            if rect
-                                .contains(ui.input(|i| i.pointer.latest_pos().unwrap_or_default()))
-                            {
-                                ui.label(format!(
-                                    "real_mid: {:?}\nimag_mid: {:?}\nrad: {:?}\nreal_lo: {:?}\nreal_hi: {:?}\nimag_lo: {:?}\nimag_hi: {:?}",
-                                    pixel.real_mid(), pixel.imag_mid(), pixel.rad(), pixel.real_lo(), pixel.real_hi(), pixel.imag_lo(), pixel.imag_hi())
-                                );
-                            }
-                        }
-                        return;
-                    }
-                }
+                // // camera_map.pixels small square debugging
+                // #[cfg(false)]
+                // {
+                //     let pixels = camera_map.pixels(self.stride).collect::<Vec<_>>();
+                //     let expected_len = camera_map.rect().size().x as usize
+                //         * camera_map.rect().size().y as usize
+                //         / (self.stride * self.stride);
+                //     assert!(pixels.len() <= expected_len);
+                //     if pixels.len() < expected_len {
+                //         let painter = ui.painter_at(ui.max_rect());
+                //         for ((row, col), rect, pixel) in &pixels {
+                //             painter.rect_filled(
+                //                 *rect,
+                //                 0.0,
+                //                 if (row + col) % 2 == 0 {
+                //                     Color32::MAGENTA
+                //                 } else {
+                //                     Color32::LIGHT_GREEN
+                //                 },
+                //             );
+                //         }
+                //         for ((row, col), rect, pixel) in &pixels {
+                //             if rect
+                //                 .contains(ui.input(|i| i.pointer.latest_pos().unwrap_or_default()))
+                //             {
+                //                 ui.label(format!(
+                //                     "real_mid: {:?}\nimag_mid: {:?}\nrad: {:?}\nreal_lo: {:?}\nreal_hi: {:?}\nimag_lo: {:?}\nimag_hi: {:?}",
+                //                     pixel.real_mid(), pixel.imag_mid(), pixel.rad(), pixel.real_lo(), pixel.real_hi(), pixel.imag_lo(), pixel.imag_hi())
+                //                 );
+                //             }
+                //         }
+                //         return;
+                //     }
+                // }
 
                 // new drawing
+                // #[cfg(false)]
                 {
-                    #[cfg(false)]
-                    {
-                        let painter = ui.painter_at(ui.max_rect());
-                        painter.rect_filled(ui.max_rect(), 0.0, Color32::RED);
-
-                        camera_map
-                            .pixels(self.stride)
-                            .collect::<Vec<_>>()
-                            .into_par_iter()
-                            .map(|(_, rect, pixel)| {
-                                let color = self.tree.color_of_pixel(pixel);
-                                // let color = Color32::GREEN;
-                                (rect, color)
-                            })
-                            .collect::<Vec<_>>()
-                            .into_iter()
-                            .for_each(|(rect, color)| {
-                                painter.rect_filled(rect, 0.0, color);
-                            });
-                    }
-
-                    #[cfg(false)]
-                    {
-                        let painter = ui.painter_at(ui.max_rect());
-                        painter.rect_filled(ui.max_rect(), 0.0, Color32::RED);
-
-                        // let num_threads = rayon::current_num_threads();
-                        let num_threads = rayon::max_num_threads();
-                        let pixels = camera_map.pixels(self.stride).collect::<Vec<_>>();
-                        (0..num_threads).into_par_iter().for_each(|thread_i| {
-                            (thread_i..pixels.len())
-                                .step_by(num_threads)
-                                .map(|i| pixels[i])
-                                .for_each(|(_, rect, pixel)| {
-                                    let color = self.tree.color_of_pixel(pixel);
-                                    painter.rect_filled(rect, 0.0, color);
-                                });
-                        });
-                    }
-
-                    // #[cfg(false)]
-                    {
-                        let screen_center = ui.max_rect().center();
-                        let z0 = camera_map.pos_to_complex(screen_center);
-                        let colors = if self.current_fractal == 0 {
+                    let screen_center = ui.max_rect().center();
+                    let z0 = camera_map.pos_to_complex(screen_center);
+                    let colors = if self.current_fractal == 0 {
                         camera_map
                             .pixels(self.stride)
                             .collect::<Vec<_>>()
                             .into_par_iter()
                             .map(|(_, _rect, pixel)| self.tree.color_of_pixel(pixel))
-                            .collect::<Vec<_>>()} else {
-                                 camera_map
+                            .collect::<Vec<_>>()
+                    } else {
+                        camera_map
                             .pixels(self.stride)
                             .collect::<Vec<_>>()
                             .into_par_iter()
@@ -599,51 +573,59 @@ impl eframe::App for App {
                                 quadratic_map(z0, c).color()
                             })
                             .collect::<Vec<_>>()
-                            };
-                        self.texture.set(
-                            egui::ColorImage::new(
-                                [
-                                    camera_map.rect().size().x as usize / self.stride,
-                                    camera_map.rect().size().y as usize / self.stride,
-                                ],
-                                colors,
-                            ),
-                            egui::TextureOptions::NEAREST,
-                        );
-                        let painter = ui.painter_at(ui.max_rect());
-                        painter.image(
-                            self.texture.id(),
-                            camera_map.rect(),
-                            Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0)),
-                            Color32::WHITE,
+                    };
+                    self.texture.set(
+                        egui::ColorImage::new(
+                            [
+                                camera_map.rect().size().x as usize / self.stride,
+                                camera_map.rect().size().y as usize / self.stride,
+                            ],
+                            colors,
+                        ),
+                        egui::TextureOptions::NEAREST,
+                    );
+                    let painter = ui.painter_at(ui.max_rect());
+                    painter.image(
+                        self.texture.id(),
+                        camera_map.rect(),
+                        Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0)),
+                        Color32::WHITE,
+                    );
+
+                    // draw dots where we took samples, to debug aliasing
+                    if self.current_fractal != 0 {
+                        // let window = Window::from_center_size(0.0.into(), 0.0.into(), 4.0.into(), 4.0.into());
+                        let (z0_real, z0_imag) = z0;
+                        let window = Window::from_center_size(
+                            (f64::from(z0_imag) * f64::from(z0_imag)
+                                - f64::from(z0_real) * f64::from(z0_real))
+                            .into(),
+                            (-2.0 * f64::from(z0_real) * f64::from(z0_imag)).into(),
+                            4.0.into(),
+                            4.0.into(),
                         );
 
-                        // draw dots where we took samples, to debug aliasing
-                        if self.current_fractal != 0 {
-                            // let window = Window::from_center_size(0.0.into(), 0.0.into(), 4.0.into(), 4.0.into());
-                            let (z0_real, z0_imag ) = z0;
-                            let window =Window::from_center_size(
-                                (f64::from(z0_imag) * f64::from(z0_imag) - f64::from(z0_real) * f64::from(z0_real))
-                                    .into(),
-                                (-2.0 * f64::from(z0_real) * f64::from(z0_imag)).into(),
-                                4.0.into(),
-                                4.0.into(),
-                            );
-
-                        for line in window.grid(sample::WIDTH,sample::WIDTH) {
+                        for line in window.grid(sample::WIDTH, sample::WIDTH) {
                             for (c_real, c_imag) in line {
-                                painter.circle_filled(camera_map.complex_to_pos((c_real, c_imag)), 2.0, Color32::MAGENTA);     }
-                        }}
+                                painter.circle_filled(
+                                    camera_map.complex_to_pos((c_real, c_imag)),
+                                    2.0,
+                                    Color32::MAGENTA,
+                                );
+                            }
+                        }
+                    }
 
-
-                        // draw a dot at the center of the screen or at z0
-                        painter.circle_filled(if self.current_fractal == 0 {
+                    // draw a dot at the center of the screen or at z0
+                    painter.circle_filled(
+                        if self.current_fractal == 0 {
                             screen_center
                         } else {
                             camera_map.complex_to_pos((0.0.into(), 0.0.into()))
-                        }, 5.0, Color32::WHITE);
-
-                    }
+                        },
+                        5.0,
+                        Color32::WHITE,
+                    );
                 }
 
                 // area is to allow the frame to be drawn on top of the fractal
@@ -662,16 +644,15 @@ impl eframe::App for App {
                             //     average_dt,
                             //     1.0 / average_dt,
                             // ));
-                            ui.label(
-                                RichText::new(format!(
-                                    "    dt: {:08.04}\n1/dt: {:08.04}\nsamples: {:08.04}\nnodes: {}",
-                                    average_dt,
-                                    1.0 / average_dt,
-                                    self.sample_counts.values().sum::<usize>() as f32 / self.sample_counts.len() as f32,
-                                    self.tree.node_count(),
-                                ))
-                                .background_color(Color32::BLACK),
+                            let t = format!(
+                                "    dt: {:08.04}\n1/dt: {:08.04}\nsamples: {:08.04}\nnodes: {}",
+                                average_dt,
+                                1.0 / average_dt,
+                                self.sample_counts.values().sum::<usize>() as f32
+                                    / self.sample_counts.len() as f32,
+                                self.tree.node_count(),
                             );
+                            ui.label(RichText::new(t).background_color(Color32::BLACK));
                         }
 
                         // // view stuff
