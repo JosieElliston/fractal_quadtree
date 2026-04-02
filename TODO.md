@@ -35,3 +35,13 @@
     - note that the deepest parent of all the active nodes for a given window is kinda deep, this is a pseudo root, maybe we can use this somehow
 - find a new, smaller window, and repeat inside that one
 - fixed point DomainError
+- does `egui::Frame` have an ugly border?
+- gui for keyboard controls for discoverability
+- typestate `Sample`
+- factor out `app.rs`
+- have a lifetime on `rect` and maybe `camera` in `CameraMap` for better semantics
+    - maybe put pan/zoom into `CameraMap`
+- draw debug dots on the centers of each quadtree domain
+    - camera_map.fixed_to_vec1(fixed)
+    - camera_map.complex_to_vec2((real, imag))
+    - don't draw if camera_map.fixed_to_vec1(node.dom().rad()) < 4 * pixel_size

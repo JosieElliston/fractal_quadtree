@@ -1,7 +1,7 @@
 use eframe::egui::Color32;
 
 use crate::{
-    camera::{Square, Window},
+    camera::Window,
     fixed::*,
 };
 
