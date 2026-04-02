@@ -268,97 +268,97 @@ pub(crate) fn gradient_step(
     ))
 }
 
-// pub(crate) const WIDTH: usize = 64;
-// const GRADIENT_STEPS: usize = 1;
-// pub(crate) fn deepest_on_grid(
-//     (z0_real, z0_imag): (Real, Imag),
-//     window: Window,
-//     width: usize,
-//     height: usize,
-//     gradient_steps: usize,
-// ) -> ((Real, Imag), Sample) {
-//     let log_delta = 8;
-//     let delta = Fixed::from(1.0).div2_floor_n(log_delta);
-//     let mut deepest: f32 = 0.0;
-//     let mut deepest_point = (0.0.into(), 0.0.into());
-//     for line in window.grid(width, height) {
-//         for (mut c_real, mut c_imag) in line {
-//             // TODO: less recomputation
-//             for _ in 0..gradient_steps {
-//                 let Some(distance_init) = ({
-//                     let (sample_init, distance_init) =
-//                         distance_estimator((z0_real, z0_imag), (c_real, c_imag));
-//                     if sample_init.depth > deepest {
-//                         if sample_init.depth >= Sample::MAX_DEPTH as f32 {
-//                             return ((c_real, c_imag), sample_init);
-//                         }
-//                         deepest = sample_init.depth;
-//                         deepest_point = (c_real, c_imag);
-//                     }
-//                     distance_init
-//                 }) else {
-//                     break;
-//                 };
+pub(crate) const WIDTH: usize = 64;
+pub(crate) const GRADIENT_STEPS: usize = 1;
+pub(crate) fn deepest_on_grid(
+    (z0_real, z0_imag): (Real, Imag),
+    window: Window,
+    width: usize,
+    height: usize,
+    gradient_steps: usize,
+) -> ((Real, Imag), Sample) {
+    let log_delta = 8;
+    let delta = Fixed::from(1.0).div2_floor_n(log_delta);
+    let mut deepest: f32 = 0.0;
+    let mut deepest_point = (0.0.into(), 0.0.into());
+    for line in window.grid(width, height) {
+        for (mut c_real, mut c_imag) in line {
+            // TODO: less recomputation
+            for _ in 0..gradient_steps {
+                let Some(distance_init) = ({
+                    let (sample_init, distance_init) =
+                        distance_estimator((z0_real, z0_imag), (c_real, c_imag));
+                    if sample_init.depth > deepest {
+                        if sample_init.depth >= Sample::MAX_DEPTH as f32 {
+                            return ((c_real, c_imag), sample_init);
+                        }
+                        deepest = sample_init.depth;
+                        deepest_point = (c_real, c_imag);
+                    }
+                    distance_init
+                }) else {
+                    break;
+                };
 
-//                 let Some(distance_right) = ({
-//                     let (sample_right, distance_right) =
-//                         distance_estimator((z0_real, z0_imag), (c_real + delta, c_imag));
-//                     if sample_right.depth > deepest {
-//                         if sample_right.depth >= Sample::MAX_DEPTH as f32 {
-//                             return ((c_real + delta, c_imag), sample_right);
-//                         }
-//                         deepest = sample_right.depth;
-//                         deepest_point = (c_real + delta, c_imag);
-//                     }
-//                     distance_right
-//                 }) else {
-//                     break;
-//                 };
+                let Some(distance_right) = ({
+                    let (sample_right, distance_right) =
+                        distance_estimator((z0_real, z0_imag), (c_real + delta, c_imag));
+                    if sample_right.depth > deepest {
+                        if sample_right.depth >= Sample::MAX_DEPTH as f32 {
+                            return ((c_real + delta, c_imag), sample_right);
+                        }
+                        deepest = sample_right.depth;
+                        deepest_point = (c_real + delta, c_imag);
+                    }
+                    distance_right
+                }) else {
+                    break;
+                };
 
-//                 let Some(distance_left) = ({
-//                     let (sample_left, distance_left) =
-//                         distance_estimator((z0_real, z0_imag), (c_real, c_imag + delta));
-//                     if sample_left.depth > deepest {
-//                         if sample_left.depth >= Sample::MAX_DEPTH as f32 {
-//                             return ((c_real, c_imag + delta), sample_left);
-//                         }
-//                         deepest = sample_left.depth;
-//                         deepest_point = (c_real, c_imag + delta);
-//                     }
-//                     distance_left
-//                 }) else {
-//                     break;
-//                 };
+                let Some(distance_left) = ({
+                    let (sample_left, distance_left) =
+                        distance_estimator((z0_real, z0_imag), (c_real, c_imag + delta));
+                    if sample_left.depth > deepest {
+                        if sample_left.depth >= Sample::MAX_DEPTH as f32 {
+                            return ((c_real, c_imag + delta), sample_left);
+                        }
+                        deepest = sample_left.depth;
+                        deepest_point = (c_real, c_imag + delta);
+                    }
+                    distance_left
+                }) else {
+                    break;
+                };
 
-//                 // TODO: fixed point
-//                 let grad_real = (distance_right - distance_init).into_f64() / delta.into_f64();
-//                 let grad_imag = (distance_left - distance_init).into_f64() / delta.into_f64();
-//                 let grad_len = (grad_real * grad_real + grad_imag * grad_imag).sqrt();
-//                 let scale = distance_init.into_f64() / grad_len;
-//                 let (Some(c_real_new), Some(c_imag_new)) = (
-//                     Fixed::try_from_f64(c_real.into_f64() - grad_real * scale),
-//                     Fixed::try_from_f64(c_imag.into_f64() - grad_imag * scale),
-//                 ) else {
-//                     break;
-//                 };
-//                 c_real = c_real_new;
-//                 c_imag = c_imag_new;
-//             }
+                // TODO: fixed point
+                let grad_real = (distance_right - distance_init).into_f64() / delta.into_f64();
+                let grad_imag = (distance_left - distance_init).into_f64() / delta.into_f64();
+                let grad_len = (grad_real * grad_real + grad_imag * grad_imag).sqrt();
+                let scale = distance_init.into_f64() / grad_len;
+                let (Some(c_real_new), Some(c_imag_new)) = (
+                    Fixed::try_from_f64(c_real.into_f64() - grad_real * scale),
+                    Fixed::try_from_f64(c_imag.into_f64() - grad_imag * scale),
+                ) else {
+                    break;
+                };
+                c_real = c_real_new;
+                c_imag = c_imag_new;
+            }
 
-//             let sample = quadratic_map((z0_real, z0_imag), (c_real, c_imag));
-//             // metajulia
-//             // let sample = mandelbrot_sample(c_real, c_imag, z0_real, z0_imag);
-//             if sample.depth > deepest {
-//                 if sample.depth >= Sample::MAX_DEPTH as f32 {
-//                     return ((c_real, c_imag), sample);
-//                 }
-//                 deepest = sample.depth;
-//                 deepest_point = (c_real, c_imag);
-//             }
-//         }
-//     }
-//     (deepest_point, Sample { depth: deepest })
-// }
+            let sample = quadratic_map((z0_real, z0_imag), (c_real, c_imag));
+            // metajulia
+            // let sample = mandelbrot_sample(c_real, c_imag, z0_real, z0_imag);
+            if sample.depth > deepest {
+                if sample.depth >= Sample::MAX_DEPTH as f32 {
+                    return ((c_real, c_imag), sample);
+                }
+                deepest = sample.depth;
+                deepest_point = (c_real, c_imag);
+            }
+        }
+    }
+    (deepest_point, Sample { depth: deepest })
+}
 
 /// for the initial samples
 pub(crate) const WIDTH0: usize = 64;
@@ -410,8 +410,13 @@ pub(crate) fn metabrot_sample((z0_real, z0_imag): (Real, Imag)) -> Sample {
         };
     };
 
-    // let (c, sample) = deepest_on_grid((z0_real, z0_imag), WIDTH, GRADIENT_STEPS);
-    // TODO: resample with a smaller window around the deepest point
+    let mut deepest: f32 = 0.0;
+    let mut deepest_point = (0.0.into(), 0.0.into());
+
+    let (c, sample) = deepest_on_grid((z0_real, z0_imag), window, WIDTH, WIDTH, GRADIENT_STEPS);
+    deepest = sample.depth;
+    deepest_point = c;
+    return sample;
 
     // resample around points with a distance estimate < the diameter of each grid cell.
     // note that we don't use the gradient of the distance estimate for this.
@@ -423,8 +428,6 @@ pub(crate) fn metabrot_sample((z0_real, z0_imag): (Real, Imag)) -> Sample {
     // if our neighbor's distance estimate didn't trigger a resample on them.
     // TODO: fix this
 
-    let mut deepest: f32 = 0.0;
-    let mut deepest_point = (0.0.into(), 0.0.into());
     // we want to look through all the points at a coarse grain before resampling
     let mut to_resample = Vec::with_capacity(WIDTH0 * WIDTH0);
     let cell_diameter = {

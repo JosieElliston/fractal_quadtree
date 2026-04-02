@@ -487,7 +487,7 @@ impl eframe::App for App {
                         );
 
                         // draw dots where we took samples, to debug aliasing
-                        #[cfg(false)]
+                        // #[cfg(false)]
                         {
                             // how many times should we iterate?
                             let gradient_steps = {
@@ -527,14 +527,6 @@ impl eframe::App for App {
                                 }
                             }
                         }
-
-                        // // draw deepest_on_grid
-                        // let (deepest_c, _sample) = deepest_on_grid((z0_real, z0_imag), window);
-                        // painter.circle_filled(
-                        //     secondary_camera_map.complex_to_pos(deepest_c),
-                        //     5.0,
-                        //     Color32::RED,
-                        // );
 
                         // draw points that got resampled in a small window around them
                         // TODO: less code reuse
@@ -594,6 +586,7 @@ impl eframe::App for App {
                                     );
                                 }
                             }
+
                             // draw the deepest point
                             painter.circle_filled(
                                 secondary_camera_map.complex_to_pos(deepest_point),
@@ -601,6 +594,20 @@ impl eframe::App for App {
                                 Color32::RED,
                             );
                         }
+
+                        // draw deepest_on_grid
+                        let (deepest_c, _sample) = deepest_on_grid(
+                            (z0_real, z0_imag),
+                            window,
+                            WIDTH,
+                            WIDTH,
+                            GRADIENT_STEPS,
+                        );
+                        painter.circle_filled(
+                            secondary_camera_map.complex_to_pos(deepest_c),
+                            5.0,
+                            Color32::WHITE,
+                        );
                     }
 
                     // // draw distance estimator
@@ -621,7 +628,7 @@ impl eframe::App for App {
                                 draw_complex_circle(
                                     c,
                                     distance,
-                                    egui::Stroke::new(1.0, Color32::RED),
+                                    egui::Stroke::new(1.0, Color32::WHITE),
                                 );
                                 // let scale = distance / ((grad_real * grad_real + grad_imag * grad_imag).into_f32()).sqrt();
                                 // draw_complex_segment(
@@ -633,12 +640,12 @@ impl eframe::App for App {
                                 draw_complex_segment(
                                     c,
                                     next_c,
-                                    egui::Stroke::new(1.0, Color32::RED),
+                                    egui::Stroke::new(1.0, Color32::WHITE),
                                 );
                                 painter.circle_filled(
                                     secondary_camera_map.complex_to_pos(next_c),
                                     3.0,
-                                    Color32::RED,
+                                    Color32::WHITE,
                                 );
                                 c = next_c;
                             }
