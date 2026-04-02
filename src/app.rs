@@ -9,6 +9,14 @@ use crate::{
     tree::Tree,
 };
 
+/// fancy dynamic radius based on zoom
+/// so that if you're zoomed out, points don't cover everything
+fn dynamic_draw_size(camera_map: &CameraMap, max_rad: f32) -> f32 {
+    const BASE_RAD: Fixed = Fixed::try_from_f64(0.001).unwrap();
+    let rad = BASE_RAD.mul_f32(max_rad);
+    (camera_map.delta_real_to_vec1(rad)).min(max_rad)
+}
+
 pub(crate) struct App {
     tree: Tree,
     stride: usize,
@@ -314,54 +322,56 @@ impl eframe::App for App {
                 //     }
                 // }
 
-                // draw the fractal
+                // draw the fractal and debug stuff
                 // #[cfg(false)]
                 {
                     let screen_center = ui.max_rect().center();
                     let z0 = primary_camera_map.pos_to_complex(screen_center);
-                    let colors = if self.current_fractal == 0 {
-                        primary_camera_map
-                            .pixels(self.stride)
-                            .collect::<Vec<_>>()
-                            .into_par_iter()
-                            .map(|(_, _rect, pixel)| self.tree.color_of_pixel(pixel))
-                            .collect::<Vec<_>>()
-                    } else {
-                        secondary_camera_map
-                            .pixels(self.stride)
-                            .collect::<Vec<_>>()
-                            .into_par_iter()
-                            .map(|(_, _rect, pixel)| {
-                                let c = pixel.mid();
-                                sample::quadratic_map(z0, c).color()
-                            })
-                            .collect::<Vec<_>>()
-                    };
-                    assert_eq!(primary_camera_map.rect(), secondary_camera_map.rect());
-                    self.texture.set(
-                        egui::ColorImage::new(
-                            [
-                                primary_camera_map.rect().size().x as usize / self.stride,
-                                primary_camera_map.rect().size().y as usize / self.stride,
-                            ],
-                            colors,
-                        ),
-                        egui::TextureOptions::NEAREST,
-                    );
                     let painter = ui.painter_at(ui.max_rect());
-                    painter.image(
-                        self.texture.id(),
-                        primary_camera_map.rect(),
-                        Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0)),
-                        Color32::WHITE,
-                    );
 
-                    let draw_complex_circle =
+                    // draw the fractal
+                    {
+                        let colors = if self.current_fractal == 0 {
+                            primary_camera_map
+                                .pixels(self.stride)
+                                .collect::<Vec<_>>()
+                                .into_par_iter()
+                                .map(|(_, _rect, pixel)| self.tree.color_of_pixel(pixel))
+                                .collect::<Vec<_>>()
+                        } else {
+                            secondary_camera_map
+                                .pixels(self.stride)
+                                .collect::<Vec<_>>()
+                                .into_par_iter()
+                                .map(|(_, _rect, pixel)| {
+                                    let c = pixel.mid();
+                                    sample::quadratic_map(z0, c).color()
+                                })
+                                .collect::<Vec<_>>()
+                        };
+                        assert_eq!(primary_camera_map.rect(), secondary_camera_map.rect());
+                        self.texture.set(
+                            egui::ColorImage::new(
+                                [
+                                    primary_camera_map.rect().size().x as usize / self.stride,
+                                    primary_camera_map.rect().size().y as usize / self.stride,
+                                ],
+                                colors,
+                            ),
+                            egui::TextureOptions::NEAREST,
+                        );
+                        painter.image(
+                            self.texture.id(),
+                            primary_camera_map.rect(),
+                            Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0)),
+                            Color32::WHITE,
+                        );
+                    }
+                    let draw_complex_circle_stroke =
                         |(c_real, c_imag): (Real, Imag), rad: Fixed, stroke: egui::Stroke| {
                             painter.circle_stroke(
                                 secondary_camera_map.complex_to_pos((c_real, c_imag)),
-                                secondary_camera_map.real_to_x(rad)
-                                    - secondary_camera_map.real_to_x(0.0.into()),
+                                secondary_camera_map.delta_real_to_vec1(rad),
                                 stroke,
                             );
                         };
@@ -377,29 +387,6 @@ impl eframe::App for App {
                                 stroke,
                             );
                         };
-                    // let draw_distance_estimator = |(c_real, c_imag)| {
-                    //     // TODO: get derivative and draw line towards the estimated fractal location
-
-                    //     let Some((distance, (grad_real, grad_imag))) =
-                    //         distance_estimator_gradient(z0, (c_real, c_imag))
-                    //     else {
-                    //         return;
-                    //     };
-                    //     painter.circle_stroke(
-                    //         secondary_camera_map.complex_to_pos((c_real, c_imag)),
-                    //         secondary_camera_map.real_to_x(distance)
-                    //             - secondary_camera_map.real_to_x(0.0.into()),
-                    //         egui::Stroke::new(2.0, Color32::RED),
-                    //     );
-                    //     painter.line_segment(
-                    //         [
-                    //             secondary_camera_map.complex_to_pos((c_real, c_imag)),
-                    //             secondary_camera_map
-                    //                 .complex_to_pos((c_real - grad_real, c_imag - grad_imag)),
-                    //         ],
-                    //         egui::Stroke::new(2.0, Color32::RED),
-                    //     );
-                    // };
 
                     // draw stuff that uses the window we're sampling the mandelbrot in
                     if self.current_fractal != 0 {
@@ -422,10 +409,12 @@ impl eframe::App for App {
                             egui::StrokeKind::Middle,
                         );
 
+                        // debug for gradient descent steps
                         // draw dots where we took samples, to debug aliasing
                         // #[cfg(false)]
                         {
                             // how many times should we iterate?
+                            // control with arrow keys
                             let gradient_steps = {
                                 let delta: isize = ctx.input(|i| i.key_pressed(Key::ArrowRight))
                                     as isize
@@ -456,7 +445,7 @@ impl eframe::App for App {
                                     ) {
                                         painter.circle_filled(
                                             secondary_camera_map.complex_to_pos(stepped_c),
-                                            1.0,
+                                            dynamic_draw_size(&secondary_camera_map, 3.0),
                                             Color32::WHITE,
                                         );
                                     }
@@ -465,6 +454,7 @@ impl eframe::App for App {
                             }
                         }
 
+                        // debug hierarchical windows
                         // draw points that got resampled in a small window around them
                         // TODO: less code reuse
                         {
@@ -496,8 +486,8 @@ impl eframe::App for App {
                                 }
                                 painter.circle_filled(
                                     secondary_camera_map.complex_to_pos((c_real, c_imag)),
-                                    2.0,
-                                    Color32::RED,
+                                    dynamic_draw_size(&secondary_camera_map, 5.0),
+                                    Color32::DARK_RED,
                                 );
                             }
                             // TODO: try sorting the vec by distance estimate
@@ -524,7 +514,7 @@ impl eframe::App for App {
                                     }
                                     painter.circle_filled(
                                         secondary_camera_map.complex_to_pos((c_real, c_imag)),
-                                        2.0,
+                                        dynamic_draw_size(&secondary_camera_map, 3.0),
                                         Color32::ORANGE,
                                     );
                                 }
@@ -533,42 +523,41 @@ impl eframe::App for App {
                             // draw the deepest point
                             painter.circle_filled(
                                 secondary_camera_map.complex_to_pos(deepest_point),
+                                // don't use dynamic size for this
                                 5.0,
                                 Color32::RED,
                             );
                         }
 
                         // draw deepest_on_grid
-                        let (deepest_c, _sample) = sample::deepest_on_grid(
-                            (z0_real, z0_imag),
-                            window,
-                            sample::WIDTH,
-                            sample::WIDTH,
-                            sample::GRADIENT_STEPS,
-                        );
-                        painter.circle_filled(
-                            secondary_camera_map.complex_to_pos(deepest_c),
-                            5.0,
-                            Color32::WHITE,
-                        );
+                        {
+                            let (deepest_c, _sample) = sample::deepest_on_grid(
+                                (z0_real, z0_imag),
+                                window,
+                                sample::WIDTH,
+                                sample::WIDTH,
+                                sample::GRADIENT_STEPS,
+                            );
+                            painter.circle_filled(
+                                secondary_camera_map.complex_to_pos(deepest_c),
+                                // don't use dynamic size for this
+                                5.0,
+                                Color32::WHITE,
+                            );
+                        }
                     }
 
-                    // // draw distance estimator
-                    // if self.current_fractal != 0 {
-                    //     draw_distance_estimator(secondary_camera_map.pos_to_complex(
-                    //         ctx.input(|i| i.pointer.latest_pos().unwrap_or_default()),
-                    //     ));
-                    // }
                     // draw distance estimator with gradient descent steps
                     (|| -> Option<()> {
                         if self.current_fractal != 0 {
                             let mut c = secondary_camera_map.pos_to_complex(
                                 ctx.input(|i| i.pointer.latest_pos().unwrap_or_default()),
                             );
-                            for _ in 0..4 {
+                            const MAX_STEPS: usize = 8;
+                            for _ in 0..MAX_STEPS {
                                 let (distance, (grad_real, grad_imag)) =
                                     sample::distance_estimator_gradient(z0, c)?;
-                                draw_complex_circle(
+                                draw_complex_circle_stroke(
                                     c,
                                     distance,
                                     egui::Stroke::new(1.0, Color32::WHITE),
@@ -587,6 +576,7 @@ impl eframe::App for App {
                                 );
                                 painter.circle_filled(
                                     secondary_camera_map.complex_to_pos(next_c),
+                                    // don't use dynamic size for this
                                     3.0,
                                     Color32::WHITE,
                                 );
@@ -604,7 +594,7 @@ impl eframe::App for App {
                             secondary_camera_map.complex_to_pos((0.0.into(), 0.0.into()))
                         },
                         3.0,
-                        Color32::WHITE,
+                        Color32::BLUE,
                     );
                 }
 

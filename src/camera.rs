@@ -143,6 +143,23 @@ impl CameraMap {
         Pos2::new(self.real_to_x(real), self.imag_to_y(imag))
     }
 
+    /// equivalent to `self.real_to_x(fixed) - self.real_to_x(Fixed::ZERO)`
+    /// and to `self.imag_to_y(Fixed::ZERO) - self.imag_to_y(fixed)`
+    /// keywords: displacement, delta, difference, rad_to_vec1
+    pub(crate) fn delta_real_to_vec1(&self, fixed: Fixed) -> f32 {
+        lerp(
+            0.0,
+            self.rect.width() as f64,
+            Fixed::inv_lerp(Fixed::ZERO, self.camera.real_rad.mul2(), fixed),
+        ) as f32
+    }
+    // pub(crate) fn delta_imag_to_vec1(&self, fixed: Fixed) -> f32 {
+    //     -self.delta_real_to_vec1(fixed)
+    // }
+    // pub(crate) fn complex_to_vec2(&self, (real, imag): (Real, Imag)) -> Vec2 {
+    //     Vec2::new(self.delta_real_to_vec1(real), self.delta_imag_to_vec1(imag))
+    // }
+
     pub(crate) fn rect_to_window(&self, rect: Rect) -> Window {
         Window::new(
             self.x_to_real(rect.min.x),
@@ -582,10 +599,15 @@ impl PartialOrd for Square {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_camera_map() {
+    fn get_rect_camera() -> (Rect, Camera) {
         let rect = Rect::from_min_max(Pos2::new(0.0, 30.0), Pos2::new(10.0, 50.0));
         let camera = Camera::new(1.0.into(), 2.0.into(), 1.0.into());
+        (rect, camera)
+    }
+
+    #[test]
+    fn test_bounds() {
+        let (rect, camera) = get_rect_camera();
         let camera_map = CameraMap::new(rect, camera);
 
         assert_eq!(camera_map.camera.real_lo(), 0.0.into());
@@ -615,6 +637,12 @@ mod tests {
             let p_actual = camera_map.complex_to_pos(c);
             assert!((p - p_actual).length() < 1e-4);
         }
+    }
+
+    #[test]
+    fn test_map_pos2() {
+        let (rect, camera) = get_rect_camera();
+        let camera_map = CameraMap::new(rect, camera);
 
         for pos in [
             Pos2::new(1.0, 30.0),
@@ -661,6 +689,12 @@ mod tests {
             assert!((c.0 - actual.0).abs() < (1e-4).into());
             assert!((c.1 - actual.1).abs() < (1e-4).into());
         }
+    }
+
+    #[test]
+    fn test_window() {
+        let (rect, camera) = get_rect_camera();
+        let camera_map = CameraMap::new(rect, camera);
 
         let window = Window::new(
             camera_map.camera.real_lo(),
@@ -670,5 +704,24 @@ mod tests {
         );
         assert_eq!(camera_map.rect, camera_map.window_to_rect(window));
         assert_eq!(window, camera_map.rect_to_window(rect));
+    }
+
+    #[test]
+    fn test_map_vec1() {
+        let (rect, camera) = get_rect_camera();
+        let camera_map = CameraMap::new(rect, camera);
+
+        for fixed in [
+            -2.0, -1.0, -2.0, 5.0, 4.0, -1.0, 4.0, 5.0, -1.885, -0.978, 0.254, 0.793, 3.634, 3.274,
+            3.332, 1.716, 0.063, 3.933, 2.132, 1.927, 1.848, 4.781, 2.971, 4.047, 0.194, 2.966,
+        ]
+        .map(|fixed| fixed.into())
+        {
+            let vec1_fixed = camera_map.delta_real_to_vec1(fixed);
+            let vec1_real = camera_map.real_to_x(fixed) - camera_map.real_to_x(Fixed::ZERO);
+            let vec1_imag = camera_map.imag_to_y(Fixed::ZERO) - camera_map.imag_to_y(fixed);
+            assert!((vec1_fixed - vec1_real).abs() < 1e-4);
+            assert!((vec1_fixed - vec1_imag).abs() < 1e-4);
+        }
     }
 }

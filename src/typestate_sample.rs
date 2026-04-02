@@ -1,7 +1,5 @@
 // use crate::fixed::*;
 
-
-
 // trait Derivative {}
 // struct NoDerivative;
 // impl Derivative for NoDerivative {}
@@ -38,14 +36,4 @@
 
 //     fn smooth_depth(&self) ->  {}
 //     fn distance_estimate(&self) ->  {}
-// }
-// /// with fancy dynamic radius based on zoom
-// /// ref how i did it in delaunay
-// fn draw_complex_filled_circle() {
-//     painter.circle_filled(
-//         camera_map.cam_to_egui(point),
-//         // so if you're zoomed out, points don't cover everything
-//         (camera_map.cam_to_egui_x(0.001) - camera_map.cam_to_egui_x(0.0)).min(3.0),
-//         Color32::from_rgb(200, 200, 200),
-//     );
 // }

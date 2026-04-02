@@ -20,8 +20,8 @@ impl Fixed {
     // pub(crate) const TWO: Self = Self(2 << Self::SHIFT);
     // pub(crate) const NEG_FOUR: Self = Self::MIN;
 
-    pub(crate) fn try_from_f64(f: f64) -> Option<Self> {
-        if !(-Fixed::RANGE..Fixed::RANGE).contains(&f) {
+    pub(crate) const fn try_from_f64(f: f64) -> Option<Self> {
+        if !(-Fixed::RANGE <= f && f < Fixed::RANGE) {
             None
         } else {
             Some(Self((f * (1_i64 << Self::SHIFT) as f64) as i64))
@@ -119,7 +119,7 @@ impl Fixed {
 
     /// returns None if the length is zero
     /// TODO: returns None if it can't be represented as Fixed
-    pub(crate) fn normalized(real: Real, imag: Imag) -> Option<(Real, Imag) >{
+    pub(crate) fn normalized(real: Real, imag: Imag) -> Option<(Real, Imag)> {
         let length = (real.into_f64() * real.into_f64() + imag.into_f64() * imag.into_f64()).sqrt();
         if length == 0.0 {
             None
