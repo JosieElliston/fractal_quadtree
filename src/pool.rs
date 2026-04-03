@@ -1,62 +1,77 @@
-use std::sync::{Arc, Mutex, mpsc};
+use std::{
+    sync::{Arc, Mutex, mpsc},
+    thread,
+};
 
 use eframe::egui::Color32;
 
 use crate::{complex::fixed::*, sample};
 
-pub(crate) struct Pool {
-    threads: Vec<std::thread::JoinHandle<()>>,
-    // sender: spmc::Sender<((Real, Imag), Color32)>,
-    sender: mpsc::Sender<(Real, Imag)>,
-    receiver: mpsc::Receiver<((Real, Imag), Color32)>,
+struct Worker {
+    handle: thread::JoinHandle<()>,
+    request_sender: mpsc::Sender<(Real, Imag)>,
     in_flight: usize,
+}
+pub(crate) struct Pool {
+    workers: Vec<Worker>,
+    response_receiver: mpsc::Receiver<(usize, (Real, Imag), Color32)>,
 }
 impl Pool {
     pub(crate) fn new(thread_count: usize) -> Self {
-        let (request_sender, request_receiver) = mpsc::channel();
-        // emulate single producer multiple consumer
-        let request_receiver = Arc::new(Mutex::new(request_receiver));
         let (response_sender, response_receiver) = mpsc::channel();
-        let threads = (0..thread_count)
-            .map(|_| {
-                let request_receiver = request_receiver.clone();
+        let workers = (0..thread_count)
+            .map(|thread_i| {
                 let response_sender = response_sender.clone();
-                std::thread::spawn(move || {
-                    while let Ok(receiver) = request_receiver.lock()
-                        && let Ok(point) = receiver.recv()
-                    {
-                        let color = sample::metabrot_sample(point).color();
-                        let Ok(_) = response_sender.send((point, color)) else {
-                            break;
-                        };
-                    }
-                })
+                let (request_sender, request_receiver) = mpsc::channel();
+
+                let handle = thread::Builder::new()
+                    .name(format!("pool {}", thread_i))
+                    .spawn(move || {
+                        while let Ok(point) = request_receiver.recv() {
+                            let color = sample::metabrot_sample(point).color();
+                            let Ok(_) = response_sender.send((thread_i, point, color)) else {
+                                break;
+                            };
+                        }
+                    })
+                    .unwrap();
+                Worker {
+                    handle,
+                    request_sender,
+                    in_flight: 0,
+                }
             })
             .collect();
         Self {
-            threads,
-            sender: request_sender,
-            receiver: response_receiver,
-            in_flight: 0,
+            workers,
+            response_receiver,
         }
     }
     pub(crate) fn in_flight(&self) -> usize {
-        self.in_flight
+        self.workers.iter().map(|worker| worker.in_flight).sum()
     }
     pub(crate) fn thread_count(&self) -> usize {
-        self.threads.len()
+        self.workers.len()
     }
 
     pub(crate) fn send(&mut self, point: (Real, Imag)) {
-        self.sender.send(point).unwrap();
-        self.in_flight += 1;
+        let worker = self
+            .workers
+            .iter_mut()
+            .min_by_key(|worker| worker.in_flight)
+            .unwrap();
+        worker.request_sender.send(point).unwrap();
+        worker.in_flight += 1;
     }
 
     pub(crate) fn recv(&mut self) -> Option<((Real, Imag), Color32)> {
-        if let Ok(ret) = self.receiver.try_recv() {
-            assert!(self.in_flight > 0, "this is an invariant of the type");
-            self.in_flight -= 1;
-            Some(ret)
+        if let Ok((thread_i, point, color)) = self.response_receiver.try_recv() {
+            assert!(
+                self.workers[thread_i].in_flight > 0,
+                "this is an invariant of the type"
+            );
+            self.workers[thread_i].in_flight -= 1;
+            Some((point, color))
         } else {
             None
         }
