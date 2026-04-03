@@ -285,9 +285,7 @@ impl eframe::App for App {
                 // #[cfg(false)]
                 {
                     let screen_center = ui.max_rect().center();
-                    let z0 = primary_camera_map
-                        .pos_to_complex(screen_center)
-                        .unwrap_or((Fixed::ZERO, Fixed::ZERO));
+                    let z0 = primary_camera_map.pos_to_complex(screen_center);
                     let painter = ui.painter_at(ui.max_rect());
 
                     // draw the fractal
@@ -297,9 +295,23 @@ impl eframe::App for App {
                                 .pixels(self.stride)
                                 .collect::<Vec<_>>()
                                 .into_par_iter()
-                                .map(|(_, _rect, pixel)| {
+                                .map(|(_, _, pixel)| {
                                     if let Some(pixel) = pixel {
                                         self.tree.color_of_pixel(pixel)
+                                    } else {
+                                        Color32::MAGENTA
+                                    }
+                                })
+                                .collect::<Vec<_>>()
+                        } else if let Some(z0) = z0 {
+                            secondary_camera_map
+                                .pixels(self.stride)
+                                .collect::<Vec<_>>()
+                                .into_par_iter()
+                                .map(|(_, _, pixel)| {
+                                    if let Some(pixel) = pixel {
+                                        let c = pixel.mid();
+                                        sample::quadratic_map(z0, c).color()
                                     } else {
                                         Color32::MAGENTA
                                     }
@@ -310,10 +322,9 @@ impl eframe::App for App {
                                 .pixels(self.stride)
                                 .collect::<Vec<_>>()
                                 .into_par_iter()
-                                .map(|(_, _rect, pixel)| {
-                                    if let Some(pixel) = pixel {
-                                        let c = pixel.mid();
-                                        sample::quadratic_map(z0, c).color()
+                                .map(|(_, _, pixel)| {
+                                    if pixel.is_some() {
+                                        Color32::BLACK
                                     } else {
                                         Color32::MAGENTA
                                     }
@@ -360,21 +371,29 @@ impl eframe::App for App {
                         };
 
                     // draw stuff that uses the window we're sampling the mandelbrot in
-                    if self.current_fractal != 0 {
+                    'mandelbrot_window: {
+                        if self.current_fractal == 0 {
+                            break 'mandelbrot_window;
+                        }
+                        let Some((z0_real, z0_imag)) = z0 else {
+                            break 'mandelbrot_window;
+                        };
                         // let window = Window::from_center_size(Fixed::ZERO, Fixed::ZERO, 4.0.into(), 4.0.into());
-                        let (z0_real, z0_imag) = z0;
-                        let window = Window::from_mid_rad(
-                            (f64::from(z0_imag) * f64::from(z0_imag)
-                                - f64::from(z0_real) * f64::from(z0_real))
-                            .try_into()
-                            .unwrap(),
-                            (-2.0 * f64::from(z0_real) * f64::from(z0_imag))
+                        let Some(window) = (|| {
+                            Window::from_mid_rad(
+                                (f64::from(z0_imag) * f64::from(z0_imag)
+                                    - f64::from(z0_real) * f64::from(z0_real))
                                 .try_into()
-                                .unwrap(),
-                            2.0.try_into().unwrap(),
-                            2.0.try_into().unwrap(),
-                        )
-                        .unwrap();
+                                .ok()?,
+                                (-2.0 * f64::from(z0_real) * f64::from(z0_imag))
+                                    .try_into()
+                                    .ok()?,
+                                2.0.try_into().unwrap(),
+                                2.0.try_into().unwrap(),
+                            )
+                        })() else {
+                            break 'mandelbrot_window;
+                        };
 
                         // draw the outline of the window
                         painter.rect_stroke(
@@ -387,7 +406,10 @@ impl eframe::App for App {
                         // debug for gradient descent steps
                         // draw dots where we took samples, to debug aliasing
                         // #[cfg(false)]
-                        {
+                        'gradient_descent_steps: {
+                            let Some(z0) = z0 else {
+                                break 'gradient_descent_steps;
+                            };
                             // how many times should we iterate?
                             // control with arrow keys
                             let gradient_steps = {
@@ -521,57 +543,62 @@ impl eframe::App for App {
                     }
 
                     // draw distance estimator with gradient descent steps
-                    (|| -> Option<()> {
-                        if self.current_fractal != 0 {
-                            let mut c = secondary_camera_map
-                                .pos_to_complex(
-                                    ctx.input(|i| i.pointer.latest_pos().unwrap_or_default()),
-                                )
-                                .unwrap_or((Fixed::ZERO, Fixed::ZERO));
-
-                            const MAX_STEPS: usize = 8;
-                            for _ in 0..MAX_STEPS {
-                                let (distance, (_grad_real, _grad_imag)) =
-                                    sample::distance_estimator_gradient(z0, c)?;
-                                draw_complex_circle_stroke(
-                                    c,
-                                    distance,
-                                    egui::Stroke::new(1.0, Color32::WHITE),
-                                );
-                                // let scale = distance / ((grad_real * grad_real + grad_imag * grad_imag).into_f32()).sqrt();
-                                // draw_complex_segment(
-                                //     c,
-                                //     (c_real - grad_real * scale, c_imag - grad_imag * scale),
-                                //     egui::Stroke::new(1.0, Color32::RED),
-                                // );
-                                let next_c = sample::gradient_step(z0, c)?;
-                                draw_complex_segment(
-                                    c,
-                                    next_c,
-                                    egui::Stroke::new(1.0, Color32::WHITE),
-                                );
-                                painter.circle_filled(
-                                    secondary_camera_map.complex_to_pos(next_c),
-                                    // don't use dynamic size for this
-                                    3.0,
-                                    Color32::WHITE,
-                                );
-                                c = next_c;
-                            }
+                    (|| {
+                        if self.current_fractal == 0 {
+                            return Some(());
                         }
+                        let Some(z0) = z0 else {
+                            return Some(());
+                        };
+                        let Some(mut c) = secondary_camera_map.pos_to_complex(
+                            ctx.input(|i| i.pointer.latest_pos().unwrap_or_default()),
+                        ) else {
+                            return Some(());
+                        };
+
+                        const MAX_STEPS: usize = 8;
+                        for _ in 0..MAX_STEPS {
+                            let (distance, (_grad_real, _grad_imag)) =
+                                sample::distance_estimator_gradient(z0, c)?;
+                            draw_complex_circle_stroke(
+                                c,
+                                distance,
+                                egui::Stroke::new(1.0, Color32::WHITE),
+                            );
+                            // let scale = distance / ((grad_real * grad_real + grad_imag * grad_imag).into_f32()).sqrt();
+                            // draw_complex_segment(
+                            //     c,
+                            //     (c_real - grad_real * scale, c_imag - grad_imag * scale),
+                            //     egui::Stroke::new(1.0, Color32::RED),
+                            // );
+                            let next_c = sample::gradient_step(z0, c)?;
+                            draw_complex_segment(c, next_c, egui::Stroke::new(1.0, Color32::WHITE));
+                            painter.circle_filled(
+                                secondary_camera_map.complex_to_pos(next_c),
+                                // don't use dynamic size for this
+                                3.0,
+                                Color32::WHITE,
+                            );
+                            c = next_c;
+                        }
+
                         Some(())
                     })();
 
                     // draw a dot at the center of the screen or at z0
-                    painter.circle_filled(
-                        if self.current_fractal == 0 {
-                            screen_center
-                        } else {
-                            secondary_camera_map.complex_to_pos((Fixed::ZERO, Fixed::ZERO))
-                        },
-                        3.0,
-                        Color32::BLUE,
-                    );
+                    'draw_z0: {
+                        painter.circle_filled(
+                            if self.current_fractal == 0 {
+                                screen_center
+                            } else if let Some(z0) = z0 {
+                                secondary_camera_map.complex_to_pos(z0)
+                            } else {
+                                break 'draw_z0;
+                            },
+                            3.0,
+                            Color32::BLUE,
+                        );
+                    }
                 }
 
                 // area is to allow the frame to be drawn on top of the fractal

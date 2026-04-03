@@ -53,6 +53,7 @@
     - we can cache pixels across time if we're not panning lmao
 - broadcast to all the threads that the texture was just submitted to be drawn and that they should all draw the pixels they're responsible for into the new texture, and after that they can go back to getting new samples
     - have two textures to swap?
+    - also tell them the new window
 - use that nearby samples are relevant to make parallelism harder/more interesting
 
 ## rust style

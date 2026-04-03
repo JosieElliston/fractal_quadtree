@@ -263,10 +263,10 @@ pub(crate) fn gradient_step(
     Some((
         (c_real.into_f64() - grad_real * step_size)
             .try_into()
-            .unwrap(),
+            .ok()?,
         (c_imag.into_f64() - grad_imag * step_size)
             .try_into()
-            .unwrap(),
+            .ok()?,
     ))
 }
 
@@ -391,7 +391,7 @@ pub(crate) fn metabrot_sample((z0_real, z0_imag): (Real, Imag)) -> Sample {
         // on the first iteration, the points that were outside of
         // the circle with radius 2 centered at (z0_imag*z0_imag - z0_real*z0_real, -2.0*z0_real*z0_imag)
         // will escape
-        let Some(window1) =( {
+        let Some(window1) = ({
             let real = z0_imag.mul(z0_imag) - z0_real.mul(z0_real);
             let imag = -z0_real.mul(z0_imag).mul2();
             let rad = 2.0.try_into().unwrap();
@@ -403,7 +403,7 @@ pub(crate) fn metabrot_sample((z0_real, z0_imag): (Real, Imag)) -> Sample {
             //     return Sample { depth: 0.0 };
             // }
             Window::from_mid_rad(real, imag, rad, rad)
-        } )else {
+        }) else {
             return Sample { depth: 0.0 };
         };
         // let window1 = Window::from_mid_diam(
@@ -453,8 +453,7 @@ pub(crate) fn metabrot_sample((z0_real, z0_imag): (Real, Imag)) -> Sample {
     // we want to look through all the points at a coarse grain before resampling
     let mut to_resample = Vec::with_capacity(WIDTH0 * WIDTH0);
     let cell_rad = {
-        (window.real_rad().div_f64(WIDTH0 as f64))
-            .max(window.imag_rad().div_f64(WIDTH0 as f64))
+        (window.real_rad().div_f64(WIDTH0 as f64)).max(window.imag_rad().div_f64(WIDTH0 as f64))
     };
     // initial samples
     for (c_real, c_imag) in window.grid_centers(WIDTH0, WIDTH0).flatten() {
