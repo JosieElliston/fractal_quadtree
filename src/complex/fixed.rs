@@ -207,7 +207,6 @@ impl Fixed {
         Self(self.0.checked_shr(n).unwrap())
     }
 
-    #[track_caller]
     pub(crate) fn mul(self, other: Self) -> Self {
         Self(
             (self.0 as i128)
@@ -221,10 +220,20 @@ impl Fixed {
     }
     // TODO: do this better
     pub(crate) fn mul_f64(self, f: f64) -> Self {
-        self.mul(f.into())
+        self.mul(f.try_into().unwrap())
+    }
+    pub(crate) fn mul_f64_saturating(self, f: f64) -> Self {
+        let ret = self.into_f64() * f;
+        if ret >= Self::DOMAIN_RADIUS {
+            Self::MAX
+        } else if ret <= -Self::DOMAIN_RADIUS {
+            Self::MIN
+        } else {
+            Self::from_f64(ret)
+        }
     }
     pub(crate) fn div_f64(self, f: f64) -> Self {
-        self.mul(f.recip().into())
+        self.mul(f.recip().try_into().unwrap())
     }
     // pub(crate) fn mul_f32(self, f: f32) -> Self {
     //     self.mul(f.into())
@@ -278,19 +287,19 @@ impl From<Fixed> for f64 {
 //         Self::try_from_f32(f).unwrap()
 //     }
 // }
-// impl TryFrom<f64> for Fixed {
-//     type Error = &'static str;
+impl TryFrom<f64> for Fixed {
+    type Error = &'static str;
 
-//     fn try_from(f: f64) -> Result<Self, Self::Error> {
-//         Self::try_from_f64(f).ok_or("out of domain")
-//     }
-// }
-impl From<f64> for Fixed {
-    #[track_caller]
-    fn from(f: f64) -> Self {
-        Self::try_from_f64(f).expect("out of domain")
+    fn try_from(f: f64) -> Result<Self, Self::Error> {
+        Self::try_from_f64(f).ok_or("out of domain")
     }
 }
+// impl From<f64> for Fixed {
+//     #[track_caller]
+//     fn from(f: f64) -> Self {
+//         Self::try_from_f64(f).expect("out of domain")
+//     }
+// }
 
 impl ops::Add for Fixed {
     type Output = Self;

@@ -2,21 +2,23 @@ use std::ops;
 
 use eframe::egui::{self, Pos2, Rect, Vec2};
 
-use super::{Square, Window, fixed::*};
+use super::{Window, fixed::*};
 
 // TODO: maybe `Square`?
 pub(crate) type Pixel = Window;
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Camera {
-    real_mid: Real,
-    imag_mid: Imag,
-    real_rad: Real,
+    real_mid: f64,
+    imag_mid: f64,
+    real_rad: f64,
 }
 impl Camera {
     /// panics if `real_rad` is not positive
-    pub(crate) fn new(real_mid: Fixed, imag_mid: Fixed, real_rad: Fixed) -> Self {
-        assert!(real_rad > Fixed::ZERO);
+    // pub(crate) fn new(real_mid: Real, imag_mid: Imag, real_rad: Real) -> Self {
+    pub(crate) fn new(real_mid: f64, imag_mid: f64, real_rad: f64) -> Self {
+        // assert!(real_rad > Fixed::ZERO);
+        assert!(real_rad > 0.0);
         Self {
             real_mid,
             imag_mid,
@@ -24,36 +26,36 @@ impl Camera {
         }
     }
 
-    pub(crate) fn real_lo(self) -> Real {
+    pub(crate) fn real_lo(self) -> f64 {
         self.real_mid - self.real_rad
     }
-    pub(crate) fn real_hi(self) -> Real {
+    pub(crate) fn real_hi(self) -> f64 {
         self.real_mid + self.real_rad
     }
-    pub(crate) fn imag_mid(self) -> Imag {
+    pub(crate) fn imag_mid(self) -> f64 {
         self.imag_mid
     }
-    pub(crate) fn real_mid(self) -> Real {
+    pub(crate) fn real_mid(self) -> f64 {
         self.real_mid
     }
-    pub(crate) fn real_rad(self) -> Real {
+    pub(crate) fn real_rad(self) -> f64 {
         self.real_rad
     }
-    pub(crate) fn real_rad_mut(&mut self) -> &mut Real {
+    pub(crate) fn real_rad_mut(&mut self) -> &mut f64 {
         &mut self.real_rad
     }
-    pub(crate) fn mid(self) -> (Real, Imag) {
+    pub(crate) fn mid(self) -> (f64, f64) {
         (self.real_mid, self.imag_mid)
     }
 }
-impl ops::AddAssign<(Real, Imag)> for Camera {
-    fn add_assign(&mut self, (real, imag): (Real, Imag)) {
+impl ops::AddAssign<(f64, f64)> for Camera {
+    fn add_assign(&mut self, (real, imag): (f64, f64)) {
         self.real_mid += real;
         self.imag_mid += imag;
     }
 }
-impl ops::SubAssign<(Real, Imag)> for Camera {
-    fn sub_assign(&mut self, (real, imag): (Real, Imag)) {
+impl ops::SubAssign<(f64, f64)> for Camera {
+    fn sub_assign(&mut self, (real, imag): (f64, f64)) {
         self.real_mid -= real;
         self.imag_mid -= imag;
     }
@@ -74,63 +76,99 @@ impl CameraMap {
         self.rect
     }
     /// equivalent to `self.rect_to_window(self.rect())`
-    pub(crate) fn window(&self) -> Window {
-        Window::from_lo_hi(
-            self.camera.real_lo(),
-            self.camera.real_hi(),
-            self.imag_lo(),
-            self.imag_hi(),
+    pub(crate) fn window(&self) -> Option<Window> {
+        Window::try_from_lo_hi(
+            self.camera.real_lo().try_into().ok()?,
+            self.camera.real_hi().try_into().ok()?,
+            self.imag_lo().try_into().ok()?,
+            self.imag_hi().try_into().ok()?,
         )
     }
 
-    pub(crate) fn imag_lo(&self) -> Imag {
+    pub(crate) fn imag_lo(&self) -> f64 {
         self.camera.imag_mid - self.imag_rad()
     }
-    pub(crate) fn imag_hi(&self) -> Imag {
+    pub(crate) fn imag_hi(&self) -> f64 {
         self.camera.imag_mid + self.imag_rad()
     }
-    pub(crate) fn imag_rad(&self) -> Imag {
-        self.camera
-            .real_rad
-            .mul_f64(self.rect.height() as f64 / self.rect.width() as f64)
+    pub(crate) fn imag_rad(&self) -> f64 {
+        // self.camera
+        //     .real_rad
+        //     .mul_f64(self.rect.height() as f64 / self.rect.width() as f64)
+        self.camera.real_rad * (self.rect.height() as f64 / self.rect.width() as f64)
     }
 
-    pub(crate) fn x_to_real(&self, x: f32) -> Real {
-        Fixed::lerp(
+    /// returns `None` if it would be out of the fixed point domain
+    pub(crate) fn x_to_real(&self, x: f32) -> Option<Real> {
+        Real::try_from_f64(super::lerp(
             self.camera.real_lo(),
             self.camera.real_hi(),
             super::inv_lerp(self.rect.min.x as f64, self.rect.max.x as f64, x as f64),
-        )
+        ))
     }
-    pub(crate) fn y_to_imag(&self, y: f32) -> Imag {
-        Fixed::lerp(
+    /// returns `None` if it would be out of the fixed point domain
+    pub(crate) fn y_to_imag(&self, y: f32) -> Option<Imag> {
+        Imag::try_from_f64(super::lerp(
             self.imag_lo(),
             self.imag_hi(),
             1.0 - super::inv_lerp(self.rect.min.y as f64, self.rect.max.y as f64, y as f64),
-        )
+        ))
     }
     pub(crate) fn real_to_x(&self, real: Real) -> f32 {
         super::lerp(
             self.rect.min.x as f64,
             self.rect.max.x as f64,
-            Fixed::inv_lerp(self.camera.real_lo(), self.camera.real_hi(), real),
+            super::inv_lerp(self.camera.real_lo(), self.camera.real_hi(), real.into()),
         ) as f32
     }
     pub(crate) fn imag_to_y(&self, imag: Imag) -> f32 {
         super::lerp(
             self.rect.min.y as f64,
             self.rect.max.y as f64,
-            1.0 - Fixed::inv_lerp(self.imag_lo(), self.imag_hi(), imag),
+            1.0 - super::inv_lerp(self.imag_lo(), self.imag_hi(), imag.into()),
         ) as f32
     }
 
-    pub(crate) fn pos_to_complex(&self, pos: Pos2) -> (Real, Imag) {
-        (self.x_to_real(pos.x), self.y_to_imag(pos.y))
+    /// returns `None` if it would be out of the fixed point domain
+    pub(crate) fn pos_to_complex(&self, pos: Pos2) -> Option<(Real, Imag)> {
+        Some((self.x_to_real(pos.x)?, self.y_to_imag(pos.y)?))
     }
     pub(crate) fn complex_to_pos(&self, (real, imag): (Real, Imag)) -> Pos2 {
         Pos2::new(self.real_to_x(real), self.imag_to_y(imag))
     }
 
+    // pub(crate) fn vec1_to_delta_real(&self, vec1: f32) -> Option<Real> {
+    //     Real::try_from_f64(super::lerp(
+    //         0.0,
+    //         2.0 * self.camera.real_rad,
+    //         super::inv_lerp(0.0, self.rect.width() as f64, vec1 as f64),
+    //     ))
+    // }
+    // pub(crate) fn vec1_to_delta_imag(&self, vec1: f32) -> Option<Imag> {
+    //     self.vec1_to_delta_real(-vec1)
+    // }
+    // pub(crate) fn vec2_to_delta_complex(&self, vec2: Vec2) -> Option<(Real, Imag)> {
+    //     Some((
+    //         self.vec1_to_delta_real(vec2.x)?,
+    //         self.vec1_to_delta_imag(vec2.y)?,
+    //     ))
+    // }
+    pub(crate) fn vec1_to_delta_real(&self, vec1: f32) -> f64 {
+        super::lerp(
+            0.0,
+            2.0 * self.camera.real_rad,
+            super::inv_lerp(0.0, self.rect.width() as f64, vec1 as f64),
+        )
+    }
+    pub(crate) fn vec1_to_delta_imag(&self, vec1: f32) -> f64 {
+        self.vec1_to_delta_real(-vec1)
+    }
+    pub(crate) fn vec2_to_delta_complex(&self, vec2: Vec2) -> (f64, f64) {
+        (
+            self.vec1_to_delta_real(vec2.x),
+            self.vec1_to_delta_imag(vec2.y),
+        )
+    }
     /// equivalent to `self.real_to_x(fixed) - self.real_to_x(Fixed::ZERO)`
     /// and to `self.imag_to_y(Fixed::ZERO) - self.imag_to_y(fixed)`
     /// keywords: displacement, delta, difference, rad_to_vec1
@@ -138,39 +176,22 @@ impl CameraMap {
         super::lerp(
             0.0,
             self.rect.width() as f64,
-            Fixed::inv_lerp(Fixed::ZERO, self.camera.real_rad.mul2(), real),
+            super::inv_lerp(0.0, 2.0 * self.camera.real_rad, real.into()),
         ) as f32
     }
     pub(crate) fn delta_imag_to_vec1(&self, imag: Imag) -> f32 {
-        -self.delta_real_to_vec1(imag)
+        self.delta_real_to_vec1(-imag)
     }
     pub(crate) fn delta_complex_to_vec2(&self, (real, imag): (Real, Imag)) -> Vec2 {
         Vec2::new(self.delta_real_to_vec1(real), self.delta_imag_to_vec1(imag))
     }
 
-    pub(crate) fn vec1_to_delta_real(&self, vec1: f32) -> Real {
-        Fixed::lerp(
-            Fixed::ZERO,
-            self.camera.real_rad.mul2(),
-            super::inv_lerp(0.0, self.rect.width() as f64, vec1 as f64),
-        )
-    }
-    pub(crate) fn vec1_to_delta_imag(&self, vec1: f32) -> Imag {
-        -self.vec1_to_delta_real(vec1)
-    }
-    pub(crate) fn vec2_to_delta_complex(&self, vec2: Vec2) -> (Real, Imag) {
-        (
-            self.vec1_to_delta_real(vec2.x),
-            self.vec1_to_delta_imag(vec2.y),
-        )
-    }
-
-    pub(crate) fn rect_to_window(&self, rect: Rect) -> Window {
-        Window::from_lo_hi(
-            self.x_to_real(rect.min.x),
-            self.x_to_real(rect.max.x),
-            self.y_to_imag(rect.max.y),
-            self.y_to_imag(rect.min.y),
+    pub(crate) fn rect_to_window(&self, rect: Rect) -> Option<Window> {
+        Window::try_from_lo_hi(
+            self.x_to_real(rect.min.x)?,
+            self.x_to_real(rect.max.x)?,
+            self.y_to_imag(rect.max.y)?,
+            self.y_to_imag(rect.min.y)?,
         )
     }
     pub(crate) fn window_to_rect(&self, window: impl Into<Window>) -> Rect {
@@ -199,12 +220,14 @@ impl CameraMap {
                                 Pos2::new(col as f32, row as f32),
                                 Vec2::new(stride as f32, stride as f32),
                             ),
-                            Pixel::try_from_lo_hi(
-                                self.x_to_real(col as f32),
-                                self.x_to_real((col + stride) as f32),
-                                self.y_to_imag((row + stride) as f32),
-                                self.y_to_imag(row as f32),
-                            ),
+                            (|| {
+                                Pixel::try_from_lo_hi(
+                                    self.x_to_real(col as f32)?,
+                                    self.x_to_real((col + stride) as f32)?,
+                                    self.y_to_imag((row + stride) as f32)?,
+                                    self.y_to_imag(row as f32)?,
+                                )
+                            })(),
                         )
                     })
                 // .map(move |col| {
@@ -255,9 +278,13 @@ impl CameraMap {
             && let Some(mouse_pos) = r.hover_pos()
         {
             let mouse = mouse_pos - rect.center();
-            let zoom = ctx.input(|i| (i.smooth_scroll_delta.y / 300.0).exp());
+            let zoom = ctx.input(|i| (i.smooth_scroll_delta.y / 300.0).exp()) as f64;
             *camera += camera_map.vec2_to_delta_complex(mouse);
-            *camera.real_rad_mut() = camera_map.camera.real_rad().div_f64(zoom as f64);
+            // *camera.real_rad_mut() = camera_map
+            //     .camera
+            //     .real_rad()
+            //     .mul_f64_saturating(zoom.recip());
+            *camera.real_rad_mut() /= zoom;
             let camera_map = CameraMap::new(rect, *camera);
             *camera -= camera_map.vec2_to_delta_complex(mouse);
         }
@@ -284,23 +311,47 @@ mod tests {
         assert_eq!(camera_map.imag_lo(), 0.0.into());
         assert_eq!(camera_map.imag_hi(), 4.0.into());
 
-        assert!((0.0 - camera_map.real_to_x(0.0.into())).abs() < 1e-4);
-        assert!((10.0 - camera_map.real_to_x(2.0.into())).abs() < 1e-4);
-        assert!((30.0 - camera_map.imag_to_y(4.0.into())).abs() < 1e-4);
-        assert!((50.0 - camera_map.imag_to_y(0.0.into())).abs() < 1e-4);
+        assert!((0.0 - camera_map.real_to_x(0.0.try_into().unwrap())).abs() < 1e-4);
+        assert!((10.0 - camera_map.real_to_x(2.0.try_into().unwrap())).abs() < 1e-4);
+        assert!((30.0 - camera_map.imag_to_y(4.0.try_into().unwrap())).abs() < 1e-4);
+        assert!((50.0 - camera_map.imag_to_y(0.0.try_into().unwrap())).abs() < 1e-4);
 
-        assert_eq!(rect.min.x, camera_map.real_to_x(camera.real_lo()));
-        assert_eq!(rect.max.x, camera_map.real_to_x(camera.real_hi()));
-        assert_eq!(rect.max.y, camera_map.imag_to_y(camera_map.imag_lo()));
-        assert_eq!(rect.min.y, camera_map.imag_to_y(camera_map.imag_hi()));
+        assert_eq!(
+            rect.min.x,
+            camera_map.real_to_x(Fixed::from_f64(camera.real_lo()))
+        );
+        assert_eq!(
+            rect.max.x,
+            camera_map.real_to_x(Fixed::from_f64(camera.real_hi()))
+        );
+        assert_eq!(
+            rect.max.y,
+            camera_map.imag_to_y(Fixed::from_f64(camera_map.imag_lo()))
+        );
+        assert_eq!(
+            rect.min.y,
+            camera_map.imag_to_y(Fixed::from_f64(camera_map.imag_hi()))
+        );
 
         for (p, c) in [
-            (Pos2::new(0.0, 30.0), (0.0.into(), 4.0.into())),
-            (Pos2::new(0.0, 50.0), (0.0.into(), 0.0.into())),
-            (Pos2::new(10.0, 30.0), (2.0.into(), 4.0.into())),
-            (Pos2::new(10.0, 50.0), (2.0.into(), 0.0.into())),
+            (
+                Pos2::new(0.0, 30.0),
+                (0.0.try_into().unwrap(), 4.0.try_into().unwrap()),
+            ),
+            (
+                Pos2::new(0.0, 50.0),
+                (0.0.try_into().unwrap(), 0.0.try_into().unwrap()),
+            ),
+            (
+                Pos2::new(10.0, 30.0),
+                (2.0.try_into().unwrap(), 4.0.try_into().unwrap()),
+            ),
+            (
+                Pos2::new(10.0, 50.0),
+                (2.0.try_into().unwrap(), 0.0.try_into().unwrap()),
+            ),
         ] {
-            let c_actual = camera_map.pos_to_complex(p);
+            let c_actual = camera_map.pos_to_complex(p).unwrap();
             // assert!((c.0 - c_actual.0).abs() + (c.1 - c_actual.1).abs() < 1e-4);
             assert_eq!(c, c_actual);
             let p_actual = camera_map.complex_to_pos(c);
@@ -330,7 +381,8 @@ mod tests {
             Pos2::new(2.457, 30.097),
         ] {
             assert!(
-                (pos - camera_map.complex_to_pos(camera_map.pos_to_complex(pos))).length() < 1e-4
+                (pos - camera_map.complex_to_pos(camera_map.pos_to_complex(pos).unwrap())).length()
+                    < 1e-4
             );
         }
         for c in [
@@ -349,14 +401,16 @@ mod tests {
             (0.194, 2.966),
             (1.173, -0.435),
         ]
-        .map(|(real, imag)| (real.into(), imag.into()))
+        .map(|(real, imag)| (real.try_into().unwrap(), imag.try_into().unwrap()))
         {
-            let actual = camera_map.pos_to_complex(camera_map.complex_to_pos(c));
+            let actual = camera_map
+                .pos_to_complex(camera_map.complex_to_pos(c))
+                .unwrap();
             // assert!((c.0 - actual.0).abs() + (c.1 - actual.1).abs() < 1e-4);
             // it's not precise enough for this to pass
             // assert_eq!(c, actual);
-            assert!((c.0 - actual.0).abs() < (1e-4).into());
-            assert!((c.1 - actual.1).abs() < (1e-4).into());
+            assert!((c.0 - actual.0).abs().into_f64() < 1e-4);
+            assert!((c.1 - actual.1).abs().into_f64() < 1e-4);
         }
     }
 
@@ -366,13 +420,13 @@ mod tests {
         let camera_map = CameraMap::new(rect, camera);
 
         let window = Window::from_lo_hi(
-            camera_map.camera.real_lo(),
-            camera_map.camera.real_hi(),
-            camera_map.imag_lo(),
-            camera_map.imag_hi(),
+            camera_map.camera.real_lo().try_into().unwrap(),
+            camera_map.camera.real_hi().try_into().unwrap(),
+            camera_map.imag_lo().try_into().unwrap(),
+            camera_map.imag_hi().try_into().unwrap(),
         );
         assert_eq!(camera_map.rect, camera_map.window_to_rect(window));
-        assert_eq!(window, camera_map.rect_to_window(rect));
+        assert_eq!(window, camera_map.rect_to_window(rect).unwrap());
     }
 
     #[test]
@@ -384,7 +438,7 @@ mod tests {
             -2.0, -1.0, -2.0, 5.0, 4.0, -1.0, 4.0, 5.0, -1.885, -0.978, 0.254, 0.793, 3.634, 3.274,
             3.332, 1.716, 0.063, 3.933, 2.132, 1.927, 1.848, 4.781, 2.971, 4.047, 0.194, 2.966,
         ]
-        .map(|fixed| fixed.into())
+        .map(|fixed| fixed.try_into().unwrap())
         {
             let vec1_fixed = camera_map.delta_real_to_vec1(fixed);
             let vec1_real = camera_map.real_to_x(fixed) - camera_map.real_to_x(Fixed::ZERO);

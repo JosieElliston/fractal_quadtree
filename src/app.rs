@@ -40,9 +40,9 @@ impl App {
             tree: Tree::new(Domain::default()),
             stride: 1,
             // stride: 8,
-            primary_camera: Camera::new(0.0.into(), 0.0.into(), 2.0.into()),
+            primary_camera: Camera::new(0.0, 0.0, 2.0),
             primary_camera_velocity: Vec2::ZERO,
-            secondary_camera: Camera::new(0.0.into(), 0.0.into(), 2.0.into()),
+            secondary_camera: Camera::new(0.0, 0.0, 2.0),
             secondary_camera_velocity: Vec2::ZERO,
             dts: egui::util::History::new(1..100, 0.1),
             sample_counts: egui::util::History::new(1..100, 1.0),
@@ -154,7 +154,11 @@ impl eframe::App for App {
                     // TODO: various canceling stuff
                     // while self.pool.in_flight() < self.in_flight_target {
                     while self.pool.in_flight() < 256 {
-                        let Some(points) = self.tree.refine(primary_camera_map.window()) else {
+                        let Some(points) = self.tree.refine(
+                            primary_camera_map
+                                .window()
+                                .unwrap_or(Domain::default().into()),
+                        ) else {
                             break;
                         };
                         for (real, imag) in points {
@@ -281,7 +285,9 @@ impl eframe::App for App {
                 // #[cfg(false)]
                 {
                     let screen_center = ui.max_rect().center();
-                    let z0 = primary_camera_map.pos_to_complex(screen_center);
+                    let z0 = primary_camera_map
+                        .pos_to_complex(screen_center)
+                        .unwrap_or((Fixed::ZERO, Fixed::ZERO));
                     let painter = ui.painter_at(ui.max_rect());
 
                     // draw the fractal
@@ -355,15 +361,18 @@ impl eframe::App for App {
 
                     // draw stuff that uses the window we're sampling the mandelbrot in
                     if self.current_fractal != 0 {
-                        // let window = Window::from_center_size(0.0.into(), 0.0.into(), 4.0.into(), 4.0.into());
+                        // let window = Window::from_center_size(Fixed::ZERO, Fixed::ZERO, 4.0.into(), 4.0.into());
                         let (z0_real, z0_imag) = z0;
-                        let window = Window::from_mid_diam(
+                        let window = Window::from_mid_rad(
                             (f64::from(z0_imag) * f64::from(z0_imag)
                                 - f64::from(z0_real) * f64::from(z0_real))
-                            .into(),
-                            (-2.0 * f64::from(z0_real) * f64::from(z0_imag)).into(),
-                            4.0.into(),
-                            4.0.into(),
+                            .try_into()
+                            .unwrap(),
+                            (-2.0 * f64::from(z0_real) * f64::from(z0_imag))
+                                .try_into()
+                                .unwrap(),
+                            2.0.try_into().unwrap(),
+                            2.0.try_into().unwrap(),
                         );
 
                         // draw the outline of the window
@@ -424,7 +433,7 @@ impl eframe::App for App {
                         // TODO: less code reuse
                         {
                             let mut deepest: f32 = 0.0;
-                            let mut deepest_point = (0.0.into(), 0.0.into());
+                            let mut deepest_point = (Fixed::ZERO, Fixed::ZERO);
                             // we want to look through all the points at a coarse grain before resampling
                             let mut to_resample =
                                 Vec::with_capacity(sample::WIDTH0 * sample::WIDTH0);
@@ -516,9 +525,12 @@ impl eframe::App for App {
                     // draw distance estimator with gradient descent steps
                     (|| -> Option<()> {
                         if self.current_fractal != 0 {
-                            let mut c = secondary_camera_map.pos_to_complex(
-                                ctx.input(|i| i.pointer.latest_pos().unwrap_or_default()),
-                            );
+                            let mut c = secondary_camera_map
+                                .pos_to_complex(
+                                    ctx.input(|i| i.pointer.latest_pos().unwrap_or_default()),
+                                )
+                                .unwrap_or((Fixed::ZERO, Fixed::ZERO));
+
                             const MAX_STEPS: usize = 8;
                             for _ in 0..MAX_STEPS {
                                 let (distance, (grad_real, grad_imag)) =
@@ -557,7 +569,7 @@ impl eframe::App for App {
                         if self.current_fractal == 0 {
                             screen_center
                         } else {
-                            secondary_camera_map.complex_to_pos((0.0.into(), 0.0.into()))
+                            secondary_camera_map.complex_to_pos((Fixed::ZERO, Fixed::ZERO))
                         },
                         3.0,
                         Color32::BLUE,

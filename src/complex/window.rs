@@ -1,4 +1,4 @@
-use super::{Domain, Square, fixed::*};
+use super::{Domain, fixed::*};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 // #[repr(align(32))]
@@ -10,7 +10,8 @@ pub(crate) struct Window {
 }
 impl Window {
     /// fails if the window would be empty,
-    /// including if it would have zero width or height
+    /// including if it would have zero width or height.
+    /// also fails if the window is too big, to avoid overflow issues.
     pub(crate) fn try_from_lo_hi(
         real_lo: Real,
         real_hi: Real,
@@ -18,6 +19,13 @@ impl Window {
         imag_hi: Imag,
     ) -> Option<Self> {
         if !(real_lo < real_hi && imag_lo < imag_hi) {
+            return None;
+        }
+        if !(Fixed::in_domain(2.0 * real_lo.into_f64())
+            && Fixed::in_domain(2.0 * real_hi.into_f64())
+            && Fixed::in_domain(2.0 * imag_lo.into_f64())
+            && Fixed::in_domain(2.0 * imag_hi.into_f64()))
+        {
             return None;
         }
         Some(Self {

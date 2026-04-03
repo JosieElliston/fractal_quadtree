@@ -203,7 +203,7 @@ pub(crate) fn distance_estimator(
                 Sample {
                     depth: Sample::MAX_DEPTH as f32,
                 },
-                Some(0.0.into()),
+                Some(Fixed::ZERO),
             );
         }
 
@@ -233,7 +233,7 @@ pub(crate) fn distance_estimator_gradient(
     z0: (Real, Imag),
     (c_real, c_imag): (Real, Imag),
 ) -> Option<(Fixed, (Real, Imag))> {
-    let delta = 0.00001.into();
+    let delta = 0.00001.try_into().unwrap();
     let distance_init = distance_estimator(z0, (c_real, c_imag)).1?;
     let distance_right = distance_estimator(z0, (c_real + delta, c_imag)).1?;
     let distance_up = distance_estimator(z0, (c_real, c_imag + delta)).1?;
@@ -261,8 +261,12 @@ pub(crate) fn gradient_step(
     }
     let step_size = distance / grad_len;
     Some((
-        (c_real.into_f64() - grad_real * step_size).into(),
-        (c_imag.into_f64() - grad_imag * step_size).into(),
+        (c_real.into_f64() - grad_real * step_size)
+            .try_into()
+            .unwrap(),
+        (c_imag.into_f64() - grad_imag * step_size)
+            .try_into()
+            .unwrap(),
     ))
 }
 
@@ -276,9 +280,9 @@ pub(crate) fn deepest_on_grid(
     gradient_steps: usize,
 ) -> ((Real, Imag), Sample) {
     let log_delta = 8;
-    let delta = Fixed::from(1.0).div2_n_floor(log_delta);
+    let delta = Fixed::ONE.div2_n_floor(log_delta);
     let mut deepest: f32 = 0.0;
-    let mut deepest_point = (0.0.into(), 0.0.into());
+    let mut deepest_point = (Fixed::ZERO, Fixed::ZERO);
     for line in window.grid_centers(width, height) {
         for (mut c_real, mut c_imag) in line {
             // TODO: less recomputation
@@ -377,7 +381,12 @@ pub(crate) fn metabrot_sample((z0_real, z0_imag): (Real, Imag)) -> Sample {
         // also the non-fixed window works better
 
         // points outside of circle with radius 2 centered at the origin escape
-        let window0 = Window::from_mid_diam(0.0.into(), 0.0.into(), 4.0.into(), 4.0.into());
+        let window0 = Window::from_mid_rad(
+            Fixed::ZERO,
+            Fixed::ZERO,
+            2.0.try_into().unwrap(),
+            2.0.try_into().unwrap(),
+        );
 
         // on the first iteration, the points that were outside of
         // the circle with radius 2 centered at (z0_imag*z0_imag - z0_real*z0_real, -2.0*z0_real*z0_imag)
@@ -393,7 +402,7 @@ pub(crate) fn metabrot_sample((z0_real, z0_imag): (Real, Imag)) -> Sample {
             {
                 return Sample { depth: 0.0 };
             }
-            Window::from_mid_rad(real, imag, rad.into(), rad.into())
+            Window::from_mid_rad(real, imag, rad.try_into().unwrap(), rad.try_into().unwrap())
         };
         // let window1 = Window::from_mid_diam(
         //     (f64::from(z0_imag) * f64::from(z0_imag) - f64::from(z0_real) * f64::from(z0_real))
@@ -422,7 +431,7 @@ pub(crate) fn metabrot_sample((z0_real, z0_imag): (Real, Imag)) -> Sample {
     };
 
     let mut deepest: f32 = 0.0;
-    let mut deepest_point = (0.0.into(), 0.0.into());
+    let mut deepest_point = (Fixed::ZERO, Fixed::ZERO);
 
     let (c, sample) = deepest_on_grid((z0_real, z0_imag), window, WIDTH, WIDTH, GRADIENT_STEPS);
     deepest = sample.depth;
