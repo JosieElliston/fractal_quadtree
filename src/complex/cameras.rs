@@ -1,4 +1,6 @@
-use eframe::egui::{Pos2, Rect, Vec2};
+use std::ops;
+
+use eframe::egui::{self, Pos2, Rect, Vec2};
 
 use super::{Square, Window, fixed::*};
 
@@ -43,30 +45,17 @@ impl Camera {
     pub(crate) fn mid(self) -> (Real, Imag) {
         (self.real_mid, self.imag_mid)
     }
-
-    // these are undefined for a `Camera`,
-    // they need an aspect ratio,
-    // which is part of `CameraMap`
-    // pub(crate) fn imag_lo(self) -> f32 {
-    //     todo!()
-    // }
-    // pub(crate) fn imag_hi(self) -> f32 {
-    //     todo!()
-    // }
-    // pub(crate) fn imag_rad(self) -> f32 {
-    //     todo!()
-    // }
 }
-// impl std::ops::AddAssign<(f32, f32)> for Camera {
-//     fn add_assign(&mut self, rhs: (f32, f32)) {
-//         self.real_mid += rhs.0;
-//         self.imag_mid += rhs.1;
-//     }
-// }
-impl std::ops::AddAssign<(Real, Imag)> for Camera {
+impl ops::AddAssign<(Real, Imag)> for Camera {
     fn add_assign(&mut self, (real, imag): (Real, Imag)) {
         self.real_mid += real;
         self.imag_mid += imag;
+    }
+}
+impl ops::SubAssign<(Real, Imag)> for Camera {
+    fn sub_assign(&mut self, (real, imag): (Real, Imag)) {
+        self.real_mid -= real;
+        self.imag_mid -= imag;
     }
 }
 
@@ -145,19 +134,36 @@ impl CameraMap {
     /// equivalent to `self.real_to_x(fixed) - self.real_to_x(Fixed::ZERO)`
     /// and to `self.imag_to_y(Fixed::ZERO) - self.imag_to_y(fixed)`
     /// keywords: displacement, delta, difference, rad_to_vec1
-    pub(crate) fn delta_real_to_vec1(&self, fixed: Fixed) -> f32 {
+    pub(crate) fn delta_real_to_vec1(&self, real: Real) -> f32 {
         super::lerp(
             0.0,
             self.rect.width() as f64,
-            Fixed::inv_lerp(Fixed::ZERO, self.camera.real_rad.mul2(), fixed),
+            Fixed::inv_lerp(Fixed::ZERO, self.camera.real_rad.mul2(), real),
         ) as f32
     }
-    // pub(crate) fn delta_imag_to_vec1(&self, fixed: Fixed) -> f32 {
-    //     -self.delta_real_to_vec1(fixed)
-    // }
-    // pub(crate) fn complex_to_vec2(&self, (real, imag): (Real, Imag)) -> Vec2 {
-    //     Vec2::new(self.delta_real_to_vec1(real), self.delta_imag_to_vec1(imag))
-    // }
+    pub(crate) fn delta_imag_to_vec1(&self, imag: Imag) -> f32 {
+        -self.delta_real_to_vec1(imag)
+    }
+    pub(crate) fn delta_complex_to_vec2(&self, (real, imag): (Real, Imag)) -> Vec2 {
+        Vec2::new(self.delta_real_to_vec1(real), self.delta_imag_to_vec1(imag))
+    }
+
+    pub(crate) fn vec1_to_delta_real(&self, vec1: f32) -> Real {
+        Fixed::lerp(
+            Fixed::ZERO,
+            self.camera.real_rad.mul2(),
+            super::inv_lerp(0.0, self.rect.width() as f64, vec1 as f64),
+        )
+    }
+    pub(crate) fn vec1_to_delta_imag(&self, vec1: f32) -> Imag {
+        -self.vec1_to_delta_real(vec1)
+    }
+    pub(crate) fn vec2_to_delta_complex(&self, vec2: Vec2) -> (Real, Imag) {
+        (
+            self.vec1_to_delta_real(vec2.x),
+            self.vec1_to_delta_imag(vec2.y),
+        )
+    }
 
     pub(crate) fn rect_to_window(&self, rect: Rect) -> Window {
         Window::from_lo_hi(
@@ -218,6 +224,43 @@ impl CameraMap {
                 //     )
                 // })
             })
+    }
+
+    pub(crate) fn pan_zoom(
+        ctx: &egui::Context,
+        ui: &mut egui::Ui,
+        camera: &mut Camera,
+        velocity: &mut Vec2,
+    ) {
+        let rect = ui.max_rect();
+        let r = ui.allocate_rect(rect, egui::Sense::drag());
+        let dt = ctx.input(|i| i.stable_dt);
+        let camera_map = CameraMap::new(rect, *camera);
+
+        // pan
+        if r.is_pointer_button_down_on() && ctx.input(|i| i.pointer.primary_down()) {
+            *camera += camera_map.vec2_to_delta_complex(-r.drag_delta());
+            *velocity = -r.drag_delta() / dt;
+        } else {
+            const VELOCITY_DAMPING: f32 = 0.9999;
+            *camera += camera_map.vec2_to_delta_complex(*velocity * dt);
+            *velocity *= (1.0 - VELOCITY_DAMPING).powf(dt);
+        }
+        if velocity.length_sq() < 0.0001 {
+            *velocity = Vec2::ZERO;
+        }
+
+        // zoom
+        if r.hovered()
+            && let Some(mouse_pos) = r.hover_pos()
+        {
+            let mouse = mouse_pos - rect.center();
+            let zoom = ctx.input(|i| (i.smooth_scroll_delta.y / 300.0).exp());
+            *camera += camera_map.vec2_to_delta_complex(mouse);
+            *camera.real_rad_mut() = camera_map.camera.real_rad().div_f64(zoom as f64);
+            let camera_map = CameraMap::new(rect, *camera);
+            *camera -= camera_map.vec2_to_delta_complex(mouse);
+        }
     }
 }
 

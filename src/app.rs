@@ -69,8 +69,10 @@ impl eframe::App for App {
                     ctx.input(|input_state| input_state.stable_dt),
                 );
 
+                // toggle sampling with space
                 self.sampling ^= ctx.input(|i| i.key_pressed(Key::Space));
 
+                // switch the current fractal with number keys
                 if let Some(key) = [
                     Key::Num1,
                     Key::Num2,
@@ -90,69 +92,23 @@ impl eframe::App for App {
                 }
 
                 // panning stuff
-                fn pan(
-                    ui: &mut egui::Ui,
-                    ctx: &egui::Context,
-                    camera: &mut Camera,
-                    velocity: &mut Vec2,
-                ) {
-                    let rect = ui.available_rect_before_wrap();
-                    let r = ui.allocate_rect(rect, egui::Sense::click_and_drag());
-
-                    let pan_offset = |pan_vec: Vec2, real_rad: Real| -> (Real, Imag) {
-                        (
-                            (-2.0 * pan_vec.x as f64 / rect.size().x as f64 * f64::from(real_rad))
-                                .into(),
-                            (2.0 * pan_vec.y as f64 * (f64::from(real_rad) / rect.size().x as f64))
-                                .into(),
-                        )
-                    };
-
-                    let dt = ctx.input(|input_state| input_state.stable_dt);
-                    if r.is_pointer_button_down_on() && ctx.input(|i| i.pointer.primary_down()) {
-                        *camera += pan_offset(r.drag_delta(), camera.real_rad());
-                        *velocity = r.drag_delta() / dt;
-                    } else {
-                        const VELOCITY_DAMPING: f32 = 0.9999;
-                        *camera += pan_offset(*velocity * dt, camera.real_rad());
-                        *velocity *= (1.0 - VELOCITY_DAMPING).powf(dt);
-                    }
-                    if velocity.length_sq() < 0.0001 {
-                        *velocity = Vec2::ZERO;
-                    }
-                    if r.contains_pointer()
-                        && let Some(mouse_pos) = ctx.input(|i| i.pointer.latest_pos())
-                    {
-                        // TODO: factor into camera
-                        let mouse = mouse_pos - rect.center();
-                        let zoom = ctx.input(|i| (i.smooth_scroll_delta.y / 300.0).exp());
-                        *camera += pan_offset(-mouse, camera.real_rad());
-                        *camera.real_rad_mut() = camera.real_rad().div_f64(zoom as f64);
-                        *camera += pan_offset(mouse, camera.real_rad());
-                    }
-                }
                 // move other camera when holding backtick
                 if ctx.input(|i| i.key_down(Key::Backtick)) != (self.current_fractal == 0) {
-                    pan(
-                        ui,
+                    CameraMap::pan_zoom(
                         ctx,
+                        ui,
                         &mut self.primary_camera,
                         &mut self.primary_camera_velocity,
                     );
                 } else {
-                    pan(
-                        ui,
+                    CameraMap::pan_zoom(
                         ctx,
+                        ui,
                         &mut self.secondary_camera,
                         &mut self.secondary_camera_velocity,
                     );
                 }
 
-                // let camera_map = if self.current_fractal == 0 {
-                //     CameraMap::new(ui.max_rect(), self.primary_camera)
-                // } else {
-                //     CameraMap::new(ui.max_rect(), self.secondary_camera)
-                // };
                 let primary_camera_map = CameraMap::new(ui.max_rect(), self.primary_camera);
                 let secondary_camera_map = CameraMap::new(ui.max_rect(), self.secondary_camera);
 
