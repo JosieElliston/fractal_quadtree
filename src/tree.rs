@@ -7,10 +7,17 @@ use crate::{
     sample::metabrot_sample,
 };
 
+pub(crate) static ELAPSED_NANOS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub(crate) static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 #[derive(Debug)]
 struct Internal {
     dom: Domain,
     color: Color32,
+    /// the length of the shortest descending path to a leaf.
+    /// always > 0 bc this is an internal node.
+    leaf_distance_cache: u32,
     /// 0 1
     ///
     /// 2 3
@@ -80,6 +87,26 @@ impl Internal {
     //     self.child_i_containing((real, imag))
     //         .map(|i| self.children[i].as_ref())
     // }
+
+    fn compute_leaf_distance(&self) -> u32 {
+        self.children
+            .iter()
+            .map(|c| c.leaf_distance_cache())
+            .min()
+            .unwrap()
+            + 1
+    }
+
+    /// returns whether the cache was updated
+    fn update_leaf_distance(&mut self) -> bool {
+        let new = self.compute_leaf_distance();
+        if new != self.leaf_distance_cache {
+            self.leaf_distance_cache = new;
+            true
+        } else {
+            false
+        }
+    }
 }
 
 impl LeafColor {
@@ -94,6 +121,7 @@ impl LeafColor {
         Some(Internal {
             dom: self.dom,
             color: self.color,
+            leaf_distance_cache: 1,
             children,
         })
     }
@@ -119,6 +147,13 @@ impl Node {
             Node::Internal(internal) => Some(internal.color),
             Node::LeafColor(leaf_color) => Some(leaf_color.color),
             Node::LeafReserved(_) => None,
+        }
+    }
+
+    fn leaf_distance_cache(&self) -> u32 {
+        match self {
+            Node::Internal(internal) => internal.leaf_distance_cache,
+            Node::LeafColor(_) | Node::LeafReserved(_) => 0,
         }
     }
 }
@@ -147,6 +182,29 @@ impl Tree {
             }
         }
         count
+    }
+
+    #[inline(never)]
+    pub(crate) fn validate_leaf_distance(&self) {
+        let mut stack = Vec::with_capacity(64);
+        stack.push(&self.root);
+        while let Some(node) = stack.pop()
+            && let Node::Internal(node) = node
+        {
+            stack.extend(node.children.iter().map(|c| c.as_ref()));
+            let oracle = node
+                .children
+                .iter()
+                .map(|c| c.leaf_distance_cache())
+                .min()
+                .unwrap()
+                + 1;
+            assert_eq!(
+                node.leaf_distance_cache, oracle,
+                "leaf_distance invariant violated at node with dom {:?}",
+                node.dom
+            );
+        }
     }
 
     // fn is_leaf(&self) -> bool {
@@ -651,167 +709,180 @@ impl Tree {
     /// to select the node, we require that it
     /// - intersects the window
     /// - is among the shallowest leafs
-    /// - disagrees with its parent on color the most
     // TODO: we don't actually need the leaf to be colored to split it
     // TODO: better ordering
-    // TODO: refine things that disagree on color
-    // TODO: max depth delta between deepest and shallowest leaf that's bigger than 1
     #[inline(never)]
     pub(crate) fn refine(&mut self, window: Window) -> Option<[(Real, Imag); 4]> {
-        // actually this would require ~cloning the entire tree
-        // #[derive(Debug, PartialEq, Eq)]
-        // struct Element {
-        //     node: *mut Node,
-        //     depth: usize,
-        //     color_diff: i16,
-        // }
-        // impl PartialOrd for Element {
-        //     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        //         Some(self.cmp(other))
-        //     }
-        // }
-        // impl Ord for Element {
-        //     /// smaller depth is smaller
-        //     /// then larger color diff is smaller
-        //     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        //         self.partial_cmp(other).unwrap()
-        //     }
-        // }
+        let start = std::time::Instant::now();
 
+        /// returns `None` if no leaf intersects the window
         #[inline(never)]
-        fn get_shallowest_leaf_depth(tree: &Tree, window: Window) -> usize {
-            // let mut node = self.root;
-            // let mut depth = 0;
+        // fn get_shallowest_leaf(tree: &mut Tree, window: Window) -> Option<&mut Node> {
+        fn get_shallowest_leaf_oracle(
+            tree: &mut Tree,
+            window: Window,
+        ) -> Option<(u32, (Real, Imag))> {
             // queue instead of stack bc we want to visit shallower nodes first
             let mut queue = VecDeque::with_capacity(64);
-            queue.push_back((&tree.root, 0));
-            let mut target_depth = usize::MAX;
+            queue.push_back((&mut tree.root, 0));
+            let mut shallowest_depth = u32::MAX;
+            // TODO: change this to a Vec and store all the shallowest leafs
+            let mut shallowest_leaf = None;
             while let Some((node, depth)) = queue.pop_front() {
                 if !window.overlaps(node.dom()) {
                     continue;
                 }
-                if depth >= target_depth {
+                if depth >= shallowest_depth {
                     continue;
                 }
                 match node {
                     Node::Internal(internal) => {
-                        queue.extend(internal.children.iter().map(|c| (c.as_ref(), depth + 1)));
+                        queue.extend(
+                            internal
+                                .children
+                                .iter_mut()
+                                .map(|c| (c.as_mut(), depth + 1)),
+                        );
                     }
                     Node::LeafColor(_) => {
-                        target_depth = target_depth.min(depth);
+                        if depth < shallowest_depth {
+                            shallowest_depth = depth;
+                            shallowest_leaf = Some(node);
+                        }
                     }
                     Node::LeafReserved(_) => {}
                 }
             }
-            target_depth
+            // shallowest_leaf
+            Some((shallowest_depth, shallowest_leaf?.dom().mid()))
+        }
+
+        #[inline(never)]
+        /// returns `None` if no leaf intersects the window
+        fn get_shallowest_leaf(tree: &mut Tree, window: Window) -> Option<(u32, (Real, Imag))> {
+            // queue instead of stack bc we want to visit shallower nodes first
+            // TODO: the queue is probably worse now
+            let mut stack = Vec::with_capacity(64);
+            stack.push((&mut tree.root, 0));
+            let mut shallowest_depth = u32::MAX;
+            // TODO: change this to a Vec and store all the shallowest leafs
+            let mut shallowest_leaf = None;
+            // while let Some((node, depth)) = queue.pop_front() {
+            while let Some((node, depth)) = stack.pop() {
+                // TODO: instead of doing this check on pop, do it on push
+                // this also lets us do less work in the case where the domain is contained inside the window
+                if !window.overlaps(node.dom()) {
+                    continue;
+                }
+                if depth >= shallowest_depth {
+                    continue;
+                }
+                match node {
+                    Node::Internal(internal) => {
+                        let leaf_distance = internal.compute_leaf_distance();
+                        if leaf_distance != internal.leaf_distance_cache {
+                            internal.leaf_distance_cache = leaf_distance;
+                        }
+                        if leaf_distance + depth >= shallowest_depth {
+                            continue;
+                        }
+                        // stack.extend(
+                        //     internal
+                        //         .children
+                        //         .iter_mut()
+                        //         .map(|c| (c.as_mut(), depth + 1)),
+                        // );
+                        let mut children: [&mut Node; 4] =
+                            internal.children.each_mut().map(|c| c.as_mut());
+                        children.sort_by_key(|c| c.leaf_distance_cache());
+                        stack.extend(children.into_iter().map(|c| (c, depth + 1)));
+                    }
+                    Node::LeafColor(_) => {
+                        if depth < shallowest_depth {
+                            shallowest_depth = depth;
+                            shallowest_leaf = Some(node);
+                        }
+                    }
+                    Node::LeafReserved(_) => {}
+                }
+            }
+            // shallowest_leaf
+            Some((shallowest_depth, shallowest_leaf?.dom().mid()))
         }
 
         // how deep is the shallowest leaf that intersects the window?
-        let shallowest_leaf_depth = get_shallowest_leaf_depth(self, window);
-        // probably no nodes overlap the window
-        if shallowest_leaf_depth == usize::MAX {
-            return None;
-        }
+        // let node = get_shallowest_leaf(self, window)?;
 
-        fn color_diff(lhs: Color32, rhs: Color32) -> i16 {
-            if (lhs == Color32::BLACK) != (rhs == Color32::BLACK) {
-                return i16::MAX;
+        // TODO: is this really correct?
+        let (shallowest_depth, node_mid) = get_shallowest_leaf(self, window)?;
+        // let (shallowest_depth_oracle, _) = get_shallowest_leaf_oracle(self, window)?;
+        // assert_eq!(shallowest_depth, shallowest_depth_oracle,);
+
+        // #[inline(never)]
+        // fn update_leaf_distance(tree: &mut Tree, leaf_mid: (Real, Imag)) {
+        //     // let mut stack: Vec<&mut Internal> = Vec::with_capacity(64);
+        //     // {
+        //     //     let mut node = &mut tree.root;
+        //     //     while let Node::Internal(internal) = node {
+        //     //         let child_i = internal.child_i_containing(leaf_mid).unwrap();
+        //     //         node = internal.children[child_i].as_mut();
+        //     //         stack.push(internal);
+        //     //     }
+        //     // }
+        //     let mut stack: Vec<&mut Internal> = Vec::with_capacity(64);
+        //     {
+        //         let mut node = &mut tree.root;
+        //         while let Node::Internal(internal) = node {
+        //             let child_i = internal.child_i_containing(leaf_mid).unwrap();
+        //             unsafe {
+        //                 node = (internal as *mut Internal).as_mut().unwrap().children[child_i]
+        //                     .as_mut();
+        //             }
+        //             stack.push(internal);
+        //         }
+        //     }
+
+        //     if let Some(internal) = stack.pop() {
+        //         assert!(internal.leaf_distance == 1 || internal.leaf_distance == 2);
+        //         // if internal.leaf_distance == 2 {
+        //         //     return;
+        //         // }
+        //         internal.leaf_distance = 2;
+        //     }
+        //     while let Some(internal) = stack.pop() {
+        //         // let internal = unsafe { &mut *internal };
+        //         let leaf_distance = internal
+        //             .children
+        //             .iter()
+        //             .map(|c| c.leaf_distance())
+        //             .min()
+        //             .unwrap()
+        //             + 1;
+        //         assert!(
+        //             leaf_distance == internal.leaf_distance
+        //                 || leaf_distance == internal.leaf_distance + 1
+        //         );
+        //         if leaf_distance == internal.leaf_distance {
+        //             break;
+        //         }
+        //         internal.leaf_distance = leaf_distance;
+        //     }
+        // }
+        // update_leaf_distance(self, node_mid);
+
+        fn get_leaf_from_mid(tree: &mut Tree, mid: (Real, Imag)) -> &mut Node {
+            let mut node = &mut tree.root;
+            while let Node::Internal(internal) = node {
+                let child_i = internal.child_i_containing(mid).unwrap();
+                node = internal.children[child_i].as_mut();
             }
-            (lhs.r() as i16 - rhs.r() as i16).abs()
-                + (lhs.g() as i16 - rhs.g() as i16).abs()
-                + (lhs.b() as i16 - rhs.b() as i16).abs()
+            node
         }
 
-        /// how much deeper than the shallowest leaf are we allowed to expand?
-        /// if 0, we only consider the shallowest leafs
-        const DEPTH_RELAXATION: usize = 0;
+        let node = get_leaf_from_mid(self, node_mid);
 
-        /// find a leaf that intersects the window
-        /// and has depth == target_depth
-        /// and disagrees with its parent on color the most
-        #[inline(never)]
-        fn get_largest_color_diff(
-            tree: &mut Tree,
-            window: Window,
-            shallowest_leaf_depth: usize,
-        ) -> i16 {
-            let mut largest_color_diff = 0;
-
-            let mut queue = VecDeque::with_capacity(64);
-            queue.push_back((&mut tree.root, 0, Color32::BLACK));
-            while let Some((node, depth, parent_color)) = queue.pop_front() {
-                if !window.overlaps(node.dom()) {
-                    continue;
-                }
-                if depth > shallowest_leaf_depth + DEPTH_RELAXATION {
-                    continue;
-                }
-                match node {
-                    Node::Internal(internal) => {
-                        queue.extend(
-                            internal
-                                .children
-                                .iter_mut()
-                                .map(|c| (c.as_mut(), depth + 1, internal.color)),
-                        );
-                    }
-                    Node::LeafReserved(_) => {}
-                    Node::LeafColor(leaf) => {
-                        let color_diff = color_diff(leaf.color, parent_color);
-                        if color_diff > largest_color_diff {
-                            largest_color_diff = color_diff;
-                        }
-                    }
-                }
-            }
-            largest_color_diff
-            // unreachable!();
-        }
-
-        let largest_color_diff = get_largest_color_diff(self, window, shallowest_leaf_depth);
-
-        // TODO: this is kinda awful,
-        // we already found the node,
-        // i just couldn't get the unsafe mut stuff to work
-        #[inline(never)]
-        fn select_node(
-            tree: &mut Tree,
-            window: Window,
-            shallowest_leaf_depth: usize,
-            largest_color_diff: i16,
-        ) -> &mut Node {
-            let mut queue = VecDeque::with_capacity(64);
-            queue.push_back((&mut tree.root, 0, Color32::BLACK));
-            while let Some((node, depth, parent_color)) = queue.pop_front() {
-                if !window.overlaps(node.dom()) {
-                    continue;
-                }
-                if depth > shallowest_leaf_depth + DEPTH_RELAXATION {
-                    continue;
-                }
-                match node {
-                    Node::Internal(internal) => {
-                        queue.extend(
-                            internal
-                                .children
-                                .iter_mut()
-                                .map(|c| (c.as_mut(), depth + 1, internal.color)),
-                        );
-                    }
-                    Node::LeafReserved(_) => {}
-                    Node::LeafColor(leaf) => {
-                        let color_diff = color_diff(leaf.color, parent_color);
-                        if color_diff == largest_color_diff {
-                            return node;
-                        }
-                    }
-                }
-            }
-            unreachable!("we already found the node we want, we just need to find it again");
-        }
-
-        let node = select_node(self, window, shallowest_leaf_depth, largest_color_diff);
         let Node::LeafColor(leaf) = node else {
+            // let Some(leaf) = get_leaf_from_mid(self, node_mid) else {
             unreachable!("the node must be a `LeafColor`");
         };
         let internal = leaf.try_split()?;
@@ -824,8 +895,209 @@ impl Tree {
             .try_into()
             .ok()?;
         *node = Node::Internal(internal);
+        #[cfg(false)]
+        {
+            let elapsed = start.elapsed();
+            ELAPSED_NANOS.fetch_add(
+                elapsed.as_nanos() as u64,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
         Some(points)
     }
+
+    // /// returns `None` if we shouldn't/can't refine
+    // /// returns the points we need to sample
+    // /// we split a `LeafColor` into a `Internal([LeafReserved; 4])`)
+    // ///
+    // /// to select the node, we require that it
+    // /// - intersects the window
+    // /// - is among the shallowest leafs
+    // /// - disagrees with its parent on color the most
+    // // TODO: we don't actually need the leaf to be colored to split it
+    // // TODO: better ordering
+    // // TODO: max depth delta between deepest and shallowest leaf that's bigger than 1
+    // #[inline(never)]
+    // pub(crate) fn refine(&mut self, window: Window) -> Option<[(Real, Imag); 4]> {
+    //     let start = std::time::Instant::now();
+    //     // actually this would require ~cloning the entire tree
+    //     // #[derive(Debug, PartialEq, Eq)]
+    //     // struct Element {
+    //     //     node: *mut Node,
+    //     //     depth: usize,
+    //     //     color_diff: i16,
+    //     // }
+    //     // impl PartialOrd for Element {
+    //     //     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+    //     //         Some(self.cmp(other))
+    //     //     }
+    //     // }
+    //     // impl Ord for Element {
+    //     //     /// smaller depth is smaller
+    //     //     /// then larger color diff is smaller
+    //     //     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+    //     //         self.partial_cmp(other).unwrap()
+    //     //     }
+    //     // }
+
+    //     #[inline(never)]
+    //     fn get_shallowest_leaf_depth(tree: &Tree, window: Window) -> usize {
+    //         // let mut node = self.root;
+    //         // let mut depth = 0;
+    //         // queue instead of stack bc we want to visit shallower nodes first
+    //         let mut queue = VecDeque::with_capacity(64);
+    //         queue.push_back((&tree.root, 0));
+    //         let mut target_depth = usize::MAX;
+    //         while let Some((node, depth)) = queue.pop_front() {
+    //             if !window.overlaps(node.dom()) {
+    //                 continue;
+    //             }
+    //             if depth >= target_depth {
+    //                 continue;
+    //             }
+    //             match node {
+    //                 Node::Internal(internal) => {
+    //                     queue.extend(internal.children.iter().map(|c| (c.as_ref(), depth + 1)));
+    //                 }
+    //                 Node::LeafColor(_) => {
+    //                     target_depth = target_depth.min(depth);
+    //                 }
+    //                 Node::LeafReserved(_) => {}
+    //             }
+    //         }
+    //         target_depth
+    //     }
+
+    //     // how deep is the shallowest leaf that intersects the window?
+    //     let shallowest_leaf_depth = get_shallowest_leaf_depth(self, window);
+    //     // probably no nodes overlap the window
+    //     if shallowest_leaf_depth == usize::MAX {
+    //         return None;
+    //     }
+
+    //     fn color_diff(lhs: Color32, rhs: Color32) -> i16 {
+    //         if (lhs == Color32::BLACK) != (rhs == Color32::BLACK) {
+    //             return i16::MAX;
+    //         }
+    //         (lhs.r() as i16 - rhs.r() as i16).abs()
+    //             + (lhs.g() as i16 - rhs.g() as i16).abs()
+    //             + (lhs.b() as i16 - rhs.b() as i16).abs()
+    //     }
+
+    //     /// how much deeper than the shallowest leaf are we allowed to expand?
+    //     /// if 0, we only consider the shallowest leafs
+    //     const DEPTH_RELAXATION: usize = 0;
+
+    //     /// find a leaf that intersects the window
+    //     /// and has depth == target_depth
+    //     /// and disagrees with its parent on color the most
+    //     #[inline(never)]
+    //     fn get_largest_color_diff(
+    //         tree: &mut Tree,
+    //         window: Window,
+    //         shallowest_leaf_depth: usize,
+    //     ) -> i16 {
+    //         let mut largest_color_diff = 0;
+
+    //         let mut queue = VecDeque::with_capacity(64);
+    //         queue.push_back((&mut tree.root, 0, Color32::BLACK));
+    //         while let Some((node, depth, parent_color)) = queue.pop_front() {
+    //             if !window.overlaps(node.dom()) {
+    //                 continue;
+    //             }
+    //             if depth > shallowest_leaf_depth + DEPTH_RELAXATION {
+    //                 continue;
+    //             }
+    //             match node {
+    //                 Node::Internal(internal) => {
+    //                     queue.extend(
+    //                         internal
+    //                             .children
+    //                             .iter_mut()
+    //                             .map(|c| (c.as_mut(), depth + 1, internal.color)),
+    //                     );
+    //                 }
+    //                 Node::LeafReserved(_) => {}
+    //                 Node::LeafColor(leaf) => {
+    //                     let color_diff = color_diff(leaf.color, parent_color);
+    //                     if color_diff > largest_color_diff {
+    //                         largest_color_diff = color_diff;
+    //                     }
+    //                 }
+    //             }
+    //         }
+    //         largest_color_diff
+    //         // unreachable!();
+    //     }
+
+    //     let largest_color_diff = get_largest_color_diff(self, window, shallowest_leaf_depth);
+
+    //     // TODO: this is kinda awful,
+    //     // we already found the node,
+    //     // i just couldn't get the unsafe mut stuff to work
+    //     #[inline(never)]
+    //     fn select_node(
+    //         tree: &mut Tree,
+    //         window: Window,
+    //         shallowest_leaf_depth: usize,
+    //         largest_color_diff: i16,
+    //     ) -> &mut Node {
+    //         let mut queue = VecDeque::with_capacity(64);
+    //         queue.push_back((&mut tree.root, 0, Color32::BLACK));
+    //         while let Some((node, depth, parent_color)) = queue.pop_front() {
+    //             if !window.overlaps(node.dom()) {
+    //                 continue;
+    //             }
+    //             if depth > shallowest_leaf_depth + DEPTH_RELAXATION {
+    //                 continue;
+    //             }
+    //             match node {
+    //                 Node::Internal(internal) => {
+    //                     queue.extend(
+    //                         internal
+    //                             .children
+    //                             .iter_mut()
+    //                             .map(|c| (c.as_mut(), depth + 1, internal.color)),
+    //                     );
+    //                 }
+    //                 Node::LeafReserved(_) => {}
+    //                 Node::LeafColor(leaf) => {
+    //                     let color_diff = color_diff(leaf.color, parent_color);
+    //                     if color_diff == largest_color_diff {
+    //                         return node;
+    //                     }
+    //                 }
+    //             }
+    //         }
+    //         unreachable!("we already found the node we want, we just need to find it again");
+    //     }
+
+    //     let node = select_node(self, window, shallowest_leaf_depth, largest_color_diff);
+    //     let Node::LeafColor(leaf) = node else {
+    //         unreachable!("the node must be a `LeafColor`");
+    //     };
+    //     let internal = leaf.try_split()?;
+    //     // we can't just `internal.children.map(|c| c.dom().mid())` bc of rust
+    //     let points = internal
+    //         .children
+    //         .iter()
+    //         .map(|c| c.dom().mid())
+    //         .collect::<Vec<_>>()
+    //         .try_into()
+    //         .ok()?;
+    //     *node = Node::Internal(internal);
+    //     #[cfg(false)]
+    //     {
+    //         let elapsed = start.elapsed();
+    //         ELAPSED_NANOS.fetch_add(
+    //             elapsed.as_nanos() as u64,
+    //             std::sync::atomic::Ordering::Relaxed,
+    //         );
+    //         COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    //     }
+    //     Some(points)
+    // }
 
     /// inserts the previously reserved sample into the the tree,
     /// promoting a `LeafReserved` to a `LeafColor`

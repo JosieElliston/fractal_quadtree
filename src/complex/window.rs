@@ -125,15 +125,18 @@ impl Window {
         real_lo <= real_hi && imag_lo <= imag_hi
     }
 
+    pub(crate) fn contains(self, other: impl Into<Self>) -> bool {
+        let other = other.into();
+        self.real_lo <= other.real_lo
+            && other.real_hi <= self.real_hi
+            && self.imag_lo <= other.imag_lo
+            && other.imag_hi <= self.imag_hi
+    }
+
     pub(crate) fn contains_point(self, (real, imag): (Real, Imag)) -> bool {
         (self.real_lo..=self.real_hi).contains(&real)
             && (self.imag_lo..=self.imag_hi).contains(&imag)
     }
-
-    // fn contains(self, other: impl Into<Self>) -> bool {
-    //     let other = other.into();
-    //     self.intersect(other) == Some(other)
-    // }
 
     // pub(crate) fn grid(
     //     self,

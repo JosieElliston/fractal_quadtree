@@ -7,6 +7,10 @@ use eframe::egui::Color32;
 
 use crate::{complex::fixed::*, sample};
 
+pub(crate) static ELAPSED_NANOS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub(crate) static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 struct Worker {
     handle: thread::JoinHandle<()>,
     request_sender: mpsc::Sender<(Real, Imag)>,
@@ -28,7 +32,17 @@ impl Pool {
                     .name(format!("pool {}", thread_i))
                     .spawn(move || {
                         while let Ok(point) = request_receiver.recv() {
+                            let start = std::time::Instant::now();
                             let color = sample::metabrot_sample(point).color();
+                            #[cfg(false)]
+                            {
+                                let elapsed = start.elapsed();
+                                ELAPSED_NANOS.fetch_add(
+                                    elapsed.as_nanos() as u64,
+                                    std::sync::atomic::Ordering::Relaxed,
+                                );
+                                COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            }
                             let Ok(_) = response_sender.send((thread_i, point, color)) else {
                                 break;
                             };

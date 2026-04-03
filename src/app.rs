@@ -3,9 +3,9 @@ use rayon::prelude::*;
 
 use crate::{
     complex::{Camera, CameraMap, Domain, Window, fixed::*},
-    pool::Pool,
+    pool::{self, Pool},
     sample,
-    tree::Tree,
+    tree::{self, Tree},
 };
 
 /// fancy dynamic radius based on zoom
@@ -91,8 +91,32 @@ impl eframe::App for App {
                     self.current_fractal = key;
                 }
 
+                // debug static counters
+                // #[cfg(false)]
+                {
+                    println!();
+                    if let Some(nanos) = tree::ELAPSED_NANOS
+                        .load(std::sync::atomic::Ordering::Relaxed)
+                        .checked_div(tree::COUNTER.load(std::sync::atomic::Ordering::Relaxed))
+                    {
+                        println!("tree average time: {} ns", nanos);
+                    }
+                    if let Some(nanos) = pool::ELAPSED_NANOS
+                        .load(std::sync::atomic::Ordering::Relaxed)
+                        .checked_div(pool::COUNTER.load(std::sync::atomic::Ordering::Relaxed))
+                    {
+                        println!("pool average time: {} ns", nanos);
+                        println!(
+                            "pool average / tc: {} ns",
+                            nanos / self.pool.thread_count() as u64
+                        );
+                    }
+                }
+
+                // self.tree.validate_leaf_distance();
+
                 // panning stuff
-                // move other camera when holding backtick
+                // pan other camera when holding backtick
                 if ctx.input(|i| i.key_down(Key::Backtick)) != (self.current_fractal == 0) {
                     CameraMap::pan_zoom(
                         ctx,

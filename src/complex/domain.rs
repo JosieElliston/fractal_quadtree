@@ -62,7 +62,7 @@ impl Domain {
     /// 2 3
     pub(crate) fn split(self) -> Option<[Self; 4]> {
         let rad = self.rad().div2_exact_checked()?;
-        if rad <= Fixed::ZERO  {
+        if rad <= Fixed::ZERO {
             return None;
         }
         Some([
