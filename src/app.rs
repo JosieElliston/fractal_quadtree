@@ -177,7 +177,8 @@ impl eframe::App for App {
                     // request samples
                     // TODO: various canceling stuff
                     // while self.pool.in_flight() < self.in_flight_target {
-                    while self.pool.in_flight() < 256 {
+                    const MAX_IN_FLIGHT: usize = 512;
+                    while self.pool.in_flight() < MAX_IN_FLIGHT {
                         let Some(points) = self.tree.refine(
                             primary_camera_map
                                 .window()

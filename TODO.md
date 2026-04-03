@@ -55,6 +55,7 @@
     - have two textures to swap?
     - also tell them the new window
 - use that nearby samples are relevant to make parallelism harder/more interesting
+- change children from `[Box<Node>; 4]` to `Box<[Node; 4]>`
 
 ## rust style
 
