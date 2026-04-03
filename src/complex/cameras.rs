@@ -297,7 +297,7 @@ mod tests {
 
     fn get_rect_camera() -> (Rect, Camera) {
         let rect = Rect::from_min_max(Pos2::new(0.0, 30.0), Pos2::new(10.0, 50.0));
-        let camera = Camera::new(1.0.into(), 2.0.into(), 1.0.into());
+        let camera = Camera::new(1.0, 2.0, 1.0);
         (rect, camera)
     }
 
@@ -306,10 +306,10 @@ mod tests {
         let (rect, camera) = get_rect_camera();
         let camera_map = CameraMap::new(rect, camera);
 
-        assert_eq!(camera_map.camera.real_lo(), 0.0.into());
-        assert_eq!(camera_map.camera.real_hi(), 2.0.into());
-        assert_eq!(camera_map.imag_lo(), 0.0.into());
-        assert_eq!(camera_map.imag_hi(), 4.0.into());
+        assert_eq!(camera_map.camera.real_lo(), 0.0);
+        assert_eq!(camera_map.camera.real_hi(), 2.0);
+        assert_eq!(camera_map.imag_lo(), 0.0);
+        assert_eq!(camera_map.imag_hi(), 4.0);
 
         assert!((0.0 - camera_map.real_to_x(0.0.try_into().unwrap())).abs() < 1e-4);
         assert!((10.0 - camera_map.real_to_x(2.0.try_into().unwrap())).abs() < 1e-4);

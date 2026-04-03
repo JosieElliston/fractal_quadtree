@@ -149,6 +149,15 @@ impl Fixed {
         if self.0 < 0 { Self(-self.0) } else { self }
     }
 
+    /// returns `None` if it would overflow
+    pub(crate) fn add_checked(self, other: Self) -> Option<Self> {
+        self.0.checked_add(other.0).map(Self)
+    }
+    /// returns `None` if it would overflow
+    pub(crate) fn sub_checked(self, other: Self) -> Option<Self> {
+        self.0.checked_sub(other.0).map(Self)
+    }
+
     // TODO: all these ops don't use the fact that it's just a shift
     // but idk how to do the overflow checks myself
 
@@ -242,16 +251,16 @@ impl Fixed {
     //     self.mul(f.recip().into())
     // }
 
-    /// returns `None` if the length is zero
-    /// TODO: returns `None` if it can't be represented as Fixed
-    pub(crate) fn normalized(real: Real, imag: Imag) -> Option<(Real, Imag)> {
-        let length = (real.into_f64() * real.into_f64() + imag.into_f64() * imag.into_f64()).sqrt();
-        if length == 0.0 {
-            None
-        } else {
-            Some((real.div_f64(length), imag.div_f64(length)))
-        }
-    }
+    // /// returns `None` if the length is zero
+    // /// TODO: returns `None` if it can't be represented as Fixed
+    // pub(crate) fn normalized(real: Real, imag: Imag) -> Option<(Real, Imag)> {
+    //     let length = (real.into_f64() * real.into_f64() + imag.into_f64() * imag.into_f64()).sqrt();
+    //     if length == 0.0 {
+    //         None
+    //     } else {
+    //         Some((real.div_f64(length), imag.div_f64(length)))
+    //     }
+    // }
 }
 
 impl fmt::Display for Fixed {

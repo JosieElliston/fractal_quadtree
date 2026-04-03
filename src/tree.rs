@@ -1,8 +1,4 @@
-use std::{
-    collections::VecDeque,
-    iter::Sum,
-    ops::{Add, AddAssign},
-};
+use std::collections::VecDeque;
 
 use eframe::egui::Color32;
 
@@ -61,23 +57,14 @@ impl Internal {
     /// returns None if the point is outside the domain
     // fn child_i_containing(&self, real: f32, imag: f32) -> Option<usize> {
     fn child_i_containing(&self, (real, imag): (Real, Imag)) -> Option<usize> {
-        let real = real.into();
-        let imag = imag.into();
         // (0..self.children.len()).find(|&i| self.children[i].dom().contains_point((real, imag)))
 
         // do it this way for better stability
         if !self.dom.contains_point((real, imag)) {
             None
         } else {
-            let actual = (if real <= self.dom.real_mid().into() {
-                0
-            } else {
-                1
-            }) + (if imag >= self.dom.imag_mid().into() {
-                0
-            } else {
-                2
-            });
+            let actual = (if real <= self.dom.real_mid() { 0 } else { 1 })
+                + (if imag >= self.dom.imag_mid() { 0 } else { 2 });
             // let oracle = (0..self.children.len())
             //     .find(|&i| self.children[i].dom().contains_point((real, imag)))
             //     .unwrap();
@@ -141,7 +128,7 @@ impl Tree {
         Self {
             dom,
             root: Node::LeafColor(LeafColor {
-                color: metabrot_sample(dom.mid().into()).color(),
+                color: metabrot_sample(dom.mid()).color(),
                 dom,
             }),
         }
@@ -942,66 +929,66 @@ impl Tree {
     // }
 }
 
-// TODO: once we factor drawing into tree.rs, this should become private
-/// represents the average of `count` colors
-#[derive(Debug, Default, Clone)]
-#[repr(align(32))]
-pub(crate) struct ColorBuilder {
-    // count: NonZero<u32>,
-    count: u32,
-    r: u32,
-    g: u32,
-    b: u32,
-}
-impl ColorBuilder {
-    pub(crate) fn build(self) -> Option<Color32> {
-        if self.count == 0 {
-            None
-        } else {
-            Some(Color32::from_rgb(
-                (self.r / self.count) as u8,
-                (self.g / self.count) as u8,
-                (self.b / self.count) as u8,
-            ))
-        }
-    }
-}
-impl From<Color32> for ColorBuilder {
-    fn from(value: Color32) -> Self {
-        Self {
-            count: 1,
-            r: value.r() as _,
-            g: value.g() as _,
-            b: value.b() as _,
-        }
-    }
-}
-impl AddAssign<ColorBuilder> for ColorBuilder {
-    fn add_assign(&mut self, rhs: ColorBuilder) {
-        self.count += rhs.count;
-        self.r += rhs.r;
-        self.g += rhs.g;
-        self.b += rhs.b;
-    }
-}
-impl Add<ColorBuilder> for ColorBuilder {
-    type Output = ColorBuilder;
+// // TODO: once we factor drawing into tree.rs, this should become private
+// /// represents the average of `count` colors
+// #[derive(Debug, Default, Clone)]
+// #[repr(align(32))]
+// pub(crate) struct ColorBuilder {
+//     // count: NonZero<u32>,
+//     count: u32,
+//     r: u32,
+//     g: u32,
+//     b: u32,
+// }
+// impl ColorBuilder {
+//     pub(crate) fn build(self) -> Option<Color32> {
+//         if self.count == 0 {
+//             None
+//         } else {
+//             Some(Color32::from_rgb(
+//                 (self.r / self.count) as u8,
+//                 (self.g / self.count) as u8,
+//                 (self.b / self.count) as u8,
+//             ))
+//         }
+//     }
+// }
+// impl From<Color32> for ColorBuilder {
+//     fn from(value: Color32) -> Self {
+//         Self {
+//             count: 1,
+//             r: value.r() as _,
+//             g: value.g() as _,
+//             b: value.b() as _,
+//         }
+//     }
+// }
+// impl AddAssign<ColorBuilder> for ColorBuilder {
+//     fn add_assign(&mut self, rhs: ColorBuilder) {
+//         self.count += rhs.count;
+//         self.r += rhs.r;
+//         self.g += rhs.g;
+//         self.b += rhs.b;
+//     }
+// }
+// impl Add<ColorBuilder> for ColorBuilder {
+//     type Output = ColorBuilder;
 
-    fn add(self, rhs: ColorBuilder) -> ColorBuilder {
-        let mut result = self;
-        result += rhs;
-        result
-    }
-}
-impl Sum for ColorBuilder {
-    fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
-        let mut ret = Self::default();
-        for c in iter {
-            ret += c;
-        }
-        ret
-    }
-}
+//     fn add(self, rhs: ColorBuilder) -> ColorBuilder {
+//         let mut result = self;
+//         result += rhs;
+//         result
+//     }
+// }
+// impl Sum for ColorBuilder {
+//     fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
+//         let mut ret = Self::default();
+//         for c in iter {
+//             ret += c;
+//         }
+//         ret
+//     }
+// }
 
 // #[derive(Debug, Default, Clone, Copy)]
 // struct Trace {

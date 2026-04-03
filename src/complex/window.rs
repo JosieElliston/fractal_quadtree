@@ -10,8 +10,8 @@ pub(crate) struct Window {
 }
 impl Window {
     /// fails if the window would be empty,
-    /// including if it would have zero width or height.
-    /// also fails if the window is too big, to avoid overflow issues.
+    /// ie if it would have zero width or height.
+    /// also fails if the window is too big, to avoid later overflow issues.
     pub(crate) fn try_from_lo_hi(
         real_lo: Real,
         real_hi: Real,
@@ -21,13 +21,15 @@ impl Window {
         if !(real_lo < real_hi && imag_lo < imag_hi) {
             return None;
         }
-        if !(Fixed::in_domain(2.0 * real_lo.into_f64())
-            && Fixed::in_domain(2.0 * real_hi.into_f64())
-            && Fixed::in_domain(2.0 * imag_lo.into_f64())
-            && Fixed::in_domain(2.0 * imag_hi.into_f64()))
-        {
-            return None;
-        }
+        let _ = real_hi.add_checked(real_lo)?;
+        let _ = imag_hi.add_checked(imag_lo)?;
+        // if !(Fixed::in_domain(2.0 * real_lo.into_f64())
+        //     && Fixed::in_domain(2.0 * real_hi.into_f64())
+        //     && Fixed::in_domain(2.0 * imag_lo.into_f64())
+        //     && Fixed::in_domain(2.0 * imag_hi.into_f64()))
+        // {
+        //     return None;
+        // }
         Some(Self {
             real_lo,
             real_hi,
@@ -40,34 +42,36 @@ impl Window {
     pub(crate) fn from_lo_hi(real_lo: Real, real_hi: Real, imag_lo: Imag, imag_hi: Imag) -> Self {
         Self::try_from_lo_hi(real_lo, real_hi, imag_lo, imag_hi).unwrap()
     }
-    /// panics if the diameter is too small
+    /// fails if the window would be empty,
+    /// ie if it would have zero width or height.
+    /// also fails if the window is too big, to avoid overflow issues.
     pub(crate) fn from_mid_rad(
         real_mid: Real,
         imag_mid: Imag,
         real_rad: Real,
         imag_rad: Imag,
-    ) -> Self {
+    ) -> Option<Self> {
         assert!(real_rad > Fixed::ZERO);
         assert!(imag_rad > Fixed::ZERO);
-        let real_lo = real_mid - real_rad;
-        let real_hi = real_mid + real_rad;
-        let imag_lo = imag_mid - imag_rad;
-        let imag_hi = imag_mid + imag_rad;
-        Self::from_lo_hi(real_lo, real_hi, imag_lo, imag_hi)
+        let real_lo = real_mid.sub_checked(real_rad)?;
+        let real_hi = real_mid.add_checked(real_rad)?;
+        let imag_lo = imag_mid.sub_checked(imag_rad)?;
+        let imag_hi = imag_mid.add_checked(imag_rad)?;
+        Self::try_from_lo_hi(real_lo, real_hi, imag_lo, imag_hi)
     }
-    /// panics if the diameter is too small
-    pub(crate) fn from_mid_diam(
-        real_mid: Real,
-        imag_mid: Imag,
-        real_diam: Real,
-        imag_diam: Imag,
-    ) -> Self {
-        assert!(real_diam > Fixed::ZERO);
-        assert!(imag_diam > Fixed::ZERO);
-        let real_rad = real_diam.div2_floor();
-        let imag_rad = imag_diam.div2_floor();
-        Self::from_mid_rad(real_mid, imag_mid, real_rad, imag_rad)
-    }
+    // /// panics if the diameter is too small
+    // pub(crate) fn from_mid_diam(
+    //     real_mid: Real,
+    //     imag_mid: Imag,
+    //     real_diam: Real,
+    //     imag_diam: Imag,
+    // ) -> Self {
+    //     assert!(real_diam > Fixed::ZERO);
+    //     assert!(imag_diam > Fixed::ZERO);
+    //     let real_rad = real_diam.div2_floor();
+    //     let imag_rad = imag_diam.div2_floor();
+    //     Self::from_mid_rad(real_mid, imag_mid, real_rad, imag_rad)
+    // }
 
     pub(crate) fn real_lo(self) -> Real {
         self.real_lo
@@ -197,10 +201,10 @@ impl Window {
 impl From<Domain> for Window {
     fn from(dom: Domain) -> Self {
         Window {
-            real_lo: dom.real_lo().into(),
-            real_hi: dom.real_hi().into(),
-            imag_lo: dom.imag_lo().into(),
-            imag_hi: dom.imag_hi().into(),
+            real_lo: dom.real_lo(),
+            real_hi: dom.real_hi(),
+            imag_lo: dom.imag_lo(),
+            imag_hi: dom.imag_hi(),
         }
     }
 }

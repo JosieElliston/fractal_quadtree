@@ -121,7 +121,7 @@ impl eframe::App for App {
                     // take samples out of the pool
                     let mut sample_count = 0;
                     while let Some(((real, imag), color)) = self.pool.recv() {
-                        self.tree.insert((real, imag), color);
+                        self.tree.insert((real, imag), color).unwrap();
                         sample_count += 1;
                     }
                     self.sample_counts.add(ctx.input(|i| i.time), sample_count);
@@ -373,7 +373,8 @@ impl eframe::App for App {
                                 .unwrap(),
                             2.0.try_into().unwrap(),
                             2.0.try_into().unwrap(),
-                        );
+                        )
+                        .unwrap();
 
                         // draw the outline of the window
                         painter.rect_stroke(
@@ -410,7 +411,7 @@ impl eframe::App for App {
                                     // the image of the sample under a few gradient descent steps
                                     if let Some(stepped_c) = (|| {
                                         let (mut c_real, mut c_imag) = (c_real, c_imag);
-                                        for step in 0..gradient_steps {
+                                        for _ in 0..gradient_steps {
                                             (c_real, c_imag) =
                                                 sample::gradient_step(z0, (c_real, c_imag))?;
                                         }
@@ -437,9 +438,9 @@ impl eframe::App for App {
                             // we want to look through all the points at a coarse grain before resampling
                             let mut to_resample =
                                 Vec::with_capacity(sample::WIDTH0 * sample::WIDTH0);
-                            let cell_diameter = {
-                                (window.real_rad().mul2().div_f64(sample::WIDTH0 as f64))
-                                    .max(window.imag_rad().mul2().div_f64(sample::WIDTH0 as f64))
+                            let cell_rad = {
+                                (window.real_rad().div_f64(sample::WIDTH0 as f64))
+                                    .max(window.imag_rad().div_f64(sample::WIDTH0 as f64))
                             };
                             // draw initial points
                             for (c_real, c_imag) in window
@@ -455,7 +456,7 @@ impl eframe::App for App {
                                     deepest_point = (c_real, c_imag);
                                 }
                                 if let Some(distance) = distance
-                                    && distance < cell_diameter
+                                    && distance < cell_rad.mul2()
                                 {
                                     to_resample.push((c_real, c_imag));
                                 }
@@ -468,12 +469,9 @@ impl eframe::App for App {
                             // TODO: try sorting the vec by distance estimate
                             // draw points that got resampled
                             for (c0_real, c0_imag) in to_resample {
-                                let resample_window = Window::from_mid_diam(
-                                    c0_real,
-                                    c0_imag,
-                                    cell_diameter,
-                                    cell_diameter,
-                                );
+                                let resample_window =
+                                    Window::from_mid_rad(c0_real, c0_imag, cell_rad, cell_rad)
+                                        .unwrap();
                                 for (c_real, c_imag) in resample_window
                                     .grid_centers(sample::WIDTH1, sample::WIDTH1)
                                     .flatten()
@@ -533,7 +531,7 @@ impl eframe::App for App {
 
                             const MAX_STEPS: usize = 8;
                             for _ in 0..MAX_STEPS {
-                                let (distance, (grad_real, grad_imag)) =
+                                let (distance, (_grad_real, _grad_imag)) =
                                     sample::distance_estimator_gradient(z0, c)?;
                                 draw_complex_circle_stroke(
                                     c,

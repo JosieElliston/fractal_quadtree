@@ -391,18 +391,20 @@ pub(crate) fn metabrot_sample((z0_real, z0_imag): (Real, Imag)) -> Sample {
         // on the first iteration, the points that were outside of
         // the circle with radius 2 centered at (z0_imag*z0_imag - z0_real*z0_real, -2.0*z0_real*z0_imag)
         // will escape
-        let window1 = {
+        let Some(window1) =( {
             let real = z0_imag.mul(z0_imag) - z0_real.mul(z0_real);
             let imag = -z0_real.mul(z0_imag).mul2();
-            let rad = 2.0;
-            if !Fixed::in_domain(2.0 * (real.into_f64() - rad))
-                || !Fixed::in_domain(2.0 * (real.into_f64() + rad))
-                || !Fixed::in_domain(2.0 * (imag.into_f64() - rad))
-                || !Fixed::in_domain(2.0 * (imag.into_f64() + rad))
-            {
-                return Sample { depth: 0.0 };
-            }
-            Window::from_mid_rad(real, imag, rad.try_into().unwrap(), rad.try_into().unwrap())
+            let rad = 2.0.try_into().unwrap();
+            // if !Fixed::in_domain(2.0 * (real.into_f64() - rad))
+            //     || !Fixed::in_domain(2.0 * (real.into_f64() + rad))
+            //     || !Fixed::in_domain(2.0 * (imag.into_f64() - rad))
+            //     || !Fixed::in_domain(2.0 * (imag.into_f64() + rad))
+            // {
+            //     return Sample { depth: 0.0 };
+            // }
+            Window::from_mid_rad(real, imag, rad, rad)
+        } )else {
+            return Sample { depth: 0.0 };
         };
         // let window1 = Window::from_mid_diam(
         //     (f64::from(z0_imag) * f64::from(z0_imag) - f64::from(z0_real) * f64::from(z0_real))
@@ -450,9 +452,9 @@ pub(crate) fn metabrot_sample((z0_real, z0_imag): (Real, Imag)) -> Sample {
 
     // we want to look through all the points at a coarse grain before resampling
     let mut to_resample = Vec::with_capacity(WIDTH0 * WIDTH0);
-    let cell_diameter = {
-        (window.real_rad().mul2().div_f64(WIDTH0 as f64))
-            .max(window.imag_rad().mul2().div_f64(WIDTH0 as f64))
+    let cell_rad = {
+        (window.real_rad().div_f64(WIDTH0 as f64))
+            .max(window.imag_rad().div_f64(WIDTH0 as f64))
     };
     // initial samples
     for (c_real, c_imag) in window.grid_centers(WIDTH0, WIDTH0).flatten() {
@@ -465,7 +467,7 @@ pub(crate) fn metabrot_sample((z0_real, z0_imag): (Real, Imag)) -> Sample {
             deepest_point = (c_real, c_imag);
         }
         if let Some(distance) = distance
-            && distance < cell_diameter
+            && distance < cell_rad.mul2()
         {
             to_resample.push((c_real, c_imag));
         }
@@ -473,7 +475,7 @@ pub(crate) fn metabrot_sample((z0_real, z0_imag): (Real, Imag)) -> Sample {
     // TODO: try sorting the vec by distance estimate
     // windows around the points that triggered a resample
     for (c0_real, c0_imag) in to_resample {
-        let resample_window = Window::from_mid_diam(c0_real, c0_imag, cell_diameter, cell_diameter);
+        let resample_window = Window::from_mid_rad(c0_real, c0_imag, cell_rad, cell_rad).unwrap();
         for (c_real, c_imag) in resample_window.grid_centers(WIDTH1, WIDTH1).flatten() {
             if (c0_real, c0_imag) == (c_real, c_imag) {
                 continue;
