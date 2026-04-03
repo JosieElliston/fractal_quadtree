@@ -51,6 +51,9 @@
 - have the pixels live in a quadtree? where if a internal node has a `Some` color, it means all children have that color
     - a `PixelNode` gets a color if its fully contained inside a `FractalNode`
     - we can cache pixels across time if we're not panning lmao
+- broadcast to all the threads that the texture was just submitted to be drawn and that they should all draw the pixels they're responsible for into the new texture, and after that they can go back to getting new samples
+    - have two textures to swap?
+- use that nearby samples are relevant to make parallelism harder/more interesting
 
 ## rust style
 

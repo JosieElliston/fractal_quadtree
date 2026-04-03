@@ -3,6 +3,11 @@
 - slide: intro
     - the premiss is that i came up with a particular fractal to try to render, selected for being expensive, more than being mathematically interesting. (i enjoy performance engineering)
     - bc i have time, i'll define what it in some detail, tho this detail isn't very relevant to this class.
+- slide: lecture structure
+    - i'll give a brief overview of sampling,
+    - then i'll talk about parallelism,
+    - then i'll pad with more sampling
+    - (sampling (TODO: right now at least) is really the hard part of this project)
 - slide: the quadratic map
     - we're interested in iterating the function z^2 + c
     - iterating meaning z_{n+1} = z_n^2 + c
