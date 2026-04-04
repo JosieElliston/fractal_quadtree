@@ -54,8 +54,8 @@
 - broadcast to all the threads that the texture was just submitted to be drawn and that they should all draw the pixels they're responsible for into the new texture, and after that they can go back to getting new samples
     - have two textures to swap?
     - also tell them the new window
+    - what if a thread has been preempted, so it can't render the pixels it owns? does this mean we can't have threads simply own pixels?
 - use that nearby samples are relevant to make parallelism harder/more interesting
-- change children from `[Box<Node>; 4]` to `Box<[Node; 4]>`
 
 ## rust style
 
@@ -74,6 +74,7 @@
     - maybe put pan/zoom into `CameraMap`
 - use type alias Complex for (Real, Imag)?
 - type for `Pixel`
+- change children from `[Box<Node>; 4]` to `Box<[Node; 4]>`
 
 ## bugs
 
@@ -97,3 +98,4 @@
 
 - reread comments on my project, i think i deleted my notes
 - make a writeup, send to iosevich
+- 3cycle presentation

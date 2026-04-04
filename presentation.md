@@ -1,5 +1,12 @@
 # presentation
 
+## uncategorized
+
+- computing each sample itself may seem embarrassingly parallel, but we might want to do things like blob detection for coloring, and we already have parallelism over sampling, so we don't have available threads to do parallelism inside sampling.
+- note that the target hardware is "my m1 mac", not a cluster or smt, tho my solution should be fine for any common consumer hardware. note that i didn't end up using the gpu.
+
+## slides
+
 - slide: intro
     - the premiss is that i came up with a particular fractal to try to render, selected for being expensive, more than being mathematically interesting. (i enjoy performance engineering)
     - bc i have time, i'll define what it in some detail, tho this detail isn't very relevant to this class.
