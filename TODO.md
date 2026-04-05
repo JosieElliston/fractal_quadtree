@@ -16,6 +16,9 @@
 - more precision so we can zoom farther
 - find a new, smaller window, and repeat inside that one
 - sample at low `WIDTH` for speed, then resample at higher resolution?
+- use associative floating point math
+- for gradient descent, instead of using a small epsilon for computing the gradient, do something like epsilon = distance_estimate
+- make sample stateful to reuse the allocation
 
 ## refinement/splitting
 
@@ -55,6 +58,7 @@
     - have two textures to swap?
     - also tell them the new window
     - what if a thread has been preempted, so it can't render the pixels it owns? does this mean we can't have threads simply own pixels?
+    - stagger the rendering threads so they aren't all using the bus at the same time. most should instead be doing alu heavy sampling
 - use that nearby samples are relevant to make parallelism harder/more interesting
 
 ## rust style
