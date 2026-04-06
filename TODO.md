@@ -84,6 +84,7 @@
 - type for `Pixel`
 - change children from `[Box<Node>; 4]` to `Box<[Node; 4]>`
 - go over what things are `Copy`
+- join the threads in the pool at the end so they don't crash
 
 ## bugs
 

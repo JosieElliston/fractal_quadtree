@@ -3,6 +3,7 @@ use rayon::prelude::*;
 
 use crate::{
     complex::{Camera, CameraMap, Domain, Window, fixed::*},
+    fractal::{self, Fractal},
     pool::{self, Pool},
     sample,
     tree::{self, Tree},
@@ -17,7 +18,9 @@ fn dynamic_draw_size(camera_map: &CameraMap, max_rad: f32) -> f32 {
 }
 
 pub(crate) struct App {
-    tree: Tree,
+    metabrot: Fractal,
+
+    // tree: Tree,
     stride: usize,
     primary_camera: Camera,
     primary_camera_velocity: Vec2,
@@ -29,13 +32,13 @@ pub(crate) struct App {
     texture: egui::TextureHandle,
     sampling: bool,
     current_fractal: usize,
-    pool: Pool,
+    // pool: Pool,
     // in_flight_target: usize,
 }
 impl App {
     pub(crate) fn new(cc: &eframe::CreationContext<'_>) -> Self {
         Self {
-            tree: Tree::new(Domain::default()),
+            metabrot: Fractal::new_metabrot(),
             stride: 1,
             // stride: 8,
             primary_camera: Camera::default(),
@@ -51,8 +54,6 @@ impl App {
             ),
             sampling: true,
             current_fractal: 0,
-            pool: Pool::default(),
-            // in_flight_target: 2 * N_THREADS,
         }
     }
 }
@@ -158,62 +159,20 @@ impl eframe::App for App {
                 let secondary_camera_map =
                     CameraMap::new(ui.max_rect(), self.secondary_camera, self.stride);
 
-                // sampling with pool
-                // self.sample_counts.add(ctx.input(|i| i.time), sample_count);
-                // camera_map.window().unwrap_or(Domain::default().into())
+                // if self.current_fractal == 0 {
+                //     self.metabrot.begin_rendering(&primary_camera_map);
+                // }
+
+                // sampling
                 if self.sampling {
-                    // if self.pool.in_flight() == 0 {
-                    //     println!("pool has nothing in flight");
-                    // }
-
-                    // take samples out of the pool
-                    let mut sample_count = 0;
-                    while let Some(((real, imag), color)) = self.pool.receive_sample() {
-                        self.tree.insert((real, imag), color).unwrap();
-                        sample_count += 1;
-                    }
-                    self.sample_counts.add(ctx.input(|i| i.time), sample_count);
-
-                    // they're always unsaturated, ~bc the main thread is also a thread
-                    // println!(
-                    //     "in_flight: {}, in_flight_target: {}, thread_count: {}",
-                    //     self.pool.in_flight(),
-                    //     self.in_flight_target,
-                    //     self.pool.thread_count()
-                    // );
-                    // if self.pool.in_flight() < self.pool.thread_count() {
-                    //     println!(
-                    //         "threads are unsaturated: in_flight: {}, thread_count: {}",
-                    //         self.pool.in_flight(),
-                    //         self.pool.thread_count()
-                    //     );
-                    //     // self.in_flight_target *= 2;
-                    // }
-                    // if self.pool.in_flight() > 2 * self.pool.thread_count() {
-                    //     println!(
-                    //         "threads are oversaturated: in_flight: {}, thread_count: {}",
-                    //         self.pool.in_flight(),
-                    //         self.pool.thread_count()
-                    //     );
-                    //     self.in_flight_target /= 2;
-                    // }
-
-                    // request samples
-                    // TODO: various canceling stuff
-                    // while self.pool.in_flight() < self.in_flight_target {
-                    const MAX_IN_FLIGHT: usize = 512;
-                    while self.pool.samples_in_flight() < MAX_IN_FLIGHT {
-                        let Some(points) = self.tree.refine(
-                            primary_camera_map
-                                .window()
-                                .unwrap_or(Domain::default().into()),
-                        ) else {
-                            break;
-                        };
-                        for (real, imag) in points {
-                            self.pool.request_sample((real, imag));
-                        }
-                    }
+                    let samples_taken = self.metabrot.enable_sampling(
+                        primary_camera_map
+                            .window()
+                            .unwrap_or(Domain::default().into()),
+                    );
+                    self.sample_counts.add(ctx.input(|i| i.time), samples_taken);
+                } else {
+                    self.metabrot.disable_sampling();
                 }
 
                 // // draw sequence of nodes that contain the mouse
@@ -339,62 +298,19 @@ impl eframe::App for App {
 
                     // draw the fractal
                     {
-                        let colors = if self.current_fractal == 0 {
-                            // dbg!("here");
-                            primary_camera_map
-                                .pixels()
-                                .flatten()
-                                .collect::<Vec<_>>()
-                                .into_par_iter()
-                                .map(|(_rect, pixel)| {
-                                    if let Some(pixel) = pixel {
-                                        self.tree.color_of_pixel(pixel)
-                                    } else {
-                                        Color32::MAGENTA
-                                    }
-                                })
-                                .collect::<Vec<_>>()
+                        if self.current_fractal == 0 {
+                            self.metabrot.begin_rendering(&primary_camera_map);
+                            self.metabrot.finish_rendering(&mut self.texture);
                         } else if let Some(z0) = z0 {
-                            secondary_camera_map
-                                .pixels()
-                                .flatten()
-                                .collect::<Vec<_>>()
-                                .into_par_iter()
-                                .map(|(_rect, pixel)| {
-                                    if let Some(pixel) = pixel {
-                                        let c = pixel.mid();
-                                        sample::quadratic_map(z0, c).color()
-                                    } else {
-                                        Color32::MAGENTA
-                                    }
-                                })
-                                .collect::<Vec<_>>()
+                            fractal::render_mandelbrot(
+                                &mut self.texture,
+                                &secondary_camera_map,
+                                z0,
+                            );
                         } else {
-                            secondary_camera_map
-                                .pixels()
-                                .flatten()
-                                .collect::<Vec<_>>()
-                                .into_par_iter()
-                                .map(|(_rect, pixel)| {
-                                    if pixel.is_some() {
-                                        Color32::BLACK
-                                    } else {
-                                        Color32::MAGENTA
-                                    }
-                                })
-                                .collect::<Vec<_>>()
-                        };
+                            fractal::render_color(&mut self.texture, &secondary_camera_map);
+                        }
                         assert_eq!(primary_camera_map.rect(), secondary_camera_map.rect());
-                        self.texture.set(
-                            egui::ColorImage::new(
-                                [
-                                    primary_camera_map.rect().size().x as usize / self.stride,
-                                    primary_camera_map.rect().size().y as usize / self.stride,
-                                ],
-                                colors,
-                            ),
-                            egui::TextureOptions::NEAREST,
-                        );
                         painter.image(
                             self.texture.id(),
                             primary_camera_map.rect(),
@@ -402,6 +318,7 @@ impl eframe::App for App {
                             Color32::WHITE,
                         );
                     }
+
                     let draw_complex_circle_stroke =
                         |(c_real, c_imag): (Real, Imag), rad: Fixed, stroke: egui::Stroke| {
                             painter.circle_stroke(
@@ -676,7 +593,7 @@ impl eframe::App for App {
                                 1.0 / average_dt,
                                 self.sample_counts.values().sum::<usize>() as f32
                                     / self.sample_counts.len() as f32,
-                                self.tree.node_count(),
+                                self.metabrot.tree.node_count(),
                             );
                             ui.label(egui::RichText::new(t).background_color(Color32::BLACK));
                         }
@@ -693,4 +610,8 @@ impl eframe::App for App {
                     });
             });
     }
+
+    // fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+    //     self.metabrot.join();
+    // }
 }

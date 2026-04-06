@@ -22,7 +22,8 @@ pub(crate) static WORKER_HIST: [std::sync::atomic::AtomicU64; 128] =
 type SampleRequest = (Real, Imag);
 type SampleResponse = ((Real, Imag), Color32);
 /// usize is the row
-type RenderRequest = (Arc<RwLock<Tree>>, CameraMap, usize);
+type RenderRequest = (Arc<Tree>, CameraMap, usize);
+// type RenderRequest = (Arc<RwLock<Tree>>, CameraMap, usize);
 /// usize is the row
 type RenderResponse = (usize, Vec<Color32>);
 
@@ -54,31 +55,53 @@ impl WorkerLocal {
     fn run(self) {
         loop {
             // render requests are higher priority than sample requests
-            if let Ok((tree, camera_map, row)) = self.render_request_receiver.try_recv() {
-                let line = camera_map
-                    .pixels()
-                    .nth(row)
-                    .unwrap()
-                    .map(|(_rect, pixel)| {
-                        if let Some(pixel) = pixel {
-                            tree.read().unwrap().color_of_pixel(pixel)
-                        } else {
-                            Color32::MAGENTA
-                        }
-                    })
-                    .collect();
+            if let Some((row, line)) = self.try_render() {
                 self.render_response_sender.send((row, line)).unwrap();
                 continue;
             }
 
-            // we don't tokio::select!, so just block on sample_request
-            // TODO: maybe yield the thread
-            // TODO: block on both
-            if let Ok(point) = self.sample_request_receiver.recv() {
-                let color = sample::metabrot_sample(point).color();
-                self.sample_response_sender.send((point, color)).unwrap();
+            if let Some(response) = self.try_sample() {
+                self.sample_response_sender.send(response).unwrap();
+                continue;
             }
+
+            // we don't tokio::select!, so just block on sample_request
+            // it deadlocks if we block on sample_request, so just yield the thread
+            // TODO: maybe yield the thread
+            // actually just busy wait
+            // TODO: block on both
+            // thread::yield_now();
         }
+    }
+
+    #[inline(never)]
+    fn try_sample(&self) -> Option<SampleResponse> {
+        let Ok(point) = self.sample_request_receiver.try_recv() else {
+            return None;
+        };
+        let color = sample::metabrot_sample(point).color();
+        Some((point, color))
+    }
+
+    #[inline(never)]
+    fn try_render(&self) -> Option<RenderResponse> {
+        let Ok((tree, camera_map, row)) = self.render_request_receiver.try_recv() else {
+            return None;
+        };
+        let line = camera_map
+            .pixels()
+            .nth(row)
+            .unwrap()
+            .map(|(_rect, pixel)| {
+                if let Some(pixel) = pixel {
+                    // tree.read().unwrap().color_of_pixel(pixel)
+                    tree.color_of_pixel(pixel)
+                } else {
+                    Color32::MAGENTA
+                }
+            })
+            .collect();
+        Some((row, line))
     }
 }
 
@@ -144,6 +167,12 @@ impl Pool {
         }
     }
 
+    // pub(crate) fn join(&mut self) {
+    //     for worker in self.workers.drain(..) {
+    //         worker.handle.join().unwrap();
+    //     }
+    // }
+
     pub(crate) fn thread_count(&self) -> usize {
         self.workers.len()
     }
@@ -162,6 +191,7 @@ impl Pool {
             .sum()
     }
 
+    #[inline(never)]
     pub(crate) fn request_sample(&mut self, point: (Real, Imag)) {
         // TODO: or maybe just do round robin
         // actually with how efficiently cores work that would be bad
@@ -187,6 +217,7 @@ impl Pool {
         worker.samples_in_flight += 1;
     }
 
+    #[inline(never)]
     pub(crate) fn receive_sample(&mut self) -> Option<SampleResponse> {
         let old_sample_response_i = self.sample_response_i;
         loop {
@@ -208,9 +239,11 @@ impl Pool {
     }
 
     // /// line is an out parameter, ie the contents of line are never read
+    #[inline(never)]
     pub(crate) fn request_line(
         &mut self,
-        tree: &Arc<RwLock<Tree>>,
+        // tree: &Arc<RwLock<Tree>>,
+        tree: &Arc<Tree>,
         camera_map: &CameraMap,
         row: usize,
     ) {
@@ -222,12 +255,21 @@ impl Pool {
             .unwrap();
         worker
             .render_request_sender
-            .send((Arc::clone(&tree), camera_map.clone(), row))
+            .send((Arc::clone(tree), camera_map.clone(), row))
             .unwrap();
         worker.render_in_flight += 1;
     }
 
+    #[inline(never)]
     pub(crate) fn receive_line(&mut self) -> Option<RenderResponse> {
+        // println!("render_in_flight total: {}", self.render_in_flight());
+        // println!(
+        //     "render_in_flight each: {:?}",
+        //     self.workers
+        //         .iter()
+        //         .map(|w| w.render_in_flight)
+        //         .collect::<Vec<_>>()
+        // );
         let old_render_response_i = self.render_response_i;
         loop {
             let worker = &mut self.workers[self.render_response_i];
