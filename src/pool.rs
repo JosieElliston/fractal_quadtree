@@ -1,24 +1,92 @@
 use std::{
-    sync::{Arc, Mutex, mpsc},
+    sync::{Arc, Mutex, RwLock, mpsc},
     thread,
 };
 
 use eframe::egui::Color32;
 
-use crate::{complex::fixed::*, sample};
+use crate::{
+    complex::{CameraMap, fixed::*},
+    sample,
+    tree::Tree,
+};
 
 pub(crate) static ELAPSED_NANOS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 pub(crate) static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub(crate) static WORKER_HIST: [std::sync::atomic::AtomicU64; 128] =
+    [const { std::sync::atomic::AtomicU64::new(0) }; 128];
 
-struct Worker {
+// will need this later
+// type CameraUpdate = CameraMap;
+type SampleRequest = (Real, Imag);
+type SampleResponse = ((Real, Imag), Color32);
+/// usize is the row
+type RenderRequest = (Arc<RwLock<Tree>>, CameraMap, usize);
+/// usize is the row
+type RenderResponse = (usize, Vec<Color32>);
+
+/// owned by the pool/main thread
+struct WorkerHandle {
     handle: thread::JoinHandle<()>,
-    request_sender: mpsc::Sender<(Real, Imag)>,
-    in_flight: usize,
+    sample_request_sender: mpsc::Sender<SampleRequest>,
+    /// instead of having one response channel per worker,
+    /// we could just have one owned by pool,
+    /// but this is more symmetric,
+    /// and will be removed anyway once i do better parallelism
+    sample_response_receiver: mpsc::Receiver<SampleResponse>,
+    /// how many samples have been requested but not yet received a response for?
+    samples_in_flight: usize,
+    render_request_sender: mpsc::Sender<RenderRequest>,
+    render_response_receiver: mpsc::Receiver<RenderResponse>,
+    render_in_flight: usize,
 }
+
+/// owned by the worker thread
+struct WorkerLocal {
+    thread_i: usize,
+    sample_request_receiver: mpsc::Receiver<SampleRequest>,
+    sample_response_sender: mpsc::Sender<SampleResponse>,
+    render_request_receiver: mpsc::Receiver<RenderRequest>,
+    render_response_sender: mpsc::Sender<RenderResponse>,
+}
+impl WorkerLocal {
+    fn run(self) {
+        loop {
+            // render requests are higher priority than sample requests
+            if let Ok((tree, camera_map, row)) = self.render_request_receiver.try_recv() {
+                let line = camera_map
+                    .pixels()
+                    .nth(row)
+                    .unwrap()
+                    .map(|(_rect, pixel)| {
+                        if let Some(pixel) = pixel {
+                            tree.read().unwrap().color_of_pixel(pixel)
+                        } else {
+                            Color32::MAGENTA
+                        }
+                    })
+                    .collect();
+                self.render_response_sender.send((row, line)).unwrap();
+                continue;
+            }
+
+            // we don't tokio::select!, so just block on sample_request
+            // TODO: maybe yield the thread
+            // TODO: block on both
+            if let Ok(point) = self.sample_request_receiver.recv() {
+                let color = sample::metabrot_sample(point).color();
+                self.sample_response_sender.send((point, color)).unwrap();
+            }
+        }
+    }
+}
+
 pub(crate) struct Pool {
-    workers: Vec<Worker>,
-    response_receiver: mpsc::Receiver<(usize, (Real, Imag), Color32)>,
+    workers: Vec<WorkerHandle>,
+    // sample_response_receiver: mpsc::Receiver<(usize, (Real, Imag), Color32)>,
+    sample_response_i: usize,
+    render_response_i: usize,
 }
 impl Default for Pool {
     fn default() -> Self {
@@ -38,72 +106,144 @@ impl Default for Pool {
 }
 impl Pool {
     pub(crate) fn new(thread_count: usize) -> Self {
-        let (response_sender, response_receiver) = mpsc::channel();
         let workers = (0..thread_count)
             .map(|thread_i| {
-                let response_sender = response_sender.clone();
-                let (request_sender, request_receiver) = mpsc::channel();
+                let (sample_response_sender, sample_response_receiver) = mpsc::channel();
+                let (sample_request_sender, sample_request_receiver) = mpsc::channel();
+                let (render_response_sender, render_response_receiver) = mpsc::channel();
+                let (render_request_sender, render_request_receiver) = mpsc::channel();
 
                 let handle = thread::Builder::new()
                     .name(format!("pool {}", thread_i))
                     .spawn(move || {
-                        while let Ok(point) = request_receiver.recv() {
-                            let start = std::time::Instant::now();
-                            let color = sample::metabrot_sample(point).color();
-                            #[cfg(false)]
-                            {
-                                let elapsed = start.elapsed();
-                                ELAPSED_NANOS.fetch_add(
-                                    elapsed.as_nanos() as u64,
-                                    std::sync::atomic::Ordering::Relaxed,
-                                );
-                                COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            }
-                            let Ok(_) = response_sender.send((thread_i, point, color)) else {
-                                break;
-                            };
+                        WorkerLocal {
+                            thread_i,
+                            sample_request_receiver,
+                            sample_response_sender,
+                            render_request_receiver,
+                            render_response_sender,
                         }
+                        .run()
                     })
                     .unwrap();
-                Worker {
+                WorkerHandle {
                     handle,
-                    request_sender,
-                    in_flight: 0,
+                    sample_request_sender,
+                    sample_response_receiver,
+                    samples_in_flight: 0,
+                    render_request_sender,
+                    render_response_receiver,
+                    render_in_flight: 0,
                 }
             })
             .collect();
         Self {
             workers,
-            response_receiver,
+            sample_response_i: 0,
+            render_response_i: 0,
         }
     }
-    pub(crate) fn in_flight(&self) -> usize {
-        self.workers.iter().map(|worker| worker.in_flight).sum()
-    }
+
     pub(crate) fn thread_count(&self) -> usize {
         self.workers.len()
     }
 
-    pub(crate) fn send(&mut self, point: (Real, Imag)) {
+    pub(crate) fn samples_in_flight(&self) -> usize {
+        self.workers
+            .iter()
+            .map(|worker| worker.samples_in_flight)
+            .sum()
+    }
+
+    pub(crate) fn render_in_flight(&self) -> usize {
+        self.workers
+            .iter()
+            .map(|worker| worker.render_in_flight)
+            .sum()
+    }
+
+    pub(crate) fn request_sample(&mut self, point: (Real, Imag)) {
+        // TODO: or maybe just do round robin
+        // actually with how efficiently cores work that would be bad
+        // actually threads get put on different cores, so maybe it's not that bad
+        // but it's still bad over a single frame
+        #[cfg(false)]
+        {
+            WORKER_HIST[self
+                .workers
+                .iter()
+                .enumerate()
+                .min_by_key(|(i, worker)| worker.sample_in_flight)
+                .unwrap()
+                .0]
+                .fetch_add(1, std::sync::atomic::Ordering::Release);
+        }
         let worker = self
             .workers
             .iter_mut()
-            .min_by_key(|worker| worker.in_flight)
+            .min_by_key(|worker| worker.samples_in_flight)
             .unwrap();
-        worker.request_sender.send(point).unwrap();
-        worker.in_flight += 1;
+        worker.sample_request_sender.send(point).unwrap();
+        worker.samples_in_flight += 1;
     }
 
-    pub(crate) fn recv(&mut self) -> Option<((Real, Imag), Color32)> {
-        if let Ok((thread_i, point, color)) = self.response_receiver.try_recv() {
-            assert!(
-                self.workers[thread_i].in_flight > 0,
-                "this is an invariant of the type"
-            );
-            self.workers[thread_i].in_flight -= 1;
-            Some((point, color))
-        } else {
-            None
+    pub(crate) fn receive_sample(&mut self) -> Option<SampleResponse> {
+        let old_sample_response_i = self.sample_response_i;
+        loop {
+            let worker = &mut self.workers[self.sample_response_i];
+            if let Ok((point, color)) = worker.sample_response_receiver.try_recv() {
+                assert!(
+                    worker.samples_in_flight > 0,
+                    "this is an invariant of the type"
+                );
+                worker.samples_in_flight -= 1;
+                return Some((point, color));
+            }
+            self.sample_response_i += 1;
+            self.sample_response_i %= self.workers.len();
+            if self.sample_response_i == old_sample_response_i {
+                return None;
+            }
+        }
+    }
+
+    // /// line is an out parameter, ie the contents of line are never read
+    pub(crate) fn request_line(
+        &mut self,
+        tree: &Arc<RwLock<Tree>>,
+        camera_map: &CameraMap,
+        row: usize,
+    ) {
+        // TODO: or maybe just do round robin
+        let worker = self
+            .workers
+            .iter_mut()
+            .min_by_key(|worker| worker.render_in_flight)
+            .unwrap();
+        worker
+            .render_request_sender
+            .send((Arc::clone(&tree), camera_map.clone(), row))
+            .unwrap();
+        worker.render_in_flight += 1;
+    }
+
+    pub(crate) fn receive_line(&mut self) -> Option<RenderResponse> {
+        let old_render_response_i = self.render_response_i;
+        loop {
+            let worker = &mut self.workers[self.render_response_i];
+            if let Ok((row, line)) = worker.render_response_receiver.try_recv() {
+                assert!(
+                    worker.render_in_flight > 0,
+                    "this is an invariant of the type"
+                );
+                worker.render_in_flight -= 1;
+                return Some((row, line));
+            }
+            self.render_response_i += 1;
+            self.render_response_i %= self.workers.len();
+            if self.render_response_i == old_render_response_i {
+                return None;
+            }
         }
     }
 }

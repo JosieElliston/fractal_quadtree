@@ -1,5 +1,6 @@
 mod app;
 mod complex;
+mod fractal;
 mod pool;
 mod sample;
 mod tree;
@@ -44,7 +45,7 @@ fn bench_refine() {
     // let stride = 1;
     // let stride = 8;
     let camera = Camera::default();
-    let camera_map = CameraMap::new(
+    let camera_map = CameraMap::new_without_stride(
         Rect::from_min_size(Pos2::ZERO, Vec2::new(600.0, 400.0)),
         camera,
     );
@@ -59,7 +60,7 @@ fn bench_refine() {
     for _ in 0..frame_count {
         // take samples out of the pool
         let mut sample_count = 0;
-        while let Some(((real, imag), color)) = pool.recv() {
+        while let Some(((real, imag), color)) = pool.receive_sample() {
             tree.insert((real, imag), color).unwrap();
             sample_count += 1;
         }
@@ -67,13 +68,13 @@ fn bench_refine() {
 
         // request samples
         const MAX_IN_FLIGHT: usize = 512;
-        while pool.in_flight() < MAX_IN_FLIGHT {
+        while pool.samples_in_flight() < MAX_IN_FLIGHT {
             let Some(points) = tree.refine(camera_map.window().unwrap_or(Domain::default().into()))
             else {
                 break;
             };
             for (real, imag) in points {
-                pool.send((real, imag));
+                pool.request_sample((real, imag));
             }
         }
 
@@ -91,8 +92,8 @@ fn bench_refine() {
     println!("time: {:?}", start.elapsed());
 
     // empty the pool
-    while pool.in_flight() > 0 {
-        while let Some(((real, imag), color)) = pool.recv() {
+    while pool.samples_in_flight() > 0 {
+        while let Some(((real, imag), color)) = pool.receive_sample() {
             tree.insert((real, imag), color).unwrap();
         }
         std::thread::yield_now();

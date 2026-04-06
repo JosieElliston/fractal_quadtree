@@ -61,7 +61,9 @@
     - what if a thread has been preempted, so it can't render the pixels it owns? does this mean we can't have threads simply own pixels?
     - stagger the rendering threads so they aren't all using the bus at the same time. most should instead be doing alu heavy sampling
 - use that nearby samples are relevant to make parallelism harder/more interesting
-- concurrent arena allocator
+- parallel arena allocator
+- parallel dynamic array
+- single-consumer-single-producer (except actually i shouldn't need this for the final version)
 
 ## rust style
 
@@ -81,6 +83,7 @@
 - use type alias Complex for (Real, Imag)?
 - type for `Pixel`
 - change children from `[Box<Node>; 4]` to `Box<[Node; 4]>`
+- go over what things are `Copy`
 
 ## bugs
 

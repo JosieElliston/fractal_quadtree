@@ -1,4 +1,4 @@
-use eframe::egui::{self, Color32, Key, Pos2, Rect, RichText, Vec2};
+use eframe::egui::{self, Color32, Key, Pos2, Rect, Vec2};
 use rayon::prelude::*;
 
 use crate::{
@@ -42,7 +42,7 @@ impl App {
             primary_camera_velocity: Vec2::ZERO,
             secondary_camera: Camera::default(),
             secondary_camera_velocity: Vec2::ZERO,
-            dts: egui::util::History::new(1..100, 0.1),
+            dts: egui::util::History::new(1..100, 1.0),
             sample_counts: egui::util::History::new(1..100, 1.0),
             texture: cc.egui_ctx.load_texture(
                 "fractal",
@@ -90,9 +90,9 @@ impl eframe::App for App {
                 }
 
                 // debug static counters
-                // #[cfg(false)]
+                #[cfg(false)]
                 {
-                    println!();
+                    // println!();
                     if let Some(nanos) = tree::ELAPSED_NANOS
                         .load(std::sync::atomic::Ordering::Relaxed)
                         .checked_div(tree::COUNTER.load(std::sync::atomic::Ordering::Relaxed))
@@ -108,6 +108,28 @@ impl eframe::App for App {
                             "pool average / tc: {} ns",
                             nanos / self.pool.thread_count() as u64
                         );
+                    }
+                    if let Some(max_i) =
+                        pool::WORKER_HIST
+                            .iter()
+                            .enumerate()
+                            .rev()
+                            .find_map(|(i, count)| {
+                                if count.load(std::sync::atomic::Ordering::Relaxed) > 0 {
+                                    Some(i)
+                                } else {
+                                    None
+                                }
+                            })
+                    {
+                        println!("worker hist:");
+                        for (i, worker) in pool::WORKER_HIST.iter().enumerate().take(max_i + 1) {
+                            println!(
+                                "worker {}: {} samples",
+                                i,
+                                worker.load(std::sync::atomic::Ordering::Relaxed)
+                            );
+                        }
                     }
                 }
 
@@ -131,10 +153,14 @@ impl eframe::App for App {
                     );
                 }
 
-                let primary_camera_map = CameraMap::new(ui.max_rect(), self.primary_camera);
-                let secondary_camera_map = CameraMap::new(ui.max_rect(), self.secondary_camera);
+                let primary_camera_map =
+                    CameraMap::new(ui.max_rect(), self.primary_camera, self.stride);
+                let secondary_camera_map =
+                    CameraMap::new(ui.max_rect(), self.secondary_camera, self.stride);
 
                 // sampling with pool
+                // self.sample_counts.add(ctx.input(|i| i.time), sample_count);
+                // camera_map.window().unwrap_or(Domain::default().into())
                 if self.sampling {
                     // if self.pool.in_flight() == 0 {
                     //     println!("pool has nothing in flight");
@@ -142,7 +168,7 @@ impl eframe::App for App {
 
                     // take samples out of the pool
                     let mut sample_count = 0;
-                    while let Some(((real, imag), color)) = self.pool.recv() {
+                    while let Some(((real, imag), color)) = self.pool.receive_sample() {
                         self.tree.insert((real, imag), color).unwrap();
                         sample_count += 1;
                     }
@@ -176,7 +202,7 @@ impl eframe::App for App {
                     // TODO: various canceling stuff
                     // while self.pool.in_flight() < self.in_flight_target {
                     const MAX_IN_FLIGHT: usize = 512;
-                    while self.pool.in_flight() < MAX_IN_FLIGHT {
+                    while self.pool.samples_in_flight() < MAX_IN_FLIGHT {
                         let Some(points) = self.tree.refine(
                             primary_camera_map
                                 .window()
@@ -185,7 +211,7 @@ impl eframe::App for App {
                             break;
                         };
                         for (real, imag) in points {
-                            self.pool.send((real, imag));
+                            self.pool.request_sample((real, imag));
                         }
                     }
                 }
@@ -314,11 +340,13 @@ impl eframe::App for App {
                     // draw the fractal
                     {
                         let colors = if self.current_fractal == 0 {
+                            // dbg!("here");
                             primary_camera_map
-                                .pixels(self.stride)
+                                .pixels()
+                                .flatten()
                                 .collect::<Vec<_>>()
                                 .into_par_iter()
-                                .map(|(_, _, pixel)| {
+                                .map(|(_rect, pixel)| {
                                     if let Some(pixel) = pixel {
                                         self.tree.color_of_pixel(pixel)
                                     } else {
@@ -328,10 +356,11 @@ impl eframe::App for App {
                                 .collect::<Vec<_>>()
                         } else if let Some(z0) = z0 {
                             secondary_camera_map
-                                .pixels(self.stride)
+                                .pixels()
+                                .flatten()
                                 .collect::<Vec<_>>()
                                 .into_par_iter()
-                                .map(|(_, _, pixel)| {
+                                .map(|(_rect, pixel)| {
                                     if let Some(pixel) = pixel {
                                         let c = pixel.mid();
                                         sample::quadratic_map(z0, c).color()
@@ -342,10 +371,11 @@ impl eframe::App for App {
                                 .collect::<Vec<_>>()
                         } else {
                             secondary_camera_map
-                                .pixels(self.stride)
+                                .pixels()
+                                .flatten()
                                 .collect::<Vec<_>>()
                                 .into_par_iter()
-                                .map(|(_, _, pixel)| {
+                                .map(|(_rect, pixel)| {
                                     if pixel.is_some() {
                                         Color32::BLACK
                                     } else {
@@ -648,7 +678,7 @@ impl eframe::App for App {
                                     / self.sample_counts.len() as f32,
                                 self.tree.node_count(),
                             );
-                            ui.label(RichText::new(t).background_color(Color32::BLACK));
+                            ui.label(egui::RichText::new(t).background_color(Color32::BLACK));
                         }
 
                         // // view stuff

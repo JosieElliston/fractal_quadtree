@@ -1,4 +1,4 @@
-use std::ops;
+use std::{num::NonZeroUsize, ops};
 
 use eframe::egui::{self, Pos2, Rect, Vec2};
 
@@ -70,15 +70,34 @@ impl ops::SubAssign<(f64, f64)> for Camera {
     }
 }
 
+#[derive(Debug, Clone)]
 pub(crate) struct CameraMap {
     rect: Rect,
     camera: Camera,
+    /// how many egui pixels do we draw a "pixel" as?
+    /// not needed for the mapping itself,
+    /// but it is needed when dealing with pixels.
+    stride: Option<NonZeroUsize>,
 }
 impl CameraMap {
-    pub(crate) fn new(rect: Rect, camera: Camera) -> Self {
+    pub(crate) fn new(rect: Rect, camera: Camera, stride: usize) -> Self {
         assert!(rect.min.x < rect.max.x);
         assert!(rect.min.y < rect.max.y);
-        Self { rect, camera }
+        Self {
+            rect,
+            camera,
+            stride: Some(NonZeroUsize::new(stride).unwrap()),
+        }
+    }
+
+    pub(crate) fn new_without_stride(rect: Rect, camera: Camera) -> Self {
+        assert!(rect.min.x < rect.max.x);
+        assert!(rect.min.y < rect.max.y);
+        Self {
+            rect,
+            camera,
+            stride: None,
+        }
     }
 
     pub(crate) fn rect(&self) -> Rect {
@@ -211,20 +230,28 @@ impl CameraMap {
         }
     }
 
+    pub(crate) fn pixels_width(&self) -> usize {
+        let stride = self.stride.unwrap().get();
+        self.rect.width() as usize / stride
+    }
+    pub(crate) fn pixels_height(&self) -> usize {
+        let stride = self.stride.unwrap().get();
+        self.rect.height() as usize / stride
+    }
+
     /// pixel is None if it couldn't be constructed,
     /// so it would be too small or outside the fixed point domain
     pub(crate) fn pixels(
         &self,
-        stride: usize,
-    ) -> impl Iterator<Item = ((usize, usize), Rect, Option<Pixel>)> {
+    ) -> impl Iterator<Item = impl Iterator<Item = (Rect, Option<Pixel>)>> {
+        let stride = self.stride.unwrap().get();
         (0..self.rect.size().y as usize)
             .step_by(stride)
-            .flat_map(move |row| {
+            .map(move |row| {
                 (0..self.rect.size().x as usize)
                     .step_by(stride)
                     .map(move |col| {
                         (
-                            (row / stride, col / stride),
                             Rect::from_min_size(
                                 Pos2::new(col as f32, row as f32),
                                 Vec2::new(stride as f32, stride as f32),
@@ -239,22 +266,6 @@ impl CameraMap {
                             })(),
                         )
                     })
-                // .map(move |col| {
-                //     (
-                //         (row / stride, col / stride),
-                //         Rect::from_min_size(
-                //             Pos2::new(col as f32, row as f32),
-                //             Vec2::new(stride as f32, stride as f32),
-                //         ),
-                //         Square::try_new(
-                //             self.x_to_real(col as f32),
-                //             self.x_to_real((col + stride) as f32),
-                //             self.y_to_imag((row + stride) as f32),
-                //             self.y_to_imag(row as f32),
-                //         )
-                //         .unwrap(),
-                //     )
-                // })
             })
     }
 
@@ -267,7 +278,7 @@ impl CameraMap {
         let rect = ui.max_rect();
         let r = ui.allocate_rect(rect, egui::Sense::drag());
         let dt = ctx.input(|i| i.stable_dt);
-        let camera_map = CameraMap::new(rect, *camera);
+        let camera_map = CameraMap::new_without_stride(rect, *camera);
 
         // pan
         if r.is_pointer_button_down_on() && ctx.input(|i| i.pointer.primary_down()) {
@@ -294,7 +305,7 @@ impl CameraMap {
             //     .real_rad()
             //     .mul_f64_saturating(zoom.recip());
             *camera.real_rad_mut() /= zoom;
-            let camera_map = CameraMap::new(rect, *camera);
+            let camera_map = CameraMap::new_without_stride(rect, *camera);
             *camera -= camera_map.vec2_to_delta_complex(mouse);
         }
     }
@@ -313,7 +324,7 @@ mod tests {
     #[test]
     fn test_bounds() {
         let (rect, camera) = get_rect_camera();
-        let camera_map = CameraMap::new(rect, camera);
+        let camera_map = CameraMap::new_without_stride(rect, camera);
 
         assert_eq!(camera_map.camera.real_lo(), 0.0);
         assert_eq!(camera_map.camera.real_hi(), 2.0);
@@ -371,7 +382,7 @@ mod tests {
     #[test]
     fn test_map_pos2() {
         let (rect, camera) = get_rect_camera();
-        let camera_map = CameraMap::new(rect, camera);
+        let camera_map = CameraMap::new_without_stride(rect, camera);
 
         for pos in [
             Pos2::new(1.0, 30.0),
@@ -426,7 +437,7 @@ mod tests {
     #[test]
     fn test_window() {
         let (rect, camera) = get_rect_camera();
-        let camera_map = CameraMap::new(rect, camera);
+        let camera_map = CameraMap::new_without_stride(rect, camera);
 
         let window = Window::from_lo_hi(
             camera_map.camera.real_lo().try_into().unwrap(),
@@ -441,7 +452,7 @@ mod tests {
     #[test]
     fn test_map_vec1() {
         let (rect, camera) = get_rect_camera();
-        let camera_map = CameraMap::new(rect, camera);
+        let camera_map = CameraMap::new_without_stride(rect, camera);
 
         for fixed in [
             -2.0, -1.0, -2.0, 5.0, 4.0, -1.0, 4.0, 5.0, -1.885, -0.978, 0.254, 0.793, 3.634, 3.274,
@@ -455,5 +466,22 @@ mod tests {
             assert!((vec1_fixed - vec1_real).abs() < 1e-4);
             assert!((vec1_fixed - vec1_imag).abs() < 1e-4);
         }
+    }
+
+    #[test]
+    fn test_pixels() {
+        let (rect, camera) = get_rect_camera();
+        let camera_map = CameraMap::new(rect, camera, 2);
+
+        assert_eq!(camera_map.pixels_width(), 15);
+        assert_eq!(camera_map.pixels_height(), 20);
+
+        // TODO: this should be transposed
+        assert_eq!(camera_map.pixels().count(), camera_map.pixels_width());
+        assert_eq!(
+            camera_map.pixels().nth(0).unwrap().count(),
+            camera_map.pixels_height()
+        );
+        panic!("this should be transposed");
     }
 }
