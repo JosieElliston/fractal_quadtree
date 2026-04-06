@@ -34,15 +34,13 @@ pub(crate) struct App {
 }
 impl App {
     pub(crate) fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        // const N_THREADS: usize = 8;
-        const N_THREADS: usize = 32;
         Self {
             tree: Tree::new(Domain::default()),
             stride: 1,
             // stride: 8,
-            primary_camera: Camera::new(0.0, 0.0, 2.0),
+            primary_camera: Camera::default(),
             primary_camera_velocity: Vec2::ZERO,
-            secondary_camera: Camera::new(0.0, 0.0, 2.0),
+            secondary_camera: Camera::default(),
             secondary_camera_velocity: Vec2::ZERO,
             dts: egui::util::History::new(1..100, 0.1),
             sample_counts: egui::util::History::new(1..100, 1.0),
@@ -53,7 +51,7 @@ impl App {
             ),
             sampling: true,
             current_fractal: 0,
-            pool: Pool::new(N_THREADS),
+            pool: Pool::default(),
             // in_flight_target: 2 * N_THREADS,
         }
     }

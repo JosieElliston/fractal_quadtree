@@ -47,6 +47,7 @@
     - square will probably be unused
 - to avoid aliasing artifacts, jitter the samples
     - jitter z0, store both z0 and color, if you get split, give it to the child which contains the sample, and internal nodes don't store samples, (different quadtree architecture)
+        - seed the rng from the domain for determinism
     - jitter each c
 - split and sample and insert on a parallel datastructure, gc can be really slow, whatever
     - note that the deepest parent of all the active nodes for a given window is kinda deep, this is a pseudo root, maybe we can use this somehow
@@ -60,6 +61,7 @@
     - what if a thread has been preempted, so it can't render the pixels it owns? does this mean we can't have threads simply own pixels?
     - stagger the rendering threads so they aren't all using the bus at the same time. most should instead be doing alu heavy sampling
 - use that nearby samples are relevant to make parallelism harder/more interesting
+- concurrent arena allocator
 
 ## rust style
 

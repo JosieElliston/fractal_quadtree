@@ -13,6 +13,15 @@ pub(crate) struct Camera {
     imag_mid: f64,
     real_rad: f64,
 }
+impl Default for Camera {
+    fn default() -> Self {
+        Self {
+            real_mid: 0.0,
+            imag_mid: 0.0,
+            real_rad: 2.0,
+        }
+    }
+}
 impl Camera {
     /// panics if `real_rad` is not positive
     // pub(crate) fn new(real_mid: Real, imag_mid: Imag, real_rad: Real) -> Self {

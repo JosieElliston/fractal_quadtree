@@ -20,6 +20,22 @@ pub(crate) struct Pool {
     workers: Vec<Worker>,
     response_receiver: mpsc::Receiver<(usize, (Real, Imag), Color32)>,
 }
+impl Default for Pool {
+    fn default() -> Self {
+        // const THREAD_COUNT: usize = 8;
+        // const THREAD_COUNT: usize = 32;
+        // Self::new(THREAD_COUNT)
+
+        // leave one thread for main and other processes,
+        // but still take at least one thread
+        let thread_count = (thread::available_parallelism()
+            .map(std::num::NonZero::get)
+            .unwrap_or(1)
+            - 1)
+        .max(1);
+        Self::new(thread_count)
+    }
+}
 impl Pool {
     pub(crate) fn new(thread_count: usize) -> Self {
         let (response_sender, response_receiver) = mpsc::channel();

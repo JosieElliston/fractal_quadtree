@@ -1102,6 +1102,7 @@ impl Tree {
     /// inserts the previously reserved sample into the the tree,
     /// promoting a `LeafReserved` to a `LeafColor`
     // TODO: should the point and color actually be a [_; 4]?
+    #[inline(never)]
     pub(crate) fn insert(
         &mut self,
         (real, imag): (Real, Imag),
