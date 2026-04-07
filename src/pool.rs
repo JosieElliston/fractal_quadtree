@@ -97,7 +97,6 @@ impl WorkerLocal {
             .unwrap()
             .map(|(_rect, pixel)| {
                 if let Some(pixel) = pixel {
-                    // tree.read().unwrap().color_of_pixel(pixel)
                     tree.color_of_pixel(pixel)
                 } else {
                     Color32::MAGENTA

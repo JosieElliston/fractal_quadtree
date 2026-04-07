@@ -21,7 +21,7 @@ struct Internal {
     /// 0 1
     ///
     /// 2 3
-    children: [Box<Node>; 4],
+    children: Box<[Node; 4]>,
 }
 
 #[derive(Debug)]
@@ -101,12 +101,12 @@ impl Internal {
 impl LeafColor {
     /// fails if the domain gets too small
     fn try_split(&self) -> Option<Internal> {
-        let children = self
-            .dom
-            .split()?
-            .map(LeafReserved::new)
-            .map(Node::LeafReserved)
-            .map(Box::new);
+        let children = Box::new(
+            self.dom
+                .split()?
+                .map(LeafReserved::new)
+                .map(Node::LeafReserved),
+        );
         Some(Internal {
             dom: self.dom,
             color: self.color,
@@ -123,6 +123,7 @@ impl LeafReserved {
 }
 
 impl Node {
+    #[cfg_attr(feature = "profiling", inline(never))]
     fn dom(&self) -> Domain {
         match self {
             Node::Internal(internal) => internal.dom,
@@ -131,6 +132,7 @@ impl Node {
         }
     }
 
+    #[cfg_attr(feature = "profiling", inline(never))]
     fn color(&self) -> Option<Color32> {
         match self {
             Node::Internal(internal) => Some(internal.color),
@@ -139,6 +141,7 @@ impl Node {
         }
     }
 
+    #[cfg_attr(feature = "profiling", inline(never))]
     fn leaf_distance_cache(&self) -> u32 {
         match self {
             Node::Internal(internal) => internal.leaf_distance_cache,
@@ -165,7 +168,7 @@ impl Tree {
         while let Some(node) = stack.pop() {
             count += 1;
             if let Node::Internal(internal) = node {
-                for child in &internal.children {
+                for child in internal.children.iter() {
                     stack.push(child);
                 }
             }
@@ -726,12 +729,7 @@ impl Tree {
                 }
                 match node {
                     Node::Internal(internal) => {
-                        queue.extend(
-                            internal
-                                .children
-                                .iter_mut()
-                                .map(|c| (c.as_mut(), depth + 1)),
-                        );
+                        queue.extend(internal.children.iter_mut().map(|c| (c, depth + 1)));
                     }
                     Node::LeafColor(_) => {
                         if depth < shallowest_depth {
@@ -781,8 +779,7 @@ impl Tree {
                         //         .iter_mut()
                         //         .map(|c| (c.as_mut(), depth + 1)),
                         // );
-                        let mut children: [&mut Node; 4] =
-                            internal.children.each_mut().map(|c| c.as_mut());
+                        let mut children: [&mut Node; 4] = internal.children.each_mut();
                         children.sort_by_key(|c| c.leaf_distance_cache());
                         stack.extend(children.into_iter().map(|c| (c, depth + 1)));
                     }
@@ -864,7 +861,7 @@ impl Tree {
             let mut node = &mut tree.root;
             while let Node::Internal(internal) = node {
                 let child_i = internal.child_i_containing(mid);
-                node = internal.children[child_i].as_mut();
+                node = &mut internal.children[child_i];
             }
             node
         }
@@ -1102,7 +1099,7 @@ impl Tree {
         let mut node = &mut self.root;
         while let Node::Internal(internal) = node {
             let child_i = internal.child_i_containing((real, imag));
-            node = internal.children[child_i].as_mut();
+            node = &mut internal.children[child_i];
         }
         if let Node::LeafReserved(leaf_reserved) = node {
             assert!(leaf_reserved.dom.contains_point((real, imag)));
@@ -1155,10 +1152,8 @@ impl Tree {
             .expect("root must be a `LeafColor` or `Internal`");
 
         while let Node::Internal(internal) = node {
-            debug_assert!(internal.dom.contains_point(center));
             let child_i = internal.child_i_containing(center);
-            node = internal.children[child_i].as_ref();
-            debug_assert!(node.dom().contains_point(center));
+            node = &internal.children[child_i];
             let dist = distance(center, node.dom().mid());
             if dist < closest_sample_dist
                 && let Some(color) = node.color()

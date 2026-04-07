@@ -77,7 +77,8 @@ pub(crate) fn quadratic_map(
         if z_real2 + z_imag2 > Z_ESCAPE_RAD2 {
             return Sample {
                 // depth
-                depth: depth as f32 + 2.0 - (z_real2 + z_imag2).sqrt().ln().ln() / 2.0f32.ln(),
+                // depth: depth as f32 + 2.0 - (z_real2 + z_imag2).sqrt().ln().ln() / 2.0f32.ln(),
+                depth: depth as f32 + 2.0 - (z_real2 + z_imag2).sqrt().ln().log2(),
             };
         }
 
@@ -107,8 +108,8 @@ pub(crate) fn quadratic_map(
             old_real = z_real;
             old_imag = z_imag;
         };
-        assert!(z_real.is_finite());
-        assert!(z_imag.is_finite());
+        debug_assert!(z_real.is_finite());
+        debug_assert!(z_imag.is_finite());
     }
     Sample {
         depth: Sample::MAX_DEPTH as f32,
@@ -183,7 +184,8 @@ pub(crate) fn distance_estimator(
         if z_real2 + z_imag2 > Z_ESCAPE_RAD2 {
             return (
                 Sample {
-                    depth: depth as f32 + 2.0 - (z_real2 + z_imag2).sqrt().ln().ln() / 2.0f32.ln(),
+                    // depth: depth as f32 + 2.0 - (z_real2 + z_imag2).sqrt().ln().ln() / 2.0f32.ln(),
+                    depth: depth as f32 + 2.0 - (z_real2 + z_imag2).sqrt().ln().log2(),
                 },
                 estimate(z_real, z_imag, dz_real, dz_imag),
             );
@@ -216,8 +218,8 @@ pub(crate) fn distance_estimator(
             old_real = z_real;
             old_imag = z_imag;
         };
-        assert!(z_real.is_finite());
-        assert!(z_imag.is_finite());
+        debug_assert!(z_real.is_finite());
+        debug_assert!(z_imag.is_finite());
     }
     (
         Sample {

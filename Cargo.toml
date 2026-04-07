@@ -21,7 +21,10 @@ opt-level = 3
 
 [profile.profiling]
 # samply record cargo run --profile profiling --features profiling
-# cargo instruments -t "CPU Counters"  --profile profiling --features profiling
+# cargo instruments -t "CPU Counters" --profile profiling --features profiling
+# cargo instruments -t "CPU Profiler" --profile profiling --features profiling
+# cargo instruments -t time --profile profiling --features profiling
+# data faults? custom?
 inherits = "release"
 debug = true
 split-debuginfo = "packed"

@@ -64,8 +64,8 @@ impl eframe::App for App {
             .frame(egui::Frame::new())
             .show(ctx, |ui| {
                 self.dts.add(
-                    ctx.input(|input_state| input_state.time),
-                    ctx.input(|input_state| input_state.stable_dt),
+                    ctx.input(|i| i.time),
+                    ctx.input(|i| i.stable_dt),
                 );
 
                 // toggle sampling with space
