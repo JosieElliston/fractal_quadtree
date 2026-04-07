@@ -61,25 +61,14 @@ impl Internal {
     //         .0
     // }
 
-    /// returns None if the point is outside the domain
-    // fn child_i_containing(&self, real: f32, imag: f32) -> Option<usize> {
-    fn child_i_containing(&self, (real, imag): (Real, Imag)) -> Option<usize> {
-        // (0..self.children.len()).find(|&i| self.children[i].dom().contains_point((real, imag)))
-
-        // do it this way for better stability
-        if !self.dom.contains_point((real, imag)) {
-            None
-        } else {
-            let actual = (if real <= self.dom.real_mid() { 0 } else { 1 })
-                + (if imag >= self.dom.imag_mid() { 0 } else { 2 });
-            // let oracle = (0..self.children.len())
-            //     .find(|&i| self.children[i].dom().contains_point((real, imag)))
-            //     .unwrap();
-            // if oracle != actual {
-            //     println!("oracle: {oracle}, actual: {actual}");
-            // }
-            Some(actual)
-        }
+    // /// returns `None` if the point is outside the domain
+    /// the point must be inside the domain
+    fn child_i_containing(&self, (real, imag): (Real, Imag)) -> usize {
+        debug_assert!(self.dom.contains_point((real, imag)));
+        let ret = (if real < self.dom.real_mid() { 0 } else { 1 })
+            + (if imag >= self.dom.imag_mid() { 0 } else { 2 });
+        debug_assert!(self.children[ret].dom().contains_point((real, imag)));
+        ret
     }
 
     // /// returns None if the point is outside the domain
@@ -184,28 +173,28 @@ impl Tree {
         count
     }
 
-    #[inline(never)]
-    pub(crate) fn validate_leaf_distance(&self) {
-        let mut stack = Vec::with_capacity(64);
-        stack.push(&self.root);
-        while let Some(node) = stack.pop()
-            && let Node::Internal(node) = node
-        {
-            stack.extend(node.children.iter().map(|c| c.as_ref()));
-            let oracle = node
-                .children
-                .iter()
-                .map(|c| c.leaf_distance_cache())
-                .min()
-                .unwrap()
-                + 1;
-            assert_eq!(
-                node.leaf_distance_cache, oracle,
-                "leaf_distance invariant violated at node with dom {:?}",
-                node.dom
-            );
-        }
-    }
+    // #[inline(never)]
+    // pub(crate) fn validate_leaf_distance(&self) {
+    //     let mut stack = Vec::with_capacity(64);
+    //     stack.push(&self.root);
+    //     while let Some(node) = stack.pop()
+    //         && let Node::Internal(node) = node
+    //     {
+    //         stack.extend(node.children.iter().map(|c| c.as_ref()));
+    //         let oracle = node
+    //             .children
+    //             .iter()
+    //             .map(|c| c.leaf_distance_cache())
+    //             .min()
+    //             .unwrap()
+    //             + 1;
+    //         assert_eq!(
+    //             node.leaf_distance_cache, oracle,
+    //             "leaf_distance invariant violated at node with dom {:?}",
+    //             node.dom
+    //         );
+    //     }
+    // }
 
     // fn is_leaf(&self) -> bool {
     //     self.children.is_none()
@@ -711,12 +700,12 @@ impl Tree {
     /// - is among the shallowest leafs
     // TODO: we don't actually need the leaf to be colored to split it
     // TODO: better ordering
-    #[inline(never)]
+    #[cfg_attr(feature = "profiling", inline(never))]
     pub(crate) fn refine(&mut self, window: Window) -> Option<[(Real, Imag); 4]> {
         let start = std::time::Instant::now();
 
         /// returns `None` if no leaf intersects the window
-        #[inline(never)]
+        #[cfg_attr(feature = "profiling", inline(never))]
         // fn get_shallowest_leaf(tree: &mut Tree, window: Window) -> Option<&mut Node> {
         fn get_shallowest_leaf_oracle(
             tree: &mut Tree,
@@ -757,7 +746,7 @@ impl Tree {
             Some((shallowest_depth, shallowest_leaf?.dom().mid()))
         }
 
-        #[inline(never)]
+        #[cfg_attr(feature = "profiling", inline(never))]
         /// returns `None` if no leaf intersects the window
         fn get_shallowest_leaf(tree: &mut Tree, window: Window) -> Option<(u32, (Real, Imag))> {
             // queue instead of stack bc we want to visit shallower nodes first
@@ -870,10 +859,11 @@ impl Tree {
         // }
         // update_leaf_distance(self, node_mid);
 
+        #[cfg_attr(feature = "profiling", inline(never))]
         fn get_leaf_from_mid(tree: &mut Tree, mid: (Real, Imag)) -> &mut Node {
             let mut node = &mut tree.root;
             while let Node::Internal(internal) = node {
-                let child_i = internal.child_i_containing(mid).unwrap();
+                let child_i = internal.child_i_containing(mid);
                 node = internal.children[child_i].as_mut();
             }
             node
@@ -1102,7 +1092,7 @@ impl Tree {
     /// inserts the previously reserved sample into the the tree,
     /// promoting a `LeafReserved` to a `LeafColor`
     // TODO: should the point and color actually be a [_; 4]?
-    #[inline(never)]
+    #[cfg_attr(feature = "profiling", inline(never))]
     pub(crate) fn insert(
         &mut self,
         (real, imag): (Real, Imag),
@@ -1111,7 +1101,7 @@ impl Tree {
         assert!(self.dom.contains_point((real, imag)));
         let mut node = &mut self.root;
         while let Node::Internal(internal) = node {
-            let child_i = internal.child_i_containing((real, imag)).unwrap();
+            let child_i = internal.child_i_containing((real, imag));
             node = internal.children[child_i].as_mut();
         }
         if let Node::LeafReserved(leaf_reserved) = node {
@@ -1153,7 +1143,7 @@ impl Tree {
         }
 
         let center = (pixel.real_mid(), pixel.imag_mid());
-        if !self.dom.contains_point(pixel.mid()) {
+        if !self.dom.contains_point(center) {
             const UNCONTAINED_COLOR: Color32 = Color32::WHITE;
             return UNCONTAINED_COLOR;
         }
@@ -1165,10 +1155,10 @@ impl Tree {
             .expect("root must be a `LeafColor` or `Internal`");
 
         while let Node::Internal(internal) = node {
-            assert!(internal.dom.contains_point(center));
-            let child_i = internal.child_i_containing(center).unwrap();
+            debug_assert!(internal.dom.contains_point(center));
+            let child_i = internal.child_i_containing(center);
             node = internal.children[child_i].as_ref();
-            assert!(node.dom().contains_point(center));
+            debug_assert!(node.dom().contains_point(center));
             let dist = distance(center, node.dom().mid());
             if dist < closest_sample_dist
                 && let Some(color) = node.color()

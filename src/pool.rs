@@ -74,16 +74,19 @@ impl WorkerLocal {
         }
     }
 
-    #[inline(never)]
+    #[cfg_attr(feature = "profiling", inline(never))]
     fn try_sample(&self) -> Option<SampleResponse> {
         let Ok(point) = self.sample_request_receiver.try_recv() else {
             return None;
         };
+        // metabrot
         let color = sample::metabrot_sample(point).color();
+        // // mandelbrot
+        // let color = sample::quadratic_map((Real::ZERO, Imag::ZERO), point).color();
         Some((point, color))
     }
 
-    #[inline(never)]
+    #[cfg_attr(feature = "profiling", inline(never))]
     fn try_render(&self) -> Option<RenderResponse> {
         let Ok((tree, camera_map, row)) = self.render_request_receiver.try_recv() else {
             return None;
@@ -113,9 +116,7 @@ pub(crate) struct Pool {
 }
 impl Default for Pool {
     fn default() -> Self {
-        // const THREAD_COUNT: usize = 8;
-        // const THREAD_COUNT: usize = 32;
-        // Self::new(THREAD_COUNT)
+        // let thread_count = 3;
 
         // leave one thread for main and other processes,
         // but still take at least one thread
@@ -191,7 +192,7 @@ impl Pool {
             .sum()
     }
 
-    #[inline(never)]
+    #[cfg_attr(feature = "profiling", inline(never))]
     pub(crate) fn request_sample(&mut self, point: (Real, Imag)) {
         // TODO: or maybe just do round robin
         // actually with how efficiently cores work that would be bad
@@ -217,7 +218,7 @@ impl Pool {
         worker.samples_in_flight += 1;
     }
 
-    #[inline(never)]
+    #[cfg_attr(feature = "profiling", inline(never))]
     pub(crate) fn receive_sample(&mut self) -> Option<SampleResponse> {
         let old_sample_response_i = self.sample_response_i;
         loop {
@@ -239,7 +240,7 @@ impl Pool {
     }
 
     // /// line is an out parameter, ie the contents of line are never read
-    #[inline(never)]
+    #[cfg_attr(feature = "profiling", inline(never))]
     pub(crate) fn request_line(
         &mut self,
         // tree: &Arc<RwLock<Tree>>,
@@ -260,7 +261,7 @@ impl Pool {
         worker.render_in_flight += 1;
     }
 
-    #[inline(never)]
+    #[cfg_attr(feature = "profiling", inline(never))]
     pub(crate) fn receive_line(&mut self) -> Option<RenderResponse> {
         // println!("render_in_flight total: {}", self.render_in_flight());
         // println!(

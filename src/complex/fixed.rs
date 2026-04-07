@@ -1,84 +1,3 @@
-// pub(crate) mod exact {
-//     use std::{fmt, ops};
-
-//     use super::inexact::Fixed;
-
-//     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-//     pub(crate) struct ExactFixed(Fixed);
-//     pub(crate) type ExactReal = ExactFixed;
-//     pub(crate) type ExactImag = ExactFixed;
-//     // pub(crate) type ExactComplex = (ExactReal, ExactImag);
-
-//     impl ExactFixed {
-//         pub(crate) const ZERO: Self = Self(Fixed::ZERO);
-//         pub(crate) const ONE: Self = Self(Fixed::ONE);
-
-//         /// computes self * 2, returns `None` if it would overflow
-//         pub(crate) fn mul2_checked(self) -> Option<Self> {
-//             Some(Self(self.0.mul2_checked()?))
-//         }
-//         /// computes self * 2, panics on overflow
-//         pub(crate) fn mul2(self) -> Self {
-//             Self(self.0.mul2())
-//         }
-//         /// computes self * 2^n, returns `None` if we would overflow
-//         pub(crate) fn mul2_n_checked(self, n: u32) -> Option<Self> {
-//             Some(Self(self.0.mul2_n_checked(n)?))
-//         }
-//         /// computes self * 2^n, panics on overflow
-//         pub(crate) fn mul2_n(self, n: u32) -> Self {
-//             Self(self.0.mul2_n(n))
-//         }
-
-//         /// computes self / 2, returns `None` if we would lose precision (ie if self is odd)
-//         pub(crate) fn div2_exact_checked(self) -> Option<Self> {
-//             Some(Self(self.0.div2_exact_checked()?))
-//         }
-//         /// computes self / 2, panics if we would lose precision (ie if self is odd)
-//         pub(crate) fn div2_exact(self) -> Self {
-//             Self(self.0.div2_exact())
-//         }
-//         /// computes self / 2^n, returns `None` if we would lose precision
-//         pub(crate) fn div2_n_exact_checked(self, n: u32) -> Option<Self> {
-//             Some(Self(self.0.div2_n_exact_checked(n)?))
-//         }
-//         /// computes self / 2^n, panics if we would lose precision
-//         pub(crate) fn div2_n_exact(self, n: u32) -> Self {
-//             Self(self.0.div2_n_exact(n))
-//         }
-//     }
-//     impl From<ExactFixed> for Fixed {
-//         fn from(f: ExactFixed) -> Self {
-//             f.0
-//         }
-//     }
-//     impl ops::Add<ExactFixed> for ExactFixed {
-//         type Output = Self;
-
-//         fn add(self, rhs: ExactFixed) -> Self::Output {
-//             Self(self.0 + rhs.0)
-//         }
-//     }
-//     impl ops::AddAssign<ExactFixed> for ExactFixed {
-//         fn add_assign(&mut self, rhs: ExactFixed) {
-//             self.0 += rhs.0;
-//         }
-//     }
-//     impl ops::Sub<ExactFixed> for ExactFixed {
-//         type Output = Self;
-
-//         fn sub(self, rhs: ExactFixed) -> Self::Output {
-//             Self(self.0 - rhs.0)
-//         }
-//     }
-//     impl ops::SubAssign<ExactFixed> for ExactFixed {
-//         fn sub_assign(&mut self, rhs: ExactFixed) {
-//             self.0 -= rhs.0;
-//         }
-//     }
-// }
-
-// pub(crate) mod inexact {
 use std::{fmt, ops};
 
 /// a fixed point number in [-DOMAIN_RADIUS, DOMAIN_RADIUS)
@@ -116,14 +35,8 @@ impl Fixed {
         Self::try_from_f64(f).expect("out of domain")
     }
     pub(crate) fn into_f64(self) -> f64 {
-        f64::from(self)
+        (self.0 as f64) / (1_i64 << Fixed::SHIFT) as f64
     }
-    // pub(crate) fn try_from_f32(f: f32) -> Option<Self> {
-    //     Self::try_from_f64(f as f64)
-    // }
-    // pub(crate) fn into_f32(self) -> f32 {
-    //     f32::from(self)
-    // }
 
     /// note that this is approximate
     pub(crate) fn lerp(lo: Self, hi: Self, t: f64) -> Self {
@@ -139,48 +52,53 @@ impl Fixed {
         f64::from(x - lo) / f64::from(hi - lo)
     }
 
-    pub(crate) fn min(self, other: Self) -> Self {
-        if self < other { self } else { other }
+    pub(crate) fn min(self, rhs: Self) -> Self {
+        if self < rhs { self } else { rhs }
     }
-    pub(crate) fn max(self, other: Self) -> Self {
-        if self > other { self } else { other }
+    pub(crate) fn max(self, rhs: Self) -> Self {
+        if self > rhs { self } else { rhs }
     }
     pub(crate) fn abs(self) -> Self {
-        if self.0 < 0 { Self(-self.0) } else { self }
+        if self.0 < 0 { -self } else { self }
     }
 
     /// returns `None` if it would overflow
-    pub(crate) fn add_checked(self, other: Self) -> Option<Self> {
-        self.0.checked_add(other.0).map(Self)
+    pub(crate) fn add_checked(self, rhs: Self) -> Option<Self> {
+        self.0.checked_add(rhs.0).map(Self)
     }
     /// returns `None` if it would overflow
-    pub(crate) fn sub_checked(self, other: Self) -> Option<Self> {
-        self.0.checked_sub(other.0).map(Self)
+    pub(crate) fn sub_checked(self, rhs: Self) -> Option<Self> {
+        self.0.checked_sub(rhs.0).map(Self)
     }
-
-    // TODO: all these ops don't use the fact that it's just a shift
-    // but idk how to do the overflow checks myself
+    /// returns `None` if it would overflow
+    pub(crate) fn neg_checked(self) -> Option<Self> {
+        self.0.checked_neg().map(Self)
+    }
 
     /// computes self * 2, returns `None` if it would overflow
     pub(crate) fn mul2_checked(self) -> Option<Self> {
         self.0.checked_mul(2).map(Self)
     }
-    /// computes self * 2, panics on overflow
+    /// computes self * 2
     pub(crate) fn mul2(self) -> Self {
-        self.mul2_checked().expect("overflow in mul2")
+        let ret = Self(self.0 << 1);
+        debug_assert_eq!(ret, self.mul2_checked().expect("overflow in mul2"));
+        ret
     }
-    /// computes self * 2^n, returns `None` if we would overflow
-    pub(crate) fn mul2_n_checked(self, n: u32) -> Option<Self> {
-        self.0.checked_mul(1i64.checked_shl(n)?).map(Self)
-        // for _ in 0..n {
-        //     self = self.mul2_checked()?;
-        // }
-        // Some(self)
-    }
-    /// computes self * 2^n, panics on overflow
-    pub(crate) fn mul2_n(self, n: u32) -> Self {
-        self.mul2_n_checked(n).expect("overflow in mul2_n")
-    }
+    // /// computes self * 2^n, returns `None` if we would overflow
+    // pub(crate) fn mul2_n_checked(self, n: u32) -> Option<Self> {
+    //     self.0.checked_mul(1i64.checked_shl(n)?).map(Self)
+    //     // for _ in 0..n {
+    //     //     self = self.mul2_checked()?;
+    //     // }
+    //     // Some(self)
+    // }
+    // /// computes self * 2^n
+    // pub(crate) fn mul2_n(self, n: u32) -> Self {
+    //     let ret = Self(self.0 << n);
+    //     debug_assert_eq!(ret, self.mul2_n_checked(n).expect("overflow in mul2_n"));
+    //     ret
+    // }
 
     /// computes self / 2, returns `None` if we would lose precision (ie if self is odd)
     pub(crate) fn div2_exact_checked(self) -> Option<Self> {
@@ -195,31 +113,33 @@ impl Fixed {
         self.div2_exact_checked()
             .expect("loss of precision in div2_exact")
     }
-    /// computes self / 2^n, returns `None` if we would lose precision
-    pub(crate) fn div2_n_exact_checked(self, n: u32) -> Option<Self> {
-        if self.0.trailing_zeros() < n {
-            None
-        } else {
-            Some(Self(self.0.checked_shr(n)?))
-        }
-    }
-    /// computes self / 2^n, panics if we would lose precision
-    pub(crate) fn div2_n_exact(self, n: u32) -> Self {
-        self.div2_n_exact_checked(n)
-            .expect("loss of precision in div2_n_exact")
-    }
+    // /// computes self / 2^n, returns `None` if we would lose precision
+    // pub(crate) fn div2_n_exact_checked(self, n: u32) -> Option<Self> {
+    //     if self.0.trailing_zeros() < n {
+    //         None
+    //     } else {
+    //         Some(Self(self.0.checked_shr(n)?))
+    //     }
+    // }
+    // /// computes self / 2^n, panics if we would lose precision
+    // pub(crate) fn div2_n_exact(self, n: u32) -> Self {
+    //     self.div2_n_exact_checked(n)
+    //         .expect("loss of precision in div2_n_exact")
+    // }
 
     pub(crate) fn div2_floor(self) -> Self {
         Self(self.0 >> 1)
     }
     pub(crate) fn div2_n_floor(self, n: u32) -> Self {
-        Self(self.0.checked_shr(n).unwrap())
+        let ret = Self(self.0 >> n);
+        debug_assert_eq!(ret, Self(self.0.checked_shr(n).unwrap()));
+        ret
     }
 
-    pub(crate) fn mul(self, other: Self) -> Self {
+    pub(crate) fn mul(self, rhs: Self) -> Self {
         Self(
             (self.0 as i128)
-                .checked_mul(other.0 as i128)
+                .checked_mul(rhs.0 as i128)
                 .unwrap()
                 .checked_shr(Self::SHIFT)
                 .unwrap()
@@ -276,26 +196,9 @@ impl fmt::Debug for Fixed {
 
 impl From<Fixed> for f64 {
     fn from(f: Fixed) -> Self {
-        (f.0 as f64) / (1_i64 << Fixed::SHIFT) as f64
+        f.into_f64()
     }
 }
-// impl From<f64> for Fixed {
-//     #[track_caller]
-//     fn from(f: f64) -> Self {
-//         Self::try_from_f64(f).unwrap()
-//     }
-// }
-// impl From<Fixed> for f32 {
-//     fn from(f: Fixed) -> Self {
-//         f64::from(f) as f32
-//     }
-// }
-// impl From<f32> for Fixed {
-//     #[track_caller]
-//     fn from(f: f32) -> Self {
-//         Self::try_from_f32(f).unwrap()
-//     }
-// }
 impl TryFrom<f64> for Fixed {
     type Error = &'static str;
 
@@ -303,24 +206,23 @@ impl TryFrom<f64> for Fixed {
         Self::try_from_f64(f).ok_or("out of domain")
     }
 }
-// impl From<f64> for Fixed {
-//     #[track_caller]
-//     fn from(f: f64) -> Self {
-//         Self::try_from_f64(f).expect("out of domain")
-//     }
-// }
 
 impl ops::Add for Fixed {
     type Output = Self;
 
-    #[track_caller]
     fn add(self, rhs: Self) -> Self::Output {
-        Self(self.0.checked_add(rhs.0).expect("overflow in add"))
+        let ret = Self(self.0 + rhs.0);
+        debug_assert_eq!(ret, self.add_checked(rhs).expect("overflow in add"));
+        ret
     }
 }
 impl ops::AddAssign for Fixed {
     fn add_assign(&mut self, rhs: Self) {
-        self.0 = self.0.checked_add(rhs.0).expect("overflow in add_assign");
+        #[cfg(debug_assertions)]
+        let oracle = self.add_checked(rhs).expect("overflow in add_assign");
+        self.0 += rhs.0;
+        #[cfg(debug_assertions)]
+        debug_assert_eq!(Self(self.0), oracle);
     }
 }
 impl ops::Sub for Fixed {
@@ -328,19 +230,27 @@ impl ops::Sub for Fixed {
 
     #[track_caller]
     fn sub(self, rhs: Self) -> Self::Output {
-        Self(self.0.checked_sub(rhs.0).expect("overflow in sub"))
+        let ret = Self(self.0 - rhs.0);
+        debug_assert_eq!(ret, self.sub_checked(rhs).expect("overflow in sub"));
+        ret
     }
 }
 impl ops::SubAssign for Fixed {
     fn sub_assign(&mut self, rhs: Self) {
-        self.0 = self.0.checked_sub(rhs.0).expect("overflow in sub_assign");
+        #[cfg(debug_assertions)]
+        let oracle = self.sub_checked(rhs).expect("overflow in sub_assign");
+        self.0 -= rhs.0;
+        #[cfg(debug_assertions)]
+        debug_assert_eq!(Self(self.0), oracle);
     }
 }
 impl ops::Neg for Fixed {
     type Output = Self;
 
     fn neg(self) -> Self::Output {
-        Self(self.0.checked_neg().expect("overflow in neg"))
+        let ret = Self(-self.0);
+        debug_assert_eq!(ret, self.neg_checked().expect("overflow in neg"));
+        ret
     }
 }
 

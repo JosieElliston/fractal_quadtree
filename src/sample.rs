@@ -51,7 +51,7 @@ impl Sample {
     }
 }
 
-#[inline(never)]
+#[cfg_attr(feature = "profiling", inline(never))]
 pub(crate) fn quadratic_map(
     (z0_real, z0_imag): (Real, Imag),
     (c_real, c_imag): (Real, Imag),
@@ -124,7 +124,7 @@ pub(crate) fn quadratic_map(
 }
 
 /// fails if the fixed point can't be constructed from the float
-#[inline(never)]
+#[cfg_attr(feature = "profiling", inline(never))]
 pub(crate) fn distance_estimator(
     (z0_real, z0_imag): (Real, Imag),
     (c_real, c_imag): (Real, Imag),
@@ -231,7 +231,7 @@ pub(crate) fn distance_estimator(
 /// returns the estimated distance and gradient of the estimated distance
 /// TODO: compute the gradient exactly, not with finite difference
 // TODO: if we immediate;y normalize the gradient, we don't have to deal with fixed point domain errors
-#[inline(never)]
+#[cfg_attr(feature = "profiling", inline(never))]
 pub(crate) fn distance_estimator_gradient(
     z0: (Real, Imag),
     (c_real, c_imag): (Real, Imag),
@@ -249,7 +249,7 @@ pub(crate) fn distance_estimator_gradient(
 
 /// one iteration of ~gradient descent
 /// except that we know how far to step
-#[inline(never)]
+#[cfg_attr(feature = "profiling", inline(never))]
 pub(crate) fn gradient_step(
     (z0_real, z0_imag): (Real, Imag),
     (c_real, c_imag): (Real, Imag),
@@ -276,7 +276,7 @@ pub(crate) fn gradient_step(
 
 pub(crate) const WIDTH: usize = 64;
 pub(crate) const GRADIENT_STEPS: usize = 1;
-#[inline(never)]
+#[cfg_attr(feature = "profiling", inline(never))]
 pub(crate) fn deepest_on_grid(
     (z0_real, z0_imag): (Real, Imag),
     window: Window,
@@ -372,7 +372,7 @@ pub(crate) const WIDTH0: usize = 64;
 /// for the resamples
 pub(crate) const WIDTH1: usize = 8;
 
-#[inline(never)]
+#[cfg_attr(feature = "profiling", inline(never))]
 pub(crate) fn metabrot_sample((z0_real, z0_imag): (Real, Imag)) -> Sample {
     // pub(crate) const WIDTH: usize = 128;
     // const WIDTH: usize = 512;

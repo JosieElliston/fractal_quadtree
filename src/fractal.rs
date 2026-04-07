@@ -73,7 +73,7 @@ impl Fractal {
     /// but in the future you'll only need to call this when the sampling state changes.
     /// i could make it match the future api by having Fractal spawn a thread and communicate with it, but whatever.
     /// returns how many samples were taken since the last time this was called.
-    #[inline(never)]
+    #[cfg_attr(feature = "profiling", inline(never))]
     pub(crate) fn enable_sampling(&mut self, window: Window) -> usize {
         self.window = Some(window);
 
@@ -103,13 +103,13 @@ impl Fractal {
     }
 
     /// currently nearly a nop, but won't be in the future
-    #[inline(never)]
+    #[cfg_attr(feature = "profiling", inline(never))]
     pub(crate) fn disable_sampling(&mut self) {
         self.window = None;
     }
 
     /// it's optional to call this every frame
-    #[inline(never)]
+    #[cfg_attr(feature = "profiling", inline(never))]
     pub(crate) fn begin_rendering(&mut self, camera_map: &CameraMap) {
         assert!(
             self.camera_map.is_none(),
@@ -139,7 +139,7 @@ impl Fractal {
     }
 
     /// writes to the texture handle
-    #[inline(never)]
+    #[cfg_attr(feature = "profiling", inline(never))]
     pub(crate) fn finish_rendering(&mut self, handle: &mut egui::TextureHandle) {
         // receive lines from pool
         {

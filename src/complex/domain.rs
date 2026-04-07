@@ -16,7 +16,7 @@ impl Default for Domain {
         Self {
             real_mid: Fixed::ZERO,
             imag_mid: Fixed::ZERO,
-            rad: Fixed::ONE.mul2_n(2),
+            rad: Fixed::ONE.mul2().mul2(),
         }
     }
 }
@@ -119,8 +119,10 @@ impl Domain {
     // pub(crate) fn contains_point(self, (real, imag): (ExactReal, ExactImag)) -> bool {
     // pub(crate) fn contains_point(self, (real, imag): (Real, Imag)) -> bool {
     pub(crate) fn contains_point(self, (real, imag): (Real, Imag)) -> bool {
-        (self.real_lo()..=self.real_hi()).contains(&real)
-            && (self.imag_lo()..=self.imag_hi()).contains(&imag)
+        (self.real_lo()..self.real_hi()).contains(&real)
+            && (self.imag_lo()..self.imag_hi()).contains(&imag)
+        // (self.real_lo()..=self.real_hi()).contains(&real)
+        //     && (self.imag_lo()..=self.imag_hi()).contains(&imag)
         // (self.real_mid() - real).abs() <= self.rad() && (self.imag_mid() - imag).abs() <= self.rad()
         // f32::max(
         //     (self.real_mid() - real).abs(),
