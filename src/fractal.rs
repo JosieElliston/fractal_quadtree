@@ -79,8 +79,8 @@ impl Fractal {
 
         // take samples out of the pool
         let mut sample_count = 0;
-        while let Some(((real, imag), color)) = self.pool.receive_sample() {
-            Arc::get_mut(&mut self.tree).unwrap().insert((real, imag), color).unwrap();
+        while let Some((node_id, (real, imag), color)) = self.pool.receive_sample() {
+            Arc::get_mut(&mut self.tree).unwrap().insert(node_id, color);
             sample_count += 1;
         }
 
@@ -92,11 +92,12 @@ impl Fractal {
         // TODO: cancel samples if we pan away (this won't be needed in the future)
         const MAX_IN_FLIGHT: usize = 512;
         while self.pool.samples_in_flight() < MAX_IN_FLIGHT {
-            let Some(points) = Arc::get_mut(&mut self.tree).unwrap().refine(window) else {
+            let Some(node_ids) = Arc::get_mut(&mut self.tree).unwrap().refine(window) else {
                 break;
             };
-            for (real, imag) in points {
-                self.pool.request_sample((real, imag));
+            for node_id in node_ids {
+                self.pool
+                    .request_sample(node_id, self.tree.mid_of_node_id(node_id));
             }
         }
         sample_count

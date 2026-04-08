@@ -1,4 +1,11 @@
-use std::{collections::VecDeque, mem::MaybeUninit, num::NonZeroU32, pin::Pin, process::Child};
+use std::{
+    collections::VecDeque,
+    mem::MaybeUninit,
+    num::NonZeroU32,
+    pin::Pin,
+    process::Child,
+    sync::atomic::{AtomicU32, Ordering::*},
+};
 
 use eframe::egui::Color32;
 
@@ -45,26 +52,27 @@ pub(crate) static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::Ato
 #[derive(Debug)]
 struct Node {
     dom: Domain,
-    leaf_distance_cache: u32,
+    leaf_distance_cache: AtomicU32,
     color: Option<Color32>,
-    children: Option<Box<[Node; 4]>>,
+    /// leftmost child handle
+    child_id: Option<NodeId>,
 }
 impl Node {
     fn new_leaf_uncolored(dom: Domain) -> Self {
         Self {
             dom,
-            leaf_distance_cache: 0,
+            leaf_distance_cache: AtomicU32::new(0),
             color: None,
-            children: None,
+            child_id: None,
         }
     }
 
     fn new_leaf_colored(dom: Domain, color: Color32) -> Self {
         Self {
             dom,
-            leaf_distance_cache: 0,
+            leaf_distance_cache: AtomicU32::new(0),
             color: Some(color),
-            children: None,
+            child_id: None,
         }
     }
 
@@ -75,8 +83,9 @@ impl Node {
 
     /// the point must be inside the domain.
     /// returns `None` if we're a leaf.
-    fn child_i_containing(&self, (real, imag): (Real, Imag)) -> Option<usize> {
-        let children = self.children.as_ref()?;
+    fn child_i_containing(&self, alloc: &Alloc, (real, imag): (Real, Imag)) -> Option<usize> {
+        let child_id = self.child_id?;
+        let children = alloc.get4(child_id);
         debug_assert!(self.dom.contains_point((real, imag)));
         let ret = (if real < self.dom.real_mid() { 0 } else { 1 })
             + (if imag >= self.dom.imag_mid() { 0 } else { 2 });
@@ -95,14 +104,18 @@ impl Node {
 
     /// must have that self is a leaf.
     /// fails if the domain gets too small.
-    fn try_split(&mut self) -> Option<()> {
-        assert!(self.children.is_none());
-        let children = Box::new(self.dom.split()?.map(Self::new_leaf_uncolored));
-        *self = Self {
-            dom: self.dom,
-            leaf_distance_cache: 1,
-            color: self.color,
-            children: Some(children),
+    fn try_split(leaf_id: NodeId, alloc: &mut Alloc) -> Option<()> {
+        let child_id = {
+            let slf = alloc.get1(leaf_id);
+            assert!(slf.child_id.is_none());
+            alloc.insert4(slf.dom.split()?.map(Self::new_leaf_uncolored))
+        };
+        let slf = alloc.get1_mut(leaf_id);
+        *slf = Self {
+            dom: slf.dom,
+            leaf_distance_cache: AtomicU32::new(1),
+            color: slf.color,
+            child_id: Some(child_id),
         };
         Some(())
     }
@@ -113,53 +126,172 @@ impl Node {
     }
 }
 
-#[derive(Debug)]
-struct AllocHandle(NonZeroU32);
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct NodeId(NonZeroU32);
+impl NodeId {
+    // fn new(i: usize) -> Self {
+    //     Self(NonZeroU32::new(i as u32).unwrap())
+    // }
+
+    // unsafe fn new_unchecked(i: usize) -> Self {
+    //     unsafe { Self(NonZeroU32::new_unchecked(i as u32)) }
+    // }
+
+    fn to_index(self) -> usize {
+        self.0.get() as usize
+    }
+
+    /// ret[0] = handle
+    fn siblings(self) -> [NodeId; 4] {
+        let i = self.to_index();
+        debug_assert_eq!(i % 4, 0, "unaligned handle in siblings");
+        unsafe {
+            [
+                NodeId(NonZeroU32::new_unchecked(self.0.get() + 0)),
+                NodeId(NonZeroU32::new_unchecked(self.0.get() + 1)),
+                NodeId(NonZeroU32::new_unchecked(self.0.get() + 2)),
+                NodeId(NonZeroU32::new_unchecked(self.0.get() + 3)),
+            ]
+        }
+    }
+}
 
 #[derive(Debug)]
 struct Alloc {
     /// Option for maybe uninit runtime checking
     /// TODO: remove
     /// mem[0] is uninit/None so we can do `NonZeroU32` handles
-    mem: Vec<Option<Node>>,
+    mem: Vec<MaybeUninit<Node>>,
+    is_init: Vec<bool>,
 }
 impl Default for Alloc {
     fn default() -> Self {
         Self {
-            mem: vec![None, None, None],
+            mem: vec![
+                MaybeUninit::uninit(),
+                MaybeUninit::uninit(),
+                MaybeUninit::uninit(),
+            ],
+            is_init: vec![false; 3],
         }
     }
 }
 impl Alloc {
-    fn alloc1(&mut self) -> AllocHandle {
+    fn alloc1(&mut self) -> NodeId {
         let handle = NonZeroU32::new(self.mem.len() as u32).unwrap();
         debug_assert_eq!(handle.get(), 3);
-        self.mem.push(None);
-        AllocHandle(handle)
+        self.mem.push(MaybeUninit::uninit());
+        self.is_init.push(false);
+        NodeId(handle)
     }
 
-    fn alloc4(&mut self) -> AllocHandle {
+    fn alloc4(&mut self) -> NodeId {
         let handle = NonZeroU32::new(self.mem.len() as u32).unwrap();
         debug_assert_eq!(handle.get() % 4, 0);
-        self.mem.extend([None, None, None, None]);
-        AllocHandle(handle)
+        self.mem.extend([
+            MaybeUninit::uninit(),
+            MaybeUninit::uninit(),
+            MaybeUninit::uninit(),
+            MaybeUninit::uninit(),
+        ]);
+        self.is_init.extend([false; 4]);
+        NodeId(handle)
+    }
+
+    // fn set4(&mut self, handle: AllocHandle, nodes: [Node; 4]) {
+    //     let i = handle.to_index();
+    //     debug_assert_eq!(i % 4, 0);
+    //     for (offset, node) in nodes.into_iter().enumerate() {
+    //         self.mem[i + offset] = MaybeUninit::new(node);
+    //         self.is_init[i + offset] = true;
+    //     }
+    // }
+
+    fn insert1(&mut self, node: Node) -> NodeId {
+        let handle = self.alloc1();
+        let i = handle.to_index();
+        debug_assert!(
+            !self.is_init[i],
+            "insert at already initialized memory at index {}",
+            i
+        );
+        self.mem[i] = MaybeUninit::new(node);
+        self.is_init[i] = true;
+        handle
+    }
+
+    fn insert4(&mut self, nodes: [Node; 4]) -> NodeId {
+        let handle = self.alloc4();
+        let i = handle.to_index();
+        for (offset, node) in nodes.into_iter().enumerate() {
+            debug_assert!(
+                !self.is_init[i + offset],
+                "insert at already initialized memory at index {}",
+                i + offset
+            );
+            self.mem[i + offset] = MaybeUninit::new(node);
+            self.is_init[i + offset] = true;
+        }
+        handle
     }
 
     /// probably only used for getting the root
-    fn get1(&self, handle: AllocHandle) -> &Option<Node> {
-        debug_assert_eq!(
-            handle.0.get(),
-            3,
-            "we should probably only use this for getting the root"
-        );
-        &self.mem[handle.0.get() as usize]
+    // fn get1<'a>(&'a self, handle: AllocHandle) -> &'a Node {
+    pub(crate) fn get1(&self, handle: NodeId) -> &Node {
+        let i = handle.to_index();
+        // debug_assert_eq!(
+        //     i, 3,
+        //     "we should probably only use get1 for getting the root"
+        // );
+        debug_assert!(self.is_init[i], "read uninitialized memory at index {}", i);
+        unsafe { self.mem[i].assume_init_ref() }
+    }
+
+    fn get1_mut(&mut self, handle: NodeId) -> &mut Node {
+        let i = handle.to_index();
+        // debug_assert_eq!(
+        //     i, 3,
+        //     "we should probably only use get1_mut for getting the root"
+        // );
+        debug_assert!(self.is_init[i], "read uninitialized memory at index {}", i);
+        unsafe { self.mem[i].assume_init_mut() }
     }
 
     /// used for getting the four children
-    fn get4(&self, handle: AllocHandle) -> &[Option<Node>; 4] {
-        debug_assert_eq!(handle.0.get() % 4, 0, "unaligned read, probably bad");
-        let i = handle.0.get() as usize;
-        (&self.mem[i..i + 4]).try_into().unwrap()
+    fn get4(&self, handle: NodeId) -> [&Node; 4] {
+        let i = handle.to_index();
+        debug_assert!(i >= 4, "probably bad");
+        debug_assert_eq!(i % 4, 0, "unaligned read, probably bad");
+        for offset in 0..4 {
+            debug_assert!(
+                self.is_init[i + offset],
+                "read uninitialized memory at index {}",
+                i + offset
+            );
+        }
+        (self.mem[i..i + 4])
+            .as_array::<4>()
+            .unwrap()
+            .each_ref()
+            .map(|m| unsafe { m.assume_init_ref() })
+    }
+
+    fn get4_mut(&mut self, handle: NodeId) -> [&mut Node; 4] {
+        let i = handle.to_index();
+        debug_assert!(i >= 4, "probably bad");
+        debug_assert_eq!(i % 4, 0, "unaligned read, probably bad");
+        for offset in 0..4 {
+            debug_assert!(
+                self.is_init[i + offset],
+                "read uninitialized memory at index {}",
+                i + offset
+            );
+        }
+        (self.mem[i..i + 4])
+            .as_mut_array::<4>()
+            .unwrap()
+            .each_mut()
+            .map(|m| unsafe { m.assume_init_mut() })
     }
 }
 
@@ -167,7 +299,7 @@ impl Alloc {
 pub(crate) struct Tree {
     dom: Domain,
     alloc: Alloc,
-    root: Node,
+    root: NodeId,
 }
 
 // impl Internal {
@@ -274,212 +406,32 @@ pub(crate) struct Tree {
 
 impl Tree {
     pub(crate) fn new(dom: Domain) -> Self {
-        Self {
+        let mut alloc = Alloc::default();
+        let root = alloc.insert1(Node::new_leaf_colored(
             dom,
-            alloc: Alloc::default(),
-            root: Node::new_leaf_colored(dom, metabrot_sample(dom.mid()).color()),
-        }
+            metabrot_sample(dom.mid()).color(),
+        ));
+        Self { dom, alloc, root }
     }
 
     pub(crate) fn node_count(&self) -> usize {
         let mut count = 0;
         let mut stack = Vec::with_capacity(64);
-        stack.push(&self.root);
+        stack.push(self.alloc.get1(self.root));
         while let Some(node) = stack.pop() {
             count += 1;
-            if let Some(children) = &node.children {
-                for child in children.iter() {
-                    stack.push(&child);
-                }
+            if let Some(child_id) = node.child_id {
+                let children = self.alloc.get4(child_id);
+                stack.extend(children);
             }
         }
         count
     }
 
-    // #[inline(never)]
-    // pub(crate) fn validate_leaf_distance(&self) {
-    //     let mut stack = Vec::with_capacity(64);
-    //     stack.push(&self.root);
-    //     while let Some(node) = stack.pop()
-    //         && let Node::Internal(node) = node
-    //     {
-    //         stack.extend(node.children.iter().map(|c| c.as_ref()));
-    //         let oracle = node
-    //             .children
-    //             .iter()
-    //             .map(|c| c.leaf_distance_cache())
-    //             .min()
-    //             .unwrap()
-    //             + 1;
-    //         assert_eq!(
-    //             node.leaf_distance_cache, oracle,
-    //             "leaf_distance invariant violated at node with dom {:?}",
-    //             node.dom
-    //         );
-    //     }
-    // }
-
-    // fn is_leaf(&self) -> bool {
-    //     self.children.is_none()
-    // }
-
-    // fn split(&mut self) {
-    //     if let Some(children) = {
-    //         || {
-    //             Some([
-    //                 Box::new(Self::new_leaf(Domain::try_new(
-    //                     self.dom.real_lo(),
-    //                     self.dom.real_mid(),
-    //                     self.dom.imag_mid(),
-    //                     self.dom.imag_hi(),
-    //                 )?)),
-    //                 Box::new(Self::new_leaf(Domain::try_new(
-    //                     self.dom.real_mid(),
-    //                     self.dom.real_hi(),
-    //                     self.dom.imag_mid(),
-    //                     self.dom.imag_hi(),
-    //                 )?)),
-    //                 Box::new(Self::new_leaf(Domain::try_new(
-    //                     self.dom.real_lo(),
-    //                     self.dom.real_mid(),
-    //                     self.dom.imag_lo(),
-    //                     self.dom.imag_mid(),
-    //                 )?)),
-    //                 Box::new(Self::new_leaf(Domain::try_new(
-    //                     self.dom.real_mid(),
-    //                     self.dom.real_hi(),
-    //                     self.dom.imag_lo(),
-    //                     self.dom.imag_mid(),
-    //                 )?)),
-    //             ])
-    //         }
-    //     }() {
-    //         self.children = Some(children);
-    //     }
-    // }
-
-    // /// compute the samples for the four children in parallel
-    // fn split(&mut self) {
-    //     if let Some(squares) = {
-    //         || {
-    //             Some([
-    //                 Domain::try_new(
-    //                     self.dom.real_lo(),
-    //                     self.dom.real_mid(),
-    //                     self.dom.imag_mid(),
-    //                     self.dom.imag_hi(),
-    //                 )?,
-    //                 Domain::try_new(
-    //                     self.dom.real_mid(),
-    //                     self.dom.real_hi(),
-    //                     self.dom.imag_mid(),
-    //                     self.dom.imag_hi(),
-    //                 )?,
-    //                 Domain::try_new(
-    //                     self.dom.real_lo(),
-    //                     self.dom.real_mid(),
-    //                     self.dom.imag_lo(),
-    //                     self.dom.imag_mid(),
-    //                 )?,
-    //                 Domain::try_new(
-    //                     self.dom.real_mid(),
-    //                     self.dom.real_hi(),
-    //                     self.dom.imag_lo(),
-    //                     self.dom.imag_mid(),
-    //                 )?,
-    //             ])
-    //         }
-    //     }() {
-    //         self.children = Some(
-    //             squares
-    //                 .into_par_iter()
-    //                 .map(|square| Box::new(Self::new_leaf(square)))
-    //                 .collect::<Vec<_>>()
-    //                 .try_into()
-    //                 .unwrap(),
-    //         );
-    //     }
-    // }
-
-    // fn count_overlaps(&self, window: Domain) -> u32 {
-    //     todo!()
-    // }
-
-    // fn count_contained(&self, window: Domain) -> u32 {
-    //     todo!()
-    // }
-
-    // actually i think this basically just returns 1
-    // fn count_samples_weak(&self, pixel: Domain) -> u32 {
-    //     if !self.window.overlaps(pixel) {
-    //         return 0;
-    //     }
-    //     (if pixel.contains(self.window.real_mid(), self.window.imag_mid()) {
-    //         1
-    //     } else {
-    //         0
-    //     } + if self.is_leaf() {
-    //         0
-    //     } else {
-    //         self.children
-    //             .as_ref()
-    //             .unwrap()
-    //             .iter()
-    //             .map(|c| c.count_samples_weak(pixel))
-    //             .sum()
-    //     })
-    // }
-
-    // fn count_samples_strong(&self, pixel: Domain) -> u32 {
-    //     if !self.dom.overlaps(pixel) {
-    //         return 0;
-    //     }
-    //     (if pixel.contains_point(self.dom.real_mid(), self.dom.imag_mid()) {
-    //         1
-    //     } else {
-    //         0
-    //     } + if self.is_leaf() {
-    //         0
-    //     } else {
-    //         let closest_child_i = self
-    //             .child_i_closest_to(pixel.real_mid(), pixel.imag_mid())
-    //             .unwrap();
-    //         self.children.as_ref().unwrap()[closest_child_i].count_samples_strong(pixel)
-    //     })
-    // }
-
-    // /// whether the pixel contains any samples
-    // #[inline(never)]
-    // pub(crate) fn contains_sample(&self, pixel: Domain) -> bool {
-    //     if !self.dom.overlaps(pixel) {
-    //         return false;
-    //     }
-    //     if pixel.contains_point(self.dom.real_mid(), self.dom.imag_mid()) {
-    //         return true;
-    //     }
-    //     if self.is_leaf() {
-    //         return false;
-    //     }
-    //     self.children
-    //         .as_ref()
-    //         .unwrap()
-    //         .iter()
-    //         .any(|c| c.contains_sample(pixel))
-    // }
-
-    // // TODO: rename
-    // /// ensures that every pixel in the window contains at least subsamples leaves
-    // // fn ensure_pixel_safe(&mut self, window: Window, pixel_width: f32, subsamples: u8) {
-    // fn ensure_pixel_safe(&mut self, window: Window, pixel_width: f32) {
-    //     if !window.overlaps(self.window) {
-    //         return;
-    //     }
-    //     match self.children {
-    //         Some(children) => children.iter().map(|c| c.overlaps(window)),
-    //         None => todo!(),
-    //     }
-    //     todo!()
-    // }
+    pub(crate) fn mid_of_node_id(&self, node_id: NodeId) -> (Real, Imag) {
+        let node = self.alloc.get1(node_id);
+        node.dom.mid()
+    }
 
     // fn ensure_pixel_safe(&mut self, pixel: Domain) {
     //     if !self.window.overlaps(pixel) {
@@ -503,102 +455,6 @@ impl Tree {
     //     if self.count_overlaps(pixel) >= 4 {
     //         return;
     //     }
-    // }
-
-    // TODO: subsampling / area average
-    // every pixel must contain a node
-    // fn ensure_pixel_safe(&mut self, pixel: Domain) {
-    //     // println!("ensure_pixel_safe: {self:?}");
-    //     if !self.window.overlaps(pixel) {
-    //         // println!("!self.window.overlaps(pixel)");
-    //         return;
-    //     }
-    //     if self.window <= pixel {
-    //         // println!("self.window <= pixel");
-    //         return;
-    //     }
-    //     // match &mut self.children {
-    //     //     Some(children) => {
-    //     //         children
-    //     //             .iter_mut()
-    //     //             .map(|c| {
-    //     //                 let dx = c.window.real_mid() - pixel.real_mid();
-    //     //                 let dy = c.window.imag_mid() - pixel.imag_mid();
-    //     //                 (c, dx * dx + dy * dy)
-    //     //             })
-    //     //             .min_by(|(_, left), (_, right)| left.total_cmp(right))
-    //     //             .unwrap()
-    //     //             .0
-    //     //             .ensure_pixel_safe(pixel);
-    //     //     }
-    //     //     None => {
-    //     //         self.split();
-    //     //         for c in self.children.as_mut().unwrap().iter_mut() {
-    //     //             c.ensure_pixel_safe(pixel)
-    //     //         }
-    //     //     }
-    //     // };
-    //     if self.is_leaf() {
-    //         // println!("self.is_leaf()");
-    //         self.split();
-    //     }
-    //     let closest_child_i = self
-    //         .child_i_closest_to(pixel.real_mid(), pixel.imag_mid())
-    //         .unwrap();
-    //     self.children.as_mut().unwrap()[closest_child_i].ensure_pixel_safe(pixel);
-    // }
-
-    // /// every pixel must contain a sample
-    // pub(crate) fn ensure_pixel_safe(&mut self, pixel: Domain) {
-    //     if !self.dom.overlaps(pixel) {
-    //         return;
-    //     }
-    //     if pixel.contains_point(self.dom.real_mid(), self.dom.imag_mid()) {
-    //         return;
-    //     }
-    //     if self.is_leaf() {
-    //         self.split();
-    //     }
-    //     // TODO: this isn't really what i want
-    //     if !self.is_leaf() {
-    //         let closest_child_i = self
-    //             .child_i_closest_to(pixel.real_mid(), pixel.imag_mid())
-    //             .unwrap();
-    //         self.children.as_mut().unwrap()[closest_child_i].ensure_pixel_safe(pixel);
-    //     }
-    // }
-
-    // fn is_strong_pixel_safe(&self, pixel: Domain) -> bool {
-    //     if !self.window.overlaps(pixel) {
-    //         return false;
-    //     }
-    //     if self.window <= pixel {
-    //         return true;
-    //     }
-    //     if self.is_leaf() {
-    //         return false;
-    //     }
-    //     let closest_child_i = self
-    //         .child_i_closest_to(pixel.real_mid(), pixel.imag_mid())
-    //         .unwrap();
-    //     self.children.as_ref().unwrap()[closest_child_i].is_strong_pixel_safe(pixel)
-    // }
-
-    // fn is_weak_pixel_safe(&self, pixel: Domain) -> bool {
-    //     if !self.window.overlaps(pixel) {
-    //         return false;
-    //     }
-    //     if self.window <= pixel {
-    //         return true;
-    //     }
-    //     if self.is_leaf() {
-    //         return false;
-    //     }
-    //     self.children
-    //         .as_ref()
-    //         .unwrap()
-    //         .iter()
-    //         .any(|c| c.is_weak_pixel_safe(pixel))
     // }
 
     // /// ensures that we have < n nodes
@@ -824,7 +680,7 @@ impl Tree {
     // TODO: we don't actually need the leaf to be colored to split it
     // TODO: better ordering
     #[cfg_attr(feature = "profiling", inline(never))]
-    pub(crate) fn refine(&mut self, window: Window) -> Option<[(Real, Imag); 4]> {
+    pub(crate) fn refine(&mut self, window: Window) -> Option<[NodeId; 4]> {
         let start = std::time::Instant::now();
 
         // /// returns `None` if no leaf intersects the window
@@ -866,17 +722,20 @@ impl Tree {
 
         #[cfg_attr(feature = "profiling", inline(never))]
         /// returns `None` if no leaf intersects the window
-        fn get_shallowest_leaf(tree: &mut Tree, window: Window) -> Option<(u32, (Real, Imag))> {
+        fn get_shallowest_leaf(tree: &Tree, window: Window) -> Option<(u32, NodeId)> {
             // queue instead of stack bc we want to visit shallower nodes first
             // TODO: the queue is probably worse now
             let mut stack = Vec::with_capacity(64);
-            stack.push((&mut tree.root, 0));
+            // stack.push((&mut *tree.alloc.get1(tree.root), 0));
+            stack.push((tree.root, 0));
             let mut shallowest_depth = u32::MAX;
             // TODO: change this to a Vec and store all the shallowest leafs
             // let mut shallowest_leaf = None;
-            let mut shallowest_leaf_mid = None;
+            // let mut shallowest_leaf_mid = None;
+            let mut shallowest_leaf_id = None;
             // while let Some((node, depth)) = queue.pop_front() {
-            while let Some((node, depth)) = stack.pop() {
+            while let Some((node_id, depth)) = stack.pop() {
+                let node = tree.alloc.get1(node_id);
                 // TODO: instead of doing this check on pop, do it on push
                 // this also lets us do less work in the case where the domain is contained inside the window
                 if !window.overlaps(node.dom) {
@@ -885,21 +744,20 @@ impl Tree {
                 if depth >= shallowest_depth {
                     continue;
                 }
-                match (
-                    node.color,
-                    node.children.as_mut().map(|children| children.each_mut()),
-                ) {
-                    (_, Some(children)) => {
+                match (node.color, node.child_id) {
+                    (_, Some(child_id)) => {
+                        let children = tree.alloc.get4(child_id);
                         // let leaf_distance = internal.compute_leaf_distance();
                         let leaf_distance = children
                             .iter()
-                            .map(|c| c.leaf_distance_cache)
+                            .map(|c| c.leaf_distance_cache.load(Relaxed))
                             .min()
                             .unwrap()
                             + 1;
-                        if leaf_distance != node.leaf_distance_cache {
-                            node.leaf_distance_cache = leaf_distance;
-                        }
+                        // if leaf_distance != node.leaf_distance_cache.load(Relaxed) {
+                        //     node.leaf_distance_cache = leaf_distance;
+                        // }
+                        node.leaf_distance_cache.fetch_min(leaf_distance, Relaxed);
                         if leaf_distance + depth >= shallowest_depth {
                             continue;
                         }
@@ -912,13 +770,13 @@ impl Tree {
                         // // TODO: does this sort the nodes in place???
                         // let mut children: [&mut Node; 4] = children.each_mut();
                         // children.sort_by_key(|c| c.leaf_distance_cache());
-                        stack.extend(children.into_iter().map(|c| (c, depth + 1)));
+                        // stack.extend(children.into_iter().map(|c| (c, depth + 1)));
+                        stack.extend(child_id.siblings().map(|c| (c, depth + 1)).into_iter());
                     }
                     (Some(color), None) => {
                         if depth < shallowest_depth {
                             shallowest_depth = depth;
-                            // shallowest_leaf = Some(&mut *node);
-                            shallowest_leaf_mid = Some(node.dom.mid());
+                            shallowest_leaf_id = Some(node_id);
                         }
                     }
                     (None, None) => {}
@@ -926,14 +784,14 @@ impl Tree {
             }
             // shallowest_leaf
             // Some((shallowest_depth, shallowest_leaf?.dom.mid()))
-            Some((shallowest_depth, shallowest_leaf_mid?))
+            Some((shallowest_depth, shallowest_leaf_id?))
         }
 
         // how deep is the shallowest leaf that intersects the window?
         // let node = get_shallowest_leaf(self, window)?;
 
         // TODO: is this really correct?
-        let (shallowest_depth, node_mid) = get_shallowest_leaf(self, window)?;
+        let (shallowest_depth, node_id) = get_shallowest_leaf(self, window)?;
         // let (shallowest_depth_oracle, _) = get_shallowest_leaf_oracle(self, window)?;
         // assert_eq!(shallowest_depth, shallowest_depth_oracle,);
 
@@ -989,21 +847,23 @@ impl Tree {
         // }
         // update_leaf_distance(self, node_mid);
 
-        #[cfg_attr(feature = "profiling", inline(never))]
-        fn get_leaf_from_mid(tree: &mut Tree, mid: (Real, Imag)) -> &mut Node {
-            let mut node = &mut tree.root;
-            // while let Some(children) = node.children {
-            //     let child_i = node.child_i_containing(mid);
-            while let Some(child_i) = node.child_i_containing(mid) {
-                node = &mut node.children.as_mut().unwrap()[child_i];
-            }
-            node
-        }
+        // #[cfg_attr(feature = "profiling", inline(never))]
+        // fn get_leaf_from_mid(tree: &mut Tree, mid: (Real, Imag)) -> &mut Node {
+        //     let mut node = &mut tree.root;
+        //     // while let Some(children) = node.children {
+        //     //     let child_i = node.child_i_containing(mid);
+        //     while let Some(child_i) = node.child_i_containing(mid) {
+        //         node = &mut node.children.as_mut().unwrap()[child_i];
+        //     }
+        //     node
+        // }
+        // let node = get_leaf_from_mid(self, node_mid);
 
-        let node = get_leaf_from_mid(self, node_mid);
+        // let node = self.alloc.get1_mut(node_id);
 
-        assert!(node.color.is_some());
-        assert!(node.children.is_none());
+        // assert!(node.color.is_some());
+        // assert!(node.child_id.is_none());
+
         // let Node::LeafColor(leaf) = node else {
         //     // let Some(leaf) = get_leaf_from_mid(self, node_mid) else {
         //     unreachable!("the node must be a `LeafColor`");
@@ -1012,14 +872,14 @@ impl Tree {
         // TODO: if this is too small to split,
         // we should try to split another node,
         // rather than failing immediately
-        node.try_split()?;
-        // we can't just `internal.children.map(|c| c.dom.mid())` bc of rust
-        let points = node
-            .children
-            .as_ref()
-            .expect("we just split the node")
-            .each_ref()
-            .map(|c| c.dom.mid());
+
+        Node::try_split(node_id, &mut self.alloc)?;
+        let node = self.alloc.get1(node_id);
+        // // we can't just `internal.children.map(|c| c.dom.mid())` bc of rust
+        // let points = self
+        //     .alloc
+        //     .get4(node.child_id.expect("we just split the node"))
+        //     .map(|c| c.dom.mid());
 
         #[cfg(false)]
         {
@@ -1030,7 +890,7 @@ impl Tree {
             );
             COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
-        Some(points)
+        Some(node.child_id.expect("we just split it").siblings())
     }
 
     // /// returns `None` if we shouldn't/can't refine
@@ -1231,24 +1091,28 @@ impl Tree {
     #[cfg_attr(feature = "profiling", inline(never))]
     pub(crate) fn insert(
         &mut self,
-        (real, imag): (Real, Imag),
+        // (real, imag): (Real, Imag),
+        node_id: NodeId,
         color: Color32,
-    ) -> Result<(), &'static str> {
-        assert!(self.dom.contains_point((real, imag)));
-        let mut node = &mut self.root;
-        // while let Node::Internal(internal) = node {
-        //     let child_i = internal.child_i_containing((real, imag));
-        while let Some(child_i) = node.child_i_containing((real, imag)) {
-            node = &mut node.children.as_mut().unwrap()[child_i];
-        }
-        match node.color {
-            Some(_color) => Err("tried to insert into a leaf with color"),
-            None => {
-                assert!(node.dom.contains_point((real, imag)));
-                node.set_color(color);
-                Ok(())
-            }
-        }
+    ) {
+        // assert!(self.dom.contains_point((real, imag)));
+        // let mut node = &mut self.root;
+        // // while let Node::Internal(internal) = node {
+        // //     let child_i = internal.child_i_containing((real, imag));
+        // while let Some(child_i) = node.child_i_containing((real, imag)) {
+        //     node = &mut node.children.as_mut().unwrap()[child_i];
+        // }
+        // match node.color {
+        //     Some(_color) => Err("tried to insert into a leaf with color"),
+        //     None => {
+        //         assert!(node.dom.contains_point((real, imag)));
+        //         node.set_color(color);
+        //         Ok(())
+        //     }
+        // }
+        let node = self.alloc.get1_mut(node_id);
+        node.set_color(color);
+
         // if let Some(color) = node.color {
         //     assert!(node.dom.contains_point((real, imag)));
         //     *node = Node::LeafColor(LeafColor {
@@ -1293,12 +1157,13 @@ impl Tree {
             return UNCONTAINED_COLOR;
         }
 
-        let mut node = &self.root;
+        let mut node = self.alloc.get1(self.root);
         let mut closest_sample_dist = distance(center, self.dom.mid());
         let mut closest_sample_color = node.color.expect("root must have a color");
 
-        while let Some(child_i) = node.child_i_containing(center) {
-            node = &node.children.as_ref().unwrap()[child_i];
+        while let Some(child_i) = node.child_i_containing(&self.alloc, center) {
+            // TODO: this is bad
+            node = self.alloc.get1(node.child_id.unwrap().siblings()[child_i]);
             let dist = distance(center, node.dom.mid());
             if dist < closest_sample_dist
                 && let Some(color) = node.color

@@ -8,7 +8,7 @@ use eframe::egui::Color32;
 use crate::{
     complex::{CameraMap, fixed::*},
     sample,
-    tree::Tree,
+    tree::{NodeId, Tree},
 };
 
 pub(crate) static ELAPSED_NANOS: std::sync::atomic::AtomicU64 =
@@ -19,8 +19,8 @@ pub(crate) static WORKER_HIST: [std::sync::atomic::AtomicU64; 128] =
 
 // will need this later
 // type CameraUpdate = CameraMap;
-type SampleRequest = (Real, Imag);
-type SampleResponse = ((Real, Imag), Color32);
+type SampleRequest = (NodeId, (Real, Imag));
+type SampleResponse = (NodeId, (Real, Imag), Color32);
 /// usize is the row
 type RenderRequest = (Arc<Tree>, CameraMap, usize);
 // type RenderRequest = (Arc<RwLock<Tree>>, CameraMap, usize);
@@ -46,6 +46,7 @@ struct WorkerHandle {
 /// owned by the worker thread
 struct WorkerLocal {
     thread_i: usize,
+    // tree: Arc<Tree>,
     sample_request_receiver: mpsc::Receiver<SampleRequest>,
     sample_response_sender: mpsc::Sender<SampleResponse>,
     render_request_receiver: mpsc::Receiver<RenderRequest>,
@@ -76,14 +77,14 @@ impl WorkerLocal {
 
     #[cfg_attr(feature = "profiling", inline(never))]
     fn try_sample(&self) -> Option<SampleResponse> {
-        let Ok(point) = self.sample_request_receiver.try_recv() else {
+        let Ok((node_id, (real, imag))) = self.sample_request_receiver.try_recv() else {
             return None;
         };
         // metabrot
-        let color = sample::metabrot_sample(point).color();
+        let color = sample::metabrot_sample((real, imag)).color();
         // // mandelbrot
         // let color = sample::quadratic_map((Real::ZERO, Imag::ZERO), point).color();
-        Some((point, color))
+        Some((node_id, (real, imag), color))
     }
 
     #[cfg_attr(feature = "profiling", inline(never))]
@@ -192,7 +193,7 @@ impl Pool {
     }
 
     #[cfg_attr(feature = "profiling", inline(never))]
-    pub(crate) fn request_sample(&mut self, point: (Real, Imag)) {
+    pub(crate) fn request_sample(&mut self, node_id: NodeId, (real, imag): (Real, Imag)) {
         // TODO: or maybe just do round robin
         // actually with how efficiently cores work that would be bad
         // actually threads get put on different cores, so maybe it's not that bad
@@ -213,7 +214,10 @@ impl Pool {
             .iter_mut()
             .min_by_key(|worker| worker.samples_in_flight)
             .unwrap();
-        worker.sample_request_sender.send(point).unwrap();
+        worker
+            .sample_request_sender
+            .send((node_id, (real, imag)))
+            .unwrap();
         worker.samples_in_flight += 1;
     }
 
@@ -222,13 +226,13 @@ impl Pool {
         let old_sample_response_i = self.sample_response_i;
         loop {
             let worker = &mut self.workers[self.sample_response_i];
-            if let Ok((point, color)) = worker.sample_response_receiver.try_recv() {
+            if let Ok((point, (real, imag), color)) = worker.sample_response_receiver.try_recv() {
                 assert!(
                     worker.samples_in_flight > 0,
                     "this is an invariant of the type"
                 );
                 worker.samples_in_flight -= 1;
-                return Some((point, color));
+                return Some((point, (real, imag), color));
             }
             self.sample_response_i += 1;
             self.sample_response_i %= self.workers.len();
