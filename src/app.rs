@@ -4,7 +4,6 @@ use rayon::prelude::*;
 use crate::{
     complex::{Camera, CameraMap, Domain, Window, fixed::*},
     fractal::{self, Fractal},
-    pool::{self, Pool},
     sample,
     tree::{self, Tree},
 };
@@ -63,10 +62,8 @@ impl eframe::App for App {
         egui::CentralPanel::default()
             .frame(egui::Frame::new())
             .show(ctx, |ui| {
-                self.dts.add(
-                    ctx.input(|i| i.time),
-                    ctx.input(|i| i.stable_dt),
-                );
+                self.dts
+                    .add(ctx.input(|i| i.time), ctx.input(|i| i.stable_dt));
 
                 // toggle sampling with space
                 self.sampling ^= ctx.input(|i| i.key_pressed(Key::Space));

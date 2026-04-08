@@ -1,9 +1,6 @@
 use std::{
-    collections::VecDeque,
     mem::MaybeUninit,
     num::NonZeroU32,
-    pin::Pin,
-    process::Child,
     sync::atomic::{AtomicU32, Ordering::*},
 };
 
@@ -147,7 +144,7 @@ impl NodeId {
         debug_assert_eq!(i % 4, 0, "unaligned handle in siblings");
         unsafe {
             [
-                NodeId(NonZeroU32::new_unchecked(self.0.get() + 0)),
+                NodeId(NonZeroU32::new_unchecked(self.0.get())),
                 NodeId(NonZeroU32::new_unchecked(self.0.get() + 1)),
                 NodeId(NonZeroU32::new_unchecked(self.0.get() + 2)),
                 NodeId(NonZeroU32::new_unchecked(self.0.get() + 3)),
@@ -773,7 +770,7 @@ impl Tree {
                         // stack.extend(children.into_iter().map(|c| (c, depth + 1)));
                         stack.extend(child_id.siblings().map(|c| (c, depth + 1)).into_iter());
                     }
-                    (Some(color), None) => {
+                    (Some(_color), None) => {
                         if depth < shallowest_depth {
                             shallowest_depth = depth;
                             shallowest_leaf_id = Some(node_id);

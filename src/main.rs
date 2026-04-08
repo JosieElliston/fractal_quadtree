@@ -1,7 +1,6 @@
 mod app;
 mod complex;
 mod fractal;
-mod pool;
 mod sample;
 mod tree;
 mod typestate_sample;
@@ -16,7 +15,6 @@ use mimalloc::MiMalloc;
 
 use crate::{
     complex::{Camera, CameraMap, Domain},
-    pool::Pool,
     tree::Tree,
 };
 
