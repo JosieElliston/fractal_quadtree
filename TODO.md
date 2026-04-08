@@ -85,6 +85,10 @@
 - change children from `[Box<Node>; 4]` to `Box<[Node; 4]>`
 - go over what things are `Copy`
 - join the threads in the pool at the end so they don't crash
+- use `Weak` in worker threads
+- fancy [`link`] comments
+- try to weaken `sync::atomic::Ordering`
+- make sure i'm not using `lock`, i should probably only every be using `try_lock`
 
 ## bugs
 

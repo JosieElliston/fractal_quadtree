@@ -1,7 +1,10 @@
 use std::{
     mem::MaybeUninit,
     num::NonZeroU32,
-    sync::atomic::{AtomicU32, Ordering::*},
+    sync::{
+        Arc, Mutex, RwLock,
+        atomic::{AtomicU32, Ordering::*},
+    },
 };
 
 use eframe::egui::Color32;
@@ -99,23 +102,23 @@ impl Node {
     //     ret
     // }
 
-    /// must have that self is a leaf.
-    /// fails if the domain gets too small.
-    fn try_split(leaf_id: NodeId, alloc: &mut Alloc) -> Option<()> {
-        let child_id = {
-            let slf = alloc.get1(leaf_id);
-            assert!(slf.child_id.is_none());
-            alloc.insert4(slf.dom.split()?.map(Self::new_leaf_uncolored))
-        };
-        let slf = alloc.get1_mut(leaf_id);
-        *slf = Self {
-            dom: slf.dom,
-            leaf_distance_cache: AtomicU32::new(1),
-            color: slf.color,
-            child_id: Some(child_id),
-        };
-        Some(())
-    }
+    // /// must have that leaf_id is a leaf.
+    // /// fails if the domain gets too small.
+    // fn try_split(leaf_id: NodeId, alloc: &mut Alloc) -> Option<()> {
+    //     let child_id = {
+    //         let node = alloc.get1(leaf_id);
+    //         assert!(node.child_id.is_none());
+    //         alloc.insert4(node.dom.split()?.map(Self::new_leaf_uncolored))
+    //     };
+    //     let node = alloc.get1_mut(leaf_id);
+    //     *node = Self {
+    //         dom: node.dom,
+    //         leaf_distance_cache: AtomicU32::new(1),
+    //         color: node.color,
+    //         child_id: Some(child_id),
+    //     };
+    //     Some(())
+    // }
 
     fn set_color(&mut self, color: Color32) {
         assert!(self.color.is_none());
@@ -295,7 +298,8 @@ impl Alloc {
 #[derive(Debug)]
 pub(crate) struct Tree {
     dom: Domain,
-    alloc: Alloc,
+    // TODO: concurrent `Alloc`
+    alloc: RwLock<Alloc>,
     root: NodeId,
 }
 
@@ -408,17 +412,24 @@ impl Tree {
             dom,
             metabrot_sample(dom.mid()).color(),
         ));
-        Self { dom, alloc, root }
+        Self {
+            dom,
+            alloc: RwLock::new(alloc),
+            root,
+        }
     }
 
     pub(crate) fn node_count(&self) -> usize {
         let mut count = 0;
         let mut stack = Vec::with_capacity(64);
-        stack.push(self.alloc.get1(self.root));
+
+        let alloc = self.alloc.read().unwrap();
+        stack.push(alloc.get1(self.root));
+
         while let Some(node) = stack.pop() {
             count += 1;
             if let Some(child_id) = node.child_id {
-                let children = self.alloc.get4(child_id);
+                let children = alloc.get4(child_id);
                 stack.extend(children);
             }
         }
@@ -426,33 +437,31 @@ impl Tree {
     }
 
     pub(crate) fn mid_of_node_id(&self, node_id: NodeId) -> (Real, Imag) {
-        let node = self.alloc.get1(node_id);
+        let alloc = self.alloc.read().unwrap();
+        let node = alloc.get1(node_id);
         node.dom.mid()
     }
 
-    // fn ensure_pixel_safe(&mut self, pixel: Domain) {
-    //     if !self.window.overlaps(pixel) {
-    //         return;
-    //     }
-    //     match &self.children {
-    //         Some(children) => if !children.iter().all(|c| c.window.overlaps(pixel) {todo!()}),
-    //         None => {
-    //             if self.window.contains(pixel) {
-    //                 self.split();
-    //                 for c in self.children.as_mut().unwrap() {
-    //                     c.ensure_pixel_safe(pixel);
-    //                 }
-    //             }
-    //         }
-    //     };
-    //     todo!()
-    // }
-
-    // fn ensure_pixel_safe(&mut self, pixel: Domain) {
-    //     if self.count_overlaps(pixel) >= 4 {
-    //         return;
-    //     }
-    // }
+    /// must have that leaf_id is a leaf.
+    /// fails if the domain gets too small.
+    fn try_split(&mut self, leaf_id: NodeId) -> Option<()> {
+        // let mut alloc = self.alloc.write().unwrap();
+        let alloc = self.alloc.get_mut().expect("alloc poisoned");
+        let new_leafs = {
+            let node = alloc.get1(leaf_id);
+            assert!(node.child_id.is_none());
+            node.dom.split()?.map(Node::new_leaf_uncolored)
+        };
+        let child_id = alloc.insert4(new_leafs);
+        let node = alloc.get1_mut(leaf_id);
+        *node = Node {
+            dom: node.dom,
+            leaf_distance_cache: AtomicU32::new(1),
+            color: node.color,
+            child_id: Some(child_id),
+        };
+        Some(())
+    }
 
     // /// ensures that we have < n nodes
     // /// or maybe that each pixel contains at most n leaves
@@ -677,6 +686,7 @@ impl Tree {
     // TODO: we don't actually need the leaf to be colored to split it
     // TODO: better ordering
     #[cfg_attr(feature = "profiling", inline(never))]
+    // pub(crate) fn refine(slf: Arc<Self>, window: Window) -> Option<[NodeId; 4]> {
     pub(crate) fn refine(&mut self, window: Window) -> Option<[NodeId; 4]> {
         let start = std::time::Instant::now();
 
@@ -732,7 +742,8 @@ impl Tree {
             let mut shallowest_leaf_id = None;
             // while let Some((node, depth)) = queue.pop_front() {
             while let Some((node_id, depth)) = stack.pop() {
-                let node = tree.alloc.get1(node_id);
+                let alloc = tree.alloc.read().unwrap();
+                let node = alloc.get1(node_id);
                 // TODO: instead of doing this check on pop, do it on push
                 // this also lets us do less work in the case where the domain is contained inside the window
                 if !window.overlaps(node.dom) {
@@ -743,7 +754,7 @@ impl Tree {
                 }
                 match (node.color, node.child_id) {
                     (_, Some(child_id)) => {
-                        let children = tree.alloc.get4(child_id);
+                        let children = alloc.get4(child_id);
                         // let leaf_distance = internal.compute_leaf_distance();
                         let leaf_distance = children
                             .iter()
@@ -788,7 +799,7 @@ impl Tree {
         // let node = get_shallowest_leaf(self, window)?;
 
         // TODO: is this really correct?
-        let (shallowest_depth, node_id) = get_shallowest_leaf(self, window)?;
+        let (shallowest_depth, node_id) = get_shallowest_leaf(&self, window)?;
         // let (shallowest_depth_oracle, _) = get_shallowest_leaf_oracle(self, window)?;
         // assert_eq!(shallowest_depth, shallowest_depth_oracle,);
 
@@ -870,8 +881,12 @@ impl Tree {
         // we should try to split another node,
         // rather than failing immediately
 
-        Node::try_split(node_id, &mut self.alloc)?;
-        let node = self.alloc.get1(node_id);
+        // Node::try_split(node_id, &mut self.alloc)?;
+        // Self::try_split(slf.clone(), node_id);
+        self.try_split(node_id);
+        // let alloc = self.alloc.read().unwrap();
+        let alloc = self.alloc.get_mut().expect("alloc poisoned");
+        let node = alloc.get1(node_id);
         // // we can't just `internal.children.map(|c| c.dom.mid())` bc of rust
         // let points = self
         //     .alloc
@@ -1107,7 +1122,8 @@ impl Tree {
         //         Ok(())
         //     }
         // }
-        let node = self.alloc.get1_mut(node_id);
+        let mut alloc = self.alloc.write().unwrap();
+        let node = alloc.get1_mut(node_id);
         node.set_color(color);
 
         // if let Some(color) = node.color {
@@ -1154,13 +1170,14 @@ impl Tree {
             return UNCONTAINED_COLOR;
         }
 
-        let mut node = self.alloc.get1(self.root);
+        let alloc = self.alloc.read().unwrap();
+        let mut node = alloc.get1(self.root);
         let mut closest_sample_dist = distance(center, self.dom.mid());
         let mut closest_sample_color = node.color.expect("root must have a color");
 
-        while let Some(child_i) = node.child_i_containing(&self.alloc, center) {
+        while let Some(child_i) = node.child_i_containing(&alloc, center) {
             // TODO: this is bad
-            node = self.alloc.get1(node.child_id.unwrap().siblings()[child_i]);
+            node = alloc.get1(node.child_id.unwrap().siblings()[child_i]);
             let dist = distance(center, node.dom.mid());
             if dist < closest_sample_dist
                 && let Some(color) = node.color

@@ -1,11 +1,9 @@
 use eframe::egui::{self, Color32, Key, Pos2, Rect, Vec2};
-use rayon::prelude::*;
 
 use crate::{
     complex::{Camera, CameraMap, Domain, Window, fixed::*},
     fractal::{self, Fractal},
     sample,
-    tree::{self, Tree},
 };
 
 /// fancy dynamic radius based on zoom
@@ -296,7 +294,7 @@ impl eframe::App for App {
                     // draw the fractal
                     {
                         if self.current_fractal == 0 {
-                            self.metabrot.begin_rendering(&primary_camera_map);
+                            self.metabrot.begin_rendering(primary_camera_map.clone());
                             self.metabrot.finish_rendering(&mut self.texture);
                         } else if let Some(z0) = z0 {
                             fractal::render_mandelbrot(
@@ -590,7 +588,11 @@ impl eframe::App for App {
                                 1.0 / average_dt,
                                 self.sample_counts.values().sum::<usize>() as f32
                                     / self.sample_counts.len() as f32,
-                                self.metabrot.tree.node_count(),
+                                self.metabrot
+                                    .tree
+                                    .read()
+                                    .expect("tree poisoned")
+                                    .node_count(),
                             );
                             ui.label(egui::RichText::new(t).background_color(Color32::BLACK));
                         }
