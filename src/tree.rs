@@ -88,6 +88,7 @@ impl OptionColor {
 struct Node {
     // write_lock: bool,
     dom: Domain,
+    // lock: bool,
     _pad: [u8; 4],
     // color: Option<Color32>,
     leaf_distance_cache: u32,
@@ -131,16 +132,29 @@ impl Node {
     // invalid probably
     // fn new_internal_uncolored
 
+    // /// the point must be inside the domain.
+    // /// returns `None` if we're a leaf.
+    // // fn child_i_containing(&self, alloc: &Alloc, (real, imag): (Real, Imag)) -> Option<usize> {
+    // fn child_i_containing(self, alloc: &Alloc, (real, imag): (Real, Imag)) -> Option<usize> {
+    //     let child_id = self.child_id?;
+    //     let children = alloc.get4_cloned(child_id);
+    //     debug_assert!(self.dom.contains_point((real, imag)));
+    //     let ret = (if real < self.dom.real_mid() { 0 } else { 1 })
+    //         + (if imag >= self.dom.imag_mid() { 0 } else { 2 });
+    //     debug_assert!(children[ret].dom.contains_point((real, imag)));
+    //     Some(ret)
+    // }
+
     /// the point must be inside the domain.
     /// returns `None` if we're a leaf.
     // fn child_i_containing(&self, alloc: &Alloc, (real, imag): (Real, Imag)) -> Option<usize> {
-    fn child_i_containing(self, alloc: &Alloc, (real, imag): (Real, Imag)) -> Option<usize> {
-        let child_id = self.child_id?;
-        let children = alloc.get4_cloned(child_id);
+    fn child_i_containing(&self, (real, imag): (Real, Imag)) -> Option<usize> {
         debug_assert!(self.dom.contains_point((real, imag)));
+        if self.child_id.is_none() {
+            return None;
+        }
         let ret = (if real < self.dom.real_mid() { 0 } else { 1 })
             + (if imag >= self.dom.imag_mid() { 0 } else { 2 });
-        debug_assert!(children[ret].dom.contains_point((real, imag)));
         Some(ret)
     }
 
@@ -179,10 +193,7 @@ impl Node {
 
 pub(crate) use alloc::*;
 mod alloc {
-    use std::{
-        cell::{Cell, RefCell, UnsafeCell},
-        sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, AtomicUsize, Ordering},
-    };
+    use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
 
     use atomic::Atomic;
 
@@ -224,8 +235,9 @@ mod alloc {
     #[derive(Debug)]
     pub(super) struct Alloc {
         // alloc_lock: Mutex<()>,
-        alloc_lock: AtomicBool,
-        touch_lock: AtomicUsize,
+        // we can have our epochs be the frame, and that just works i think
+        // alloc_lock: AtomicBool,
+        // touch_lock: AtomicUsize,
         inner: AtomicPtr<AllocInner>,
     }
     impl Default for Alloc {
@@ -233,26 +245,26 @@ mod alloc {
             // const SIZE: usize = 16;
             const SIZE: usize = 1048576;
             Self {
-                alloc_lock: AtomicBool::new(false),
-                touch_lock: AtomicUsize::new(0),
+                // alloc_lock: AtomicBool::new(false),
+                // touch_lock: AtomicUsize::new(0),
                 inner: AtomicPtr::new(Box::into_raw(Box::new(AllocInner::new(SIZE)))),
             }
         }
     }
     impl Alloc {
         fn alloc<const N: usize>(&self) -> NodeId {
-            // TODO: only acquire the lock if we reallocate
-            while self
-                .alloc_lock
-                .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-                .is_err()
-            {
-                std::thread::yield_now();
-            }
-            // TODO: this is probably incorrect, maybe we need to go back to the start if this fails
-            while self.touch_lock.load(Ordering::Acquire) != 0 {
-                std::thread::yield_now();
-            }
+            // // TODO: only acquire the lock if we reallocate
+            // while self
+            //     .alloc_lock
+            //     .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            //     .is_err()
+            // {
+            //     std::thread::yield_now();
+            // }
+            // // TODO: this is probably incorrect, maybe we need to go back to the start if this fails
+            // while self.touch_lock.load(Ordering::Acquire) != 0 {
+            //     std::thread::yield_now();
+            // }
 
             // stronger ordering is implied by the locks
             let inner = self.inner.load(Ordering::Relaxed);
@@ -262,7 +274,7 @@ mod alloc {
                 None => panic!("allocation failed"),
             };
 
-            self.alloc_lock.store(false, Ordering::Release);
+            // self.alloc_lock.store(false, Ordering::Release);
             handle
         }
         // pub(super) fn alloc1(&mut self) -> NodeId {
@@ -282,10 +294,12 @@ mod alloc {
         // }
 
         fn init<const N: usize>(&self, handle: NodeId, nodes: [Node; N]) {
-            while self.alloc_lock.load(Ordering::Acquire) {
-                std::thread::yield_now();
-            }
-            self.touch_lock.fetch_add(1, Ordering::Acquire);
+            // while self.alloc_lock.load(Ordering::Acquire) {
+            //     std::thread::yield_now();
+            // }
+            // self.touch_lock.fetch_add(1, Ordering::Acquire);
+
+            // std::sync::RwLock::read(&self)
 
             let inner = self.inner.load(Ordering::Relaxed);
             // TODO: this is super unsafe
@@ -293,19 +307,19 @@ mod alloc {
             // todo!("AAAAAAAAAA");
             unsafe { &*inner }.init::<N>(handle, nodes);
 
-            self.touch_lock.fetch_sub(1, Ordering::Release);
+            // self.touch_lock.fetch_sub(1, Ordering::Release);
         }
 
         fn set<const N: usize>(&self, handle: NodeId, nodes: [Node; N]) {
-            while self.alloc_lock.load(Ordering::Acquire) {
-                std::thread::yield_now();
-            }
-            self.touch_lock.fetch_add(1, Ordering::Acquire);
+            // while self.alloc_lock.load(Ordering::Acquire) {
+            //     std::thread::yield_now();
+            // }
+            // self.touch_lock.fetch_add(1, Ordering::Acquire);
 
             let inner = self.inner.load(Ordering::Relaxed);
             unsafe { &*inner }.set::<N>(handle, nodes);
 
-            self.touch_lock.fetch_sub(1, Ordering::Release);
+            // self.touch_lock.fetch_sub(1, Ordering::Release);
         }
         pub(super) fn set1(&mut self, handle: NodeId, node: Node) {
             self.set::<1>(handle, [node]);
@@ -315,15 +329,15 @@ mod alloc {
         }
 
         fn get_cloned<const N: usize>(&self, handle: NodeId) -> [Node; N] {
-            while self.alloc_lock.load(Ordering::Acquire) {
-                std::thread::yield_now();
-            }
-            self.touch_lock.fetch_add(1, Ordering::Acquire);
+            // while self.alloc_lock.load(Ordering::Acquire) {
+            //     std::thread::yield_now();
+            // }
+            // self.touch_lock.fetch_add(1, Ordering::Acquire);
 
             let inner = self.inner.load(Ordering::Relaxed);
             let nodes = unsafe { &mut *inner }.get_cloned::<N>(handle);
 
-            self.touch_lock.fetch_sub(1, Ordering::Release);
+            // self.touch_lock.fetch_sub(1, Ordering::Release);
             nodes
         }
         pub(crate) fn get1_cloned(&self, handle: NodeId) -> Node {
@@ -347,15 +361,15 @@ mod alloc {
         }
 
         pub(super) fn update(&self, handle: NodeId, f: impl FnOnce(&Atomic<Node>)) {
-            while self.alloc_lock.load(Ordering::Acquire) {
-                std::thread::yield_now();
-            }
-            self.touch_lock.fetch_add(1, Ordering::Acquire);
+            // while self.alloc_lock.load(Ordering::Acquire) {
+            //     std::thread::yield_now();
+            // }
+            // self.touch_lock.fetch_add(1, Ordering::Acquire);
 
             let inner = self.inner.load(Ordering::Relaxed);
             unsafe { &mut *inner }.update(handle, f);
 
-            self.touch_lock.fetch_sub(1, Ordering::Release);
+            // self.touch_lock.fetch_sub(1, Ordering::Release);
         }
 
         // pub(super) fn get1_mut(&mut self, handle: NodeId) -> &mut Node {
@@ -1616,7 +1630,7 @@ impl Tree {
 
         loop {
             let node = alloc.get1_cloned(node_id);
-            let Some(child_i) = node.child_i_containing(&alloc, center) else {
+            let Some(child_i) = node.child_i_containing(center) else {
                 break;
             };
 
