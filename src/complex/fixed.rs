@@ -1,7 +1,8 @@
 use std::{fmt, ops};
 
 /// a fixed point number in [-DOMAIN_RADIUS, DOMAIN_RADIUS)
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[repr(transparent)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, bytemuck::NoUninit)]
 pub(crate) struct Fixed(i64);
 pub(crate) type Real = Fixed;
 pub(crate) type Imag = Fixed;

@@ -3,8 +3,8 @@ use super::fixed::*;
 /// must have that rad > 0
 /// this is not any square, a `Domain` comes from splitting the default domain into four children
 // TODO: possibly we can have rad >= 0, but whatever
-#[derive(Debug, Clone, Copy, PartialEq)]
-// #[repr(C)]
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, bytemuck::NoUninit)]
 pub(crate) struct Domain {
     real_mid: Real,
     imag_mid: Imag,
