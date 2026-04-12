@@ -1,7 +1,4 @@
-use std::{
-    num::NonZeroU32,
-    sync::{RwLock, atomic::Ordering},
-};
+use std::{num::NonZeroU32, sync::atomic::Ordering};
 
 use eframe::egui::Color32;
 
@@ -1249,8 +1246,7 @@ mod new_alloc {
 #[derive(Debug)]
 pub(crate) struct Tree {
     dom: Domain,
-    // TODO: concurrent `Alloc`
-    alloc: RwLock<Alloc>,
+    alloc: Alloc,
     root: NodeHandle,
 }
 
@@ -1375,23 +1371,19 @@ impl Tree {
             .unwrap();
         });
         let root = alloc.demote(root);
-        Self {
-            dom,
-            alloc: RwLock::new(alloc),
-            root,
-        }
+        Self { dom, alloc, root }
     }
 
     pub(crate) fn node_count(&self) -> usize {
         let mut count = 0;
         let mut stack = Vec::with_capacity(64);
 
-        let alloc = self.alloc.read().unwrap();
+        // let alloc = self.alloc.read().unwrap();
         stack.push(self.root);
 
         while let Some(handle) = stack.pop() {
             count += 1;
-            if let Some(child_id) = alloc.get_left_child(handle) {
+            if let Some(child_id) = self.alloc.get_left_child(handle) {
                 stack.extend(child_id.siblings());
             }
         }
@@ -1399,15 +1391,15 @@ impl Tree {
     }
 
     pub(crate) fn mid_of_node_id(&self, handle: NodeHandle) -> (Real, Imag) {
-        let alloc = self.alloc.read().unwrap();
-        alloc.get_dom(handle).mid()
+        // let alloc = self.alloc.read().unwrap();
+        self.alloc.get_dom(handle).mid()
     }
 
     /// must have that leaf_id is a leaf.
     /// fails if the domain gets too small.
     fn try_split(&mut self, leaf_handle: NodeHandle) -> Option<()> {
         // let mut alloc = self.alloc.write().unwrap();
-        let alloc = self.alloc.get_mut().expect("alloc poisoned");
+        // let alloc = self.alloc.get_mut().expect("alloc poisoned");
         // let new_leafs = {
         //     let node = alloc.get1_cloned(leaf_id);
         //     assert!(node.child_id.is_none());
@@ -1426,13 +1418,13 @@ impl Tree {
         //     .unwrap();
         // });
         let doms = {
-            let dom = alloc.get_dom(leaf_handle);
-            debug_assert!(alloc.get_left_child(leaf_handle).is_none());
+            let dom = self.alloc.get_dom(leaf_handle);
+            debug_assert!(self.alloc.get_left_child(leaf_handle).is_none());
             dom.split()?
         };
-        let child_handle = alloc.insert_leaf_uncolored4(doms);
-        let leaf_handle = alloc.promote(leaf_handle);
-        alloc.update_with(leaf_handle, |node| {
+        let child_handle = self.alloc.insert_leaf_uncolored4(doms);
+        let leaf_handle = self.alloc.promote(leaf_handle);
+        self.alloc.update_with(leaf_handle, |node| {
             node.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |node| {
                 debug_assert!(node.left_child.is_none());
                 debug_assert_eq!(node.leaf_distance_cache, 0);
@@ -1443,7 +1435,7 @@ impl Tree {
                 })
             })
         });
-        alloc.demote(leaf_handle);
+        self.alloc.demote(leaf_handle);
         Some(())
     }
 
@@ -1726,17 +1718,17 @@ impl Tree {
             let mut shallowest_leaf_id = None;
             // while let Some((node, depth)) = queue.pop_front() {
             while let Some((node_id, depth)) = stack.pop() {
-                let alloc = tree.alloc.read().unwrap();
+                // let alloc = tree.alloc.read().unwrap();
                 // let node = alloc.get1_cloned(node_id);
                 // TODO: instead of doing this check on pop, do it on push
                 // this also lets us do less work in the case where the domain is contained inside the window
-                if !window.overlaps(alloc.get_dom(node_id)) {
+                if !window.overlaps(tree.alloc.get_dom(node_id)) {
                     continue;
                 }
                 if depth >= shallowest_depth {
                     continue;
                 }
-                match (alloc.get_color(node_id), alloc.get_left_child(node_id)) {
+                match (tree.alloc.get_color(node_id), tree.alloc.get_left_child(node_id)) {
                     (_, Some(child_id)) => {
                         // let children = alloc.get4_cloned(child_id);
                         // let leaf_distance = internal.compute_leaf_distance();
@@ -1748,14 +1740,14 @@ impl Tree {
                         //     + 1;
                         let leaf_distance = child_id
                             .siblings()
-                            .map(|child_handle| alloc.get_leaf_distance_cache(child_handle))
+                            .map(|child_handle| tree.alloc.get_leaf_distance_cache(child_handle))
                             .iter()
                             .min()
                             .unwrap()
                             + 1;
-                        if leaf_distance < alloc.get_leaf_distance_cache(node_id) {
-                            let node_id = alloc.promote(node_id);
-                            alloc.update_with(node_id, |node| {
+                        if leaf_distance < tree.alloc.get_leaf_distance_cache(node_id) {
+                            let node_id = tree.alloc.promote(node_id);
+                            tree.alloc.update_with(node_id, |node| {
                                 let _ =
                                     node.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |node| {
                                         if leaf_distance < node.leaf_distance_cache {
@@ -1768,7 +1760,7 @@ impl Tree {
                                         }
                                     });
                             });
-                            alloc.demote(node_id);
+                            tree.alloc.demote(node_id);
                             // node.leaf_distance_cache = leaf_distance;
                             // todo!("this is incorrect now");
                         }
@@ -1891,7 +1883,7 @@ impl Tree {
         // Self::try_split(slf.clone(), node_id);
         self.try_split(node_id);
         // let alloc = self.alloc.read().unwrap();
-        let alloc = self.alloc.get_mut().expect("alloc poisoned");
+        // let alloc = self.alloc.get_mut().expect("alloc poisoned");
         // let node = alloc.get1_cloned(node_id);
         // // we can't just `internal.children.map(|c| c.dom.mid())` bc of rust
         // let points = self
@@ -1909,7 +1901,7 @@ impl Tree {
             COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
         Some(
-            alloc
+            self.alloc
                 .get_left_child(node_id)
                 .expect("we just split it")
                 .siblings(),
@@ -2134,9 +2126,9 @@ impl Tree {
         //     }
         // }
         // let mut alloc = self.alloc.write().unwrap();
-        let alloc = self.alloc.read().unwrap();
-        let node_id = alloc.promote(node_id);
-        alloc.update_with(node_id, |node| {
+        // let alloc = self.alloc.read().unwrap();
+        let node_id = self.alloc.promote(node_id);
+        self.alloc.update_with(node_id, |node| {
             node.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |node| {
                 assert!(node.color.is_none());
                 Some(Node {
@@ -2146,7 +2138,7 @@ impl Tree {
             })
             .unwrap();
         });
-        alloc.demote(node_id);
+        self.alloc.demote(node_id);
         // let node = alloc.get1_mut(node_id);
         // node.set_color(color);
 
@@ -2194,21 +2186,21 @@ impl Tree {
             return UNCONTAINED_COLOR;
         }
 
-        let alloc = self.alloc.read().unwrap();
+        // let alloc = self.alloc.read().unwrap();
         let mut node_id = self.root;
         let mut closest_sample_dist = distance(center, self.dom.mid());
-        let mut closest_sample_color = alloc.get_color(node_id).expect("root must have a color");
+        let mut closest_sample_color = self.alloc.get_color(node_id).expect("root must have a color");
 
         loop {
-            // let node = alloc.get1_cloned(node_id);
-            let Some(left_child) = alloc.get_left_child(node_id) else {
+            // let node = self.alloc.get1_cloned(node_id);
+            let Some(left_child) = self.alloc.get_left_child(node_id) else {
                 break;
             };
-            let child_offset = alloc.get_dom(node_id).child_offset_containing(center);
+            let child_offset = self.alloc.get_dom(node_id).child_offset_containing(center);
             node_id = left_child.siblings()[child_offset];
 
-            let dist = distance(center, alloc.get_dom(node_id).mid());
-            let color = alloc.get_color(node_id);
+            let dist = distance(center, self.alloc.get_dom(node_id).mid());
+            let color = self.alloc.get_color(node_id);
             if dist < closest_sample_dist && color.is_some() {
                 closest_sample_dist = dist;
                 closest_sample_color = color.unwrap();
