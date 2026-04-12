@@ -3,6 +3,14 @@
 ## unorganized
 
 - organize `TODO.md`
+- search for concurrent/parallel dynamic array/resizable ... instead of arena/linear allocator
+- my epoch idea doesn't work bc we might be writing to the old array. actually we can only write after we've called a method on arena so maybe it's workable
+- make arena align(16), ie cache_size / 4, bc there's four leaves?
+- try to use SOA for cache reasons and partial mut borrowing
+- can we have non exclusive mut NodeHandles you can specialize into at most one mut ColorHandle and (not or) multiple ColorHandles?
+- so to free stuff, a thread collects all the mut handles. or we can permit multiple mut handles at once, just that the freeing thread needs to prevent issuing new mut handles.
+- do raii for the handles?
+- remove RwLock around Alloc
 
 ## optimization
 
@@ -89,6 +97,8 @@
 - fancy [`link`] comments
 - try to weaken `sync::atomic::Ordering`
 - make sure i'm not using `lock`, i should probably only every be using `try_lock`
+- rename node/leaf_id -> node_handle / handle
+- rename child_id -> left_child / child_handle
 
 ## bugs
 

@@ -1,20 +1,19 @@
 use core::panic;
 use std::{
-    cell::RefCell,
     sync::{
-        Arc, Mutex, PoisonError, RwLock, TryLockError,
+        Arc, Mutex, RwLock, TryLockError,
         atomic::{AtomicBool, Ordering},
         mpsc,
     },
     thread,
 };
 
-use eframe::egui::{self, Atom, Color32};
+use eframe::egui::{self, Color32};
 
 use crate::{
-    complex::{Camera, CameraMap, Domain, Window, fixed::*},
+    complex::{CameraMap, Domain, Window, fixed::*},
     sample,
-    tree::{NodeId, Tree},
+    tree::{NodeHandle, Tree},
 };
 
 // type SampleFn = dyn Fn((Real, Imag)) -> Color32;
@@ -46,7 +45,6 @@ pub(crate) struct Fractal {
     shared_texture: SharedTexture,
     workers: Vec<WorkerHandle>,
     sample_response_i: usize,
-    render_response_i: usize,
 }
 impl Fractal {
     pub(crate) fn new_metabrot() -> Self {
@@ -101,7 +99,6 @@ impl Fractal {
             shared_texture,
             workers,
             sample_response_i: 0,
-            render_response_i: 0,
         }
     }
     // fn new_metabrot(pool: Pool) -> Self {
@@ -190,7 +187,7 @@ impl Fractal {
         #[cfg_attr(feature = "profiling", inline(never))]
         fn request_sample(
             workers: &mut [WorkerHandle],
-            node_id: NodeId,
+            node_id: NodeHandle,
             (real, imag): (Real, Imag),
         ) {
             // TODO: or maybe just do round robin
@@ -549,8 +546,8 @@ mod rayon_fractal {
 
 // will need this later
 // type CameraUpdate = CameraMap;
-type SampleRequest = (NodeId, (Real, Imag));
-type SampleResponse = (NodeId, (Real, Imag), Color32);
+type SampleRequest = (NodeHandle, (Real, Imag));
+type SampleResponse = (NodeHandle, (Real, Imag), Color32);
 /// usize is the row
 type RenderRequest = (Arc<Tree>, CameraMap, usize);
 // type RenderRequest = (Arc<RwLock<Tree>>, CameraMap, usize);

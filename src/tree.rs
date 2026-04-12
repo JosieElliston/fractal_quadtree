@@ -94,7 +94,7 @@ struct Node {
     leaf_distance_cache: u32,
     color: OptionColor,
     /// leftmost child id
-    child_id: Option<NodeId>,
+    left_child: Option<NodeHandle>,
 }
 impl Node {
     fn uninit() -> Self {
@@ -103,7 +103,7 @@ impl Node {
             _pad: [0; 4],
             leaf_distance_cache: 0,
             color: OptionColor::NONE,
-            child_id: None,
+            left_child: None,
         }
     }
 
@@ -113,7 +113,7 @@ impl Node {
             _pad: [0; 4],
             leaf_distance_cache: 0,
             color: OptionColor::NONE,
-            child_id: None,
+            left_child: None,
         }
     }
 
@@ -123,7 +123,7 @@ impl Node {
             _pad: [0; 4],
             leaf_distance_cache: 0,
             color: OptionColor::new_some(color),
-            child_id: None,
+            left_child: None,
         }
     }
 
@@ -150,7 +150,7 @@ impl Node {
     // fn child_i_containing(&self, alloc: &Alloc, (real, imag): (Real, Imag)) -> Option<usize> {
     fn child_i_containing(&self, (real, imag): (Real, Imag)) -> Option<usize> {
         debug_assert!(self.dom.contains_point((real, imag)));
-        if self.child_id.is_none() {
+        if self.left_child.is_none() {
             return None;
         }
         let ret = (if real < self.dom.real_mid() { 0 } else { 1 })
@@ -191,9 +191,526 @@ impl Node {
     // }
 }
 
-pub(crate) use alloc::*;
-mod alloc {
-    use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
+// pub(crate) use alloc::*;
+// mod alloc {
+//     use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
+
+//     use atomic::Atomic;
+
+//     use super::*;
+
+//     #[repr(transparent)]
+//     #[derive(Debug, Clone, Copy, PartialEq, Eq, bytemuck::NoUninit)]
+//     pub(crate) struct NodeId(NonZeroU32);
+//     unsafe impl bytemuck::ZeroableInOption for NodeId {}
+//     unsafe impl bytemuck::PodInOption for NodeId {}
+//     impl NodeId {
+//         // fn new(i: usize) -> Self {
+//         //     Self(NonZeroU32::new(i as u32).unwrap())
+//         // }
+
+//         // unsafe fn new_unchecked(i: usize) -> Self {
+//         //     unsafe { Self(NonZeroU32::new_unchecked(i as u32)) }
+//         // }
+
+//         fn to_index(self) -> usize {
+//             self.0.get() as usize
+//         }
+
+//         /// ret[0] == self
+//         pub(super) fn siblings(self) -> [NodeId; 4] {
+//             let i = self.to_index();
+//             debug_assert_eq!(i % 4, 0, "unaligned handle in siblings");
+//             unsafe {
+//                 [
+//                     NodeId(NonZeroU32::new_unchecked(self.0.get())),
+//                     NodeId(NonZeroU32::new_unchecked(self.0.get() + 1)),
+//                     NodeId(NonZeroU32::new_unchecked(self.0.get() + 2)),
+//                     NodeId(NonZeroU32::new_unchecked(self.0.get() + 3)),
+//                 ]
+//             }
+//         }
+//     }
+
+//     #[derive(Debug)]
+//     pub(super) struct Alloc {
+//         // alloc_lock: Mutex<()>,
+//         // we can have our epochs be the frame, and that just works i think
+//         // alloc_lock: AtomicBool,
+//         // touch_lock: AtomicUsize,
+//         inner: AtomicPtr<AllocInner>,
+//     }
+//     impl Default for Alloc {
+//         fn default() -> Self {
+//             // const SIZE: usize = 16;
+//             const SIZE: usize = 1048576;
+//             Self {
+//                 // alloc_lock: AtomicBool::new(false),
+//                 // touch_lock: AtomicUsize::new(0),
+//                 inner: AtomicPtr::new(Box::into_raw(Box::new(AllocInner::new(SIZE)))),
+//             }
+//         }
+//     }
+//     impl Alloc {
+//         fn alloc<const N: usize>(&self) -> NodeId {
+//             // // TODO: only acquire the lock if we reallocate
+//             // while self
+//             //     .alloc_lock
+//             //     .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+//             //     .is_err()
+//             // {
+//             //     std::thread::yield_now();
+//             // }
+//             // // TODO: this is probably incorrect, maybe we need to go back to the start if this fails
+//             // while self.touch_lock.load(Ordering::Acquire) != 0 {
+//             //     std::thread::yield_now();
+//             // }
+
+//             // stronger ordering is implied by the locks
+//             let inner = self.inner.load(Ordering::Relaxed);
+//             let handle = match unsafe { &mut *inner }.try_alloc::<N>() {
+//                 Some(id) => id,
+//                 // if we only give out clones, it might be fine to just free the memory and not deal with epochs
+//                 None => panic!("allocation failed"),
+//             };
+
+//             // self.alloc_lock.store(false, Ordering::Release);
+//             handle
+//         }
+//         // pub(super) fn alloc1(&mut self) -> NodeId {
+//         //     self.alloc::<1>()
+//         // }
+//         // pub(super) fn alloc4(&mut self) -> NodeId {
+//         //     self.alloc::<4>()
+//         // }
+
+//         // fn set4(&mut self, handle: AllocHandle, nodes: [Node; 4]) {
+//         //     let i = handle.to_index();
+//         //     debug_assert_eq!(i % 4, 0);
+//         //     for (offset, node) in nodes.into_iter().enumerate() {
+//         //         self.mem[i + offset] = MaybeUninit::new(node);
+//         //         self.is_init[i + offset] = true;
+//         //     }
+//         // }
+
+//         fn init<const N: usize>(&self, handle: NodeId, nodes: [Node; N]) {
+//             // while self.alloc_lock.load(Ordering::Acquire) {
+//             //     std::thread::yield_now();
+//             // }
+//             // self.touch_lock.fetch_add(1, Ordering::Acquire);
+
+//             // std::sync::RwLock::read(&self)
+
+//             let inner = self.inner.load(Ordering::Relaxed);
+//             // TODO: this is super unsafe
+//             // the inner stuff needs to be atomic
+//             // todo!("AAAAAAAAAA");
+//             unsafe { &*inner }.init::<N>(handle, nodes);
+
+//             // self.touch_lock.fetch_sub(1, Ordering::Release);
+//         }
+
+//         fn set<const N: usize>(&self, handle: NodeId, nodes: [Node; N]) {
+//             // while self.alloc_lock.load(Ordering::Acquire) {
+//             //     std::thread::yield_now();
+//             // }
+//             // self.touch_lock.fetch_add(1, Ordering::Acquire);
+
+//             let inner = self.inner.load(Ordering::Relaxed);
+//             unsafe { &*inner }.set::<N>(handle, nodes);
+
+//             // self.touch_lock.fetch_sub(1, Ordering::Release);
+//         }
+//         pub(super) fn set1(&mut self, handle: NodeId, node: Node) {
+//             self.set::<1>(handle, [node]);
+//         }
+//         pub(super) fn set4(&mut self, handle: NodeId, nodes: [Node; 4]) {
+//             self.set::<4>(handle, nodes);
+//         }
+
+//         fn get_cloned<const N: usize>(&self, handle: NodeId) -> [Node; N] {
+//             // while self.alloc_lock.load(Ordering::Acquire) {
+//             //     std::thread::yield_now();
+//             // }
+//             // self.touch_lock.fetch_add(1, Ordering::Acquire);
+
+//             let inner = self.inner.load(Ordering::Relaxed);
+//             let nodes = unsafe { &mut *inner }.get_cloned::<N>(handle);
+
+//             // self.touch_lock.fetch_sub(1, Ordering::Release);
+//             nodes
+//         }
+//         pub(crate) fn get1_cloned(&self, handle: NodeId) -> Node {
+//             let [node] = self.get_cloned::<1>(handle);
+//             node
+//         }
+//         pub(crate) fn get4_cloned(&self, handle: NodeId) -> [Node; 4] {
+//             self.get_cloned::<4>(handle)
+//         }
+
+//         fn insert<const N: usize>(&self, nodes: [Node; N]) -> NodeId {
+//             let handle = self.alloc::<N>();
+//             self.init::<N>(handle, nodes);
+//             handle
+//         }
+//         pub(super) fn insert1(&self, node: Node) -> NodeId {
+//             self.insert::<1>([node])
+//         }
+//         pub(super) fn insert4(&self, nodes: [Node; 4]) -> NodeId {
+//             self.insert::<4>(nodes)
+//         }
+
+//         pub(super) fn update(&self, handle: NodeId, f: impl FnOnce(&Atomic<Node>)) {
+//             // while self.alloc_lock.load(Ordering::Acquire) {
+//             //     std::thread::yield_now();
+//             // }
+//             // self.touch_lock.fetch_add(1, Ordering::Acquire);
+
+//             let inner = self.inner.load(Ordering::Relaxed);
+//             unsafe { &mut *inner }.update(handle, f);
+
+//             // self.touch_lock.fetch_sub(1, Ordering::Release);
+//         }
+
+//         // pub(super) fn get1_mut(&mut self, handle: NodeId) -> &mut Node {
+//         //     let i = handle.to_index();
+//         //     // debug_assert_eq!(
+//         //     //     i, 3,
+//         //     //     "we should probably only use get1_mut for getting the root"
+//         //     // );
+//         //     debug_assert!(self.is_init[i], "read uninitialized memory at index {}", i);
+//         //     unsafe { self.mem[i].assume_init_mut() }
+//         // }
+
+//         // pub(super) fn get1_uninit_and<F>(&self, handle: NodeId, f: F) -> (&Node, usize)
+//         // where
+//         //     F: FnMut(&mut Node),
+//         // {
+//         // }
+//         // pub(super) fn get1_and<F>(&self, handle: NodeId, f: F) -> (&Node, usize)
+//         // where
+//         //     F: FnMut(&mut Node),
+//         // { }
+
+//         // /// used for getting the four children
+//         // pub(super) fn get4(&self, handle: NodeId) -> [&Node; 4] {
+//         //     let i = handle.to_index();
+//         //     debug_assert!(i >= 4, "probably bad");
+//         //     debug_assert_eq!(i % 4, 0, "unaligned read, probably bad");
+//         //     for offset in 0..4 {
+//         //         debug_assert!(
+//         //             self.is_init[i + offset],
+//         //             "read uninitialized memory at index {}",
+//         //             i + offset
+//         //         );
+//         //     }
+//         //     (self.mem[i..i + 4])
+//         //         .as_array::<4>()
+//         //         .unwrap()
+//         //         .each_ref()
+//         //         .map(|m| unsafe { m.assume_init_ref() })
+//         // }
+
+//         // pub(super) fn get4_mut(&mut self, handle: NodeId) -> [&mut Node; 4] {
+//         //     let i = handle.to_index();
+//         //     debug_assert!(i >= 4, "probably bad");
+//         //     debug_assert_eq!(i % 4, 0, "unaligned read, probably bad");
+//         //     for offset in 0..4 {
+//         //         debug_assert!(
+//         //             self.is_init[i + offset],
+//         //             "read uninitialized memory at index {}",
+//         //             i + offset
+//         //         );
+//         //     }
+//         //     (self.mem[i..i + 4])
+//         //         .as_mut_array::<4>()
+//         //         .unwrap()
+//         //         .each_mut()
+//         //         .map(|m| unsafe { m.assume_init_mut() })
+//         // }
+//     }
+
+//     // struct AtomicFixed(AtomicU32);
+//     // type AtomicReal = AtomicFixed;
+//     // type AtomicImag = AtomicFixed;
+
+//     // struct AtomicDomain {
+//     //     real_mid: AtomicReal,
+//     //     imag_mid: AtomicImag,
+//     //     rad: AtomicFixed,
+//     // }
+
+//     // struct AtomicOptionColor {
+//     //     r: AtomicU8,
+//     //     g: AtomicU8,
+//     //     b: AtomicU8,
+//     //     a: AtomicU8,
+//     // }
+
+//     // struct AtomicOptionNodeId(AtomicU32);
+
+//     // struct AtomicNode {
+//     //     dom: AtomicDomain,
+//     //     leaf_distance_cache: AtomicU32,
+//     //     color: AtomicOptionColor,
+//     //     /// leftmost child id
+//     //     child_id: AtomicOptionNodeId,
+//     // }
+
+//     // #[derive(Debug)]
+//     struct AllocInner {
+//         len: AtomicUsize,
+//         /// Option for maybe uninit runtime checking
+//         /// TODO: remove
+//         /// mem[0] is uninit/None so we can do `NonZeroU32` handles
+//         // mem: Box<[MaybeUninit<Node>]>,
+//         // mem: Box<[MaybeUninit<Atomic<Node>>]>,
+//         mem: Box<[Atomic<Node>]>,
+//         debug_is_init: Box<[AtomicBool]>,
+//     }
+//     // impl Default for AllocInner {
+//     //     fn default() -> Self {
+//     //         Self {
+//     //             len: AtomicUsize::new(3),
+//     //             mem: vec![
+//     //                 MaybeUninit::uninit(),
+//     //                 MaybeUninit::uninit(),
+//     //                 MaybeUninit::uninit(),
+//     //             ]
+//     //             .into_boxed_slice(),
+//     //             debug_is_init: vec![false; 3].into_boxed_slice(),
+//     //         }
+//     //     }
+//     // }
+//     impl AllocInner {
+//         fn new(size: usize) -> Self {
+//             assert!(size >= 4);
+//             // let mut mem = Vec::with_capacity(size);
+//             // mem.resize_with(size, MaybeUninit::uninit);
+//             let mut mem = Vec::with_capacity(size);
+//             mem.resize_with(size, || Atomic::new(Node::uninit()));
+//             let mut debug_is_init = Vec::with_capacity(size);
+//             debug_is_init.resize_with(size, || AtomicBool::new(false));
+//             Self {
+//                 len: AtomicUsize::new(3),
+//                 mem: mem.into_boxed_slice(),
+//                 debug_is_init: debug_is_init.into_boxed_slice(),
+//             }
+//         }
+
+//         fn try_alloc<const N: usize>(&self) -> Option<NodeId> {
+//             assert!(N == 1 || N == 4);
+//             let i = self.len.fetch_add(N, Ordering::SeqCst);
+//             if i + N > self.mem.len() {
+//                 return None;
+//             }
+//             let handle = NodeId(NonZeroU32::new(i as u32).unwrap());
+//             if N == 1 {
+//                 debug_assert_eq!(i, 3);
+//             }
+//             if N == 4 {
+//                 debug_assert_eq!(i % 4, 0);
+//             }
+//             for offset in 0..N {
+//                 debug_assert!(
+//                     !self.debug_is_init[i + offset].load(Ordering::SeqCst),
+//                     "allocate at already initialized memory at index {}",
+//                     i + offset
+//                 );
+//             }
+//             Some(handle)
+//         }
+
+//         // fn try_alloc4(&mut self) -> Option<NodeId> {
+//         //     let handle = NonZeroU32::new(self.mem.len() as u32).unwrap();
+//         //     debug_assert_eq!(handle.get() % 4, 0);
+//         //     self.mem.extend([
+//         //         MaybeUninit::uninit(),
+//         //         MaybeUninit::uninit(),
+//         //         MaybeUninit::uninit(),
+//         //         MaybeUninit::uninit(),
+//         //     ]);
+//         //     self.debug_is_init.extend([false; 4]);
+//         //     Some(NodeId(handle))
+//         // }
+
+//         // fn set4(&mut self, handle: AllocHandle, nodes: [Node; 4]) {
+//         //     let i = handle.to_index();
+//         //     debug_assert_eq!(i % 4, 0);
+//         //     for (offset, node) in nodes.into_iter().enumerate() {
+//         //         self.mem[i + offset] = MaybeUninit::new(node);
+//         //         self.is_init[i + offset] = true;
+//         //     }
+//         // }
+
+//         /// the memory must be uninitialized.
+//         /// /// see also [`AllocInner::set`].
+//         fn init<const N: usize>(&self, handle: NodeId, nodes: [Node; N]) {
+//             assert!(N == 1 || N == 4);
+//             let i = handle.to_index();
+//             if N == 1 {
+//                 debug_assert_eq!(i, 3);
+//             }
+//             if N == 4 {
+//                 debug_assert_eq!(i % 4, 0);
+//             }
+//             for (offset, node) in nodes.into_iter().enumerate() {
+//                 debug_assert!(
+//                     !self.debug_is_init[i + offset].load(Ordering::SeqCst),
+//                     "insert at already initialized memory at index {}",
+//                     i + offset
+//                 );
+//                 self.mem[i + offset].store(node, Ordering::SeqCst);
+//                 self.debug_is_init[i + offset].store(true, Ordering::SeqCst);
+//             }
+//         }
+
+//         /// the memory must already be initialized.
+//         /// see also [`AllocInner::init`].
+//         fn set<const N: usize>(&self, handle: NodeId, nodes: [Node; N]) {
+//             assert!(N == 1 || N == 4);
+//             let i = handle.to_index();
+//             if N == 1 {
+//                 debug_assert_eq!(i, 3);
+//             }
+//             if N == 4 {
+//                 debug_assert_eq!(i % 4, 0);
+//             }
+//             for (offset, node) in nodes.into_iter().enumerate() {
+//                 debug_assert!(
+//                     self.debug_is_init[i + offset].load(Ordering::SeqCst),
+//                     "insert at already initialized memory at index {}",
+//                     i + offset
+//                 );
+//                 self.mem[i + offset].store(node, Ordering::SeqCst);
+//             }
+//         }
+
+//         // fn try_insert1(&mut self, node: Node) -> Option<NodeId> {
+//         //     let handle = self.try_alloc1()?;
+//         //     let i = handle.to_index();
+//         //     debug_assert!(
+//         //         !self.debug_is_init[i],
+//         //         "insert at already initialized memory at index {}",
+//         //         i
+//         //     );
+//         //     self.mem[i] = MaybeUninit::new(node);
+//         //     self.debug_is_init[i] = true;
+//         //     Some(handle)
+//         // }
+
+//         // fn try_insert4(&mut self, nodes: [Node; 4]) -> Option<NodeId> {
+//         //     let handle = self.try_alloc4()?;
+//         //     let i = handle.to_index();
+//         //     for (offset, node) in nodes.into_iter().enumerate() {
+//         //         debug_assert!(
+//         //             !self.debug_is_init[i + offset],
+//         //             "insert at already initialized memory at index {}",
+//         //             i + offset
+//         //         );
+//         //         self.mem[i + offset] = MaybeUninit::new(node);
+//         //         self.debug_is_init[i + offset] = true;
+//         //     }
+//         //     Some(handle)
+//         // }
+
+//         fn get_cloned<const N: usize>(&self, handle: NodeId) -> [Node; N] {
+//             assert!(N == 1 || N == 4);
+//             let i = handle.to_index();
+//             if N == 4 {
+//                 debug_assert_eq!(i % 4, 0);
+//             }
+//             for offset in 0..N {
+//                 debug_assert!(
+//                     self.debug_is_init[i + offset].load(Ordering::SeqCst),
+//                     "read uninitialized memory at index {}",
+//                     i + offset
+//                 );
+//             }
+//             (self.mem[i..i + N])
+//                 .as_array::<N>()
+//                 .unwrap()
+//                 .each_ref()
+//                 .map(|m| m.load(Ordering::SeqCst))
+//             // (self.mem[i..i + N])
+//             //     .as_array::<N>()
+//             //     .unwrap()
+//             //     .each_ref()
+//             //     .map(|m| unsafe { m.assume_init_ref() }.clone())
+//         }
+
+//         // pub(crate) fn get1(&self, handle: NodeId) -> &Node {}
+
+//         // fn get1_mut(&mut self, handle: NodeId) -> &mut Node {
+//         //     let i = handle.to_index();
+//         //     // debug_assert_eq!(
+//         //     //     i, 3,
+//         //     //     "we should probably only use get1_mut for getting the root"
+//         //     // );
+//         //     debug_assert!(
+//         //         self.debug_is_init[i],
+//         //         "read uninitialized memory at index {}",
+//         //         i
+//         //     );
+//         //     unsafe { self.mem[i].assume_init_mut() }
+//         // }
+
+//         // /// used for getting the four children
+//         // fn get4(&self, handle: NodeId) -> [&Node; 4] {
+//         //     let i = handle.to_index();
+//         //     debug_assert!(i >= 4, "probably bad");
+//         //     debug_assert_eq!(i % 4, 0, "unaligned read, probably bad");
+//         //     for offset in 0..4 {
+//         //         debug_assert!(
+//         //             self.debug_is_init[i + offset],
+//         //             "read uninitialized memory at index {}",
+//         //             i + offset
+//         //         );
+//         //     }
+//         //     (self.mem[i..i + 4])
+//         //         .as_array::<4>()
+//         //         .unwrap()
+//         //         .each_ref()
+//         //         .map(|m| unsafe { m.assume_init_ref() })
+//         // }
+
+//         // fn get4_mut(&mut self, handle: NodeId) -> [&mut Node; 4] {
+//         //     let i = handle.to_index();
+//         //     debug_assert!(i >= 4, "probably bad");
+//         //     debug_assert_eq!(i % 4, 0, "unaligned read, probably bad");
+//         //     for offset in 0..4 {
+//         //         debug_assert!(
+//         //             self.debug_is_init[i + offset],
+//         //             "read uninitialized memory at index {}",
+//         //             i + offset
+//         //         );
+//         //     }
+//         //     (self.mem[i..i + 4])
+//         //         .as_mut_array::<4>()
+//         //         .unwrap()
+//         //         .each_mut()
+//         //         .map(|m| unsafe { m.assume_init_mut() })
+//         // }
+
+//         fn update(
+//             &self,
+//             handle: NodeId,
+//             // set_order: Ordering,
+//             // fetch_order: Ordering,
+//             // f: impl FnMut(Node) -> Option<Node>,
+//             f: impl FnOnce(&Atomic<Node>),
+//         ) {
+//             let i = handle.to_index();
+//             debug_assert!(self.debug_is_init[i].load(Ordering::SeqCst));
+//             // self.mem[i].fetch_update(set_order, fetch_order, f);
+//             f(&self.mem[i]);
+//         }
+//     }
+// }
+
+pub(crate) use new_alloc::*;
+mod new_alloc {
+    use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize};
 
     use atomic::Atomic;
 
@@ -201,310 +718,419 @@ mod alloc {
 
     #[repr(transparent)]
     #[derive(Debug, Clone, Copy, PartialEq, Eq, bytemuck::NoUninit)]
-    pub(crate) struct NodeId(NonZeroU32);
-    unsafe impl bytemuck::ZeroableInOption for NodeId {}
-    unsafe impl bytemuck::PodInOption for NodeId {}
-    impl NodeId {
-        // fn new(i: usize) -> Self {
-        //     Self(NonZeroU32::new(i as u32).unwrap())
-        // }
+    pub(crate) struct NodeHandle(NonZeroU32);
+    unsafe impl bytemuck::ZeroableInOption for NodeHandle {}
+    unsafe impl bytemuck::PodInOption for NodeHandle {}
 
-        // unsafe fn new_unchecked(i: usize) -> Self {
-        //     unsafe { Self(NonZeroU32::new_unchecked(i as u32)) }
-        // }
+    /// the differences from &mut is that we can have one `NodeHandleMut` and multiple `NodeHandle` existing at the same time
+    /// TODO: maybe we can have more than one?
+    #[repr(transparent)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, bytemuck::NoUninit)]
+    pub(super) struct NodeHandleMut(NonZeroU32);
 
+    // invariant: cur.has_mut_handle implies cur.up_to_date
+    // invariant: if someone is reallocating, cur.up_to_date implies old.has_mut_handle
+    #[derive(Debug)]
+    pub(super) struct Alloc {
+        cur: AtomicPtr<AllocInner>,
+        old: AtomicPtr<AllocInner>,
+        /// true iff you're allowed to allocate
+        /// !can_alloc implies realloc_lock, !realloc_lock implies can_alloc
+        can_alloc: AtomicBool,
+        /// false iff you're allowed to reallocate
+        realloc_lock: AtomicBool,
+    }
+
+    #[derive(Debug)]
+    struct AllocInner {
+        len: AtomicUsize,
+        mem: Box<[Atomic<Node>]>,
+        // TODO: pack these bools into a bitflag
+        has_mut_handle: Box<[AtomicBool]>,
+        /// whether it's ok to read from this memory.
+        /// in the new alloc, it's whether we've moved the element.
+        /// in the old alloc, once we've moved something away, set up_to_date to false.
+        /// the canonical one is cur.up_to_date, the one in old is just for debugging.
+        /// TODO: rename.
+        up_to_date: Box<[AtomicBool]>,
+        /// whether it's defined to read from this memory.
+        /// we might not need this now that we have up to date.
+        /// except that we use SeqCst for debug_is_init, so it might still catch bugs.
+        /// this is also about whether up_to_date is uninit maybe.
+        debug_is_init: Box<[AtomicBool]>,
+    }
+
+    impl NodeHandle {
         fn to_index(self) -> usize {
             self.0.get() as usize
         }
 
-        /// ret[0] = handle
-        pub(super) fn siblings(self) -> [NodeId; 4] {
+        fn offset(self, offset: usize) -> Self {
+            debug_assert!(offset < 4);
+            unsafe { NodeHandle(NonZeroU32::new_unchecked(self.0.get() + offset as u32)) }
+        }
+
+        /// ret[0] == self
+        pub(super) fn siblings(self) -> [NodeHandle; 4] {
             let i = self.to_index();
             debug_assert_eq!(i % 4, 0, "unaligned handle in siblings");
             unsafe {
                 [
-                    NodeId(NonZeroU32::new_unchecked(self.0.get())),
-                    NodeId(NonZeroU32::new_unchecked(self.0.get() + 1)),
-                    NodeId(NonZeroU32::new_unchecked(self.0.get() + 2)),
-                    NodeId(NonZeroU32::new_unchecked(self.0.get() + 3)),
+                    NodeHandle(NonZeroU32::new_unchecked(self.0.get())),
+                    NodeHandle(NonZeroU32::new_unchecked(self.0.get() + 1)),
+                    NodeHandle(NonZeroU32::new_unchecked(self.0.get() + 2)),
+                    NodeHandle(NonZeroU32::new_unchecked(self.0.get() + 3)),
                 ]
             }
         }
     }
 
-    #[derive(Debug)]
-    pub(super) struct Alloc {
-        // alloc_lock: Mutex<()>,
-        // we can have our epochs be the frame, and that just works i think
-        // alloc_lock: AtomicBool,
-        // touch_lock: AtomicUsize,
-        inner: AtomicPtr<AllocInner>,
+    impl NodeHandleMut {
+        fn to_index(self) -> usize {
+            self.0.get() as usize
+        }
     }
+
     impl Default for Alloc {
         fn default() -> Self {
             // const SIZE: usize = 16;
             const SIZE: usize = 1048576;
             Self {
-                // alloc_lock: AtomicBool::new(false),
-                // touch_lock: AtomicUsize::new(0),
-                inner: AtomicPtr::new(Box::into_raw(Box::new(AllocInner::new(SIZE)))),
+                cur: AtomicPtr::new(Box::into_raw(Box::new(AllocInner::with_capacity(SIZE)))),
+                old: AtomicPtr::new(std::ptr::null_mut()),
+                can_alloc: AtomicBool::new(true),
+                realloc_lock: AtomicBool::new(false),
             }
         }
     }
     impl Alloc {
-        fn alloc<const N: usize>(&self) -> NodeId {
-            // // TODO: only acquire the lock if we reallocate
-            // while self
-            //     .alloc_lock
+        /// you must demote the returned mut handle to avoid ~leaking memory.
+        /// fails if someone already has a mut handle.
+        /// fails if the thread reallocating hasn't moved this element over yet.
+        fn try_promote(&self, handle: NodeHandle) -> Option<NodeHandleMut> {
+            let i = handle.to_index();
+            // TODO: what if the pointers swap between here
+            if !unsafe { self.cur.load(Ordering::SeqCst).as_ref().unwrap() }.up_to_date[i]
+                .load(Ordering::SeqCst)
+            {
+                return None;
+            }
+            // TODO: i'm pretty sure this can be `Relaxed`
+            // if self.cur.has_mut_handle[i]
             //     .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
             //     .is_err()
-            // {
-            //     std::thread::yield_now();
-            // }
-            // // TODO: this is probably incorrect, maybe we need to go back to the start if this fails
-            // while self.touch_lock.load(Ordering::Acquire) != 0 {
-            //     std::thread::yield_now();
-            // }
+            if unsafe { self.cur.load(Ordering::SeqCst).as_ref().unwrap() }.has_mut_handle[i]
+                .swap(true, Ordering::Relaxed)
+            {
+                return None;
+            }
+            Some(NodeHandleMut(handle.0))
+        }
+        /// this can block.
+        /// you must demote the returned mut handle to avoid ~leaking memory.
+        pub(super) fn promote(&self, handle: NodeHandle) -> NodeHandleMut {
+            loop {
+                if let Some(handle_mut) = self.try_promote(handle) {
+                    return handle_mut;
+                }
+                std::thread::yield_now();
+            }
+        }
+        /// you must call this to release the mutable handle.
+        /// returns the immutable handle for convenience.
+        pub(super) fn demote(&self, handle: NodeHandleMut) -> NodeHandle {
+            let i = handle.to_index();
+            // debug_assert!(self.cur.has_mut_handle[i].load(Ordering::SeqCst));
+            // self.cur.has_mut_handle[i].store(false, Ordering::Relaxed);
+            let cur = unsafe { self.cur.load(Ordering::Relaxed).as_ref().unwrap() };
+            assert!(cur.has_mut_handle[i].swap(false, Ordering::Relaxed));
+            NodeHandle(handle.0)
+        }
 
-            // stronger ordering is implied by the locks
-            let inner = self.inner.load(Ordering::Relaxed);
-            let handle = match unsafe { &mut *inner }.try_alloc::<N>() {
-                Some(id) => id,
-                // if we only give out clones, it might be fine to just free the memory and not deal with epochs
-                None => panic!("allocation failed"),
+        /// note that this will use the thread for a while.
+        fn realloc(&self) {
+            // move over the elements that you can acquire mutable handles to
+            // so we can start getting from the new alloc
+            // then slowly acquire mutable handles to the rest of the elements and move them over
+            // once you have all the mutable handles, free old
+
+            fn try_move_node(cur: &AllocInner, old: &AllocInner, i: usize) -> Option<()> {
+                debug_assert!(!cur.has_mut_handle[i].load(Ordering::SeqCst));
+                debug_assert!(!cur.up_to_date[i].load(Ordering::SeqCst));
+                debug_assert!(!cur.debug_is_init[i].load(Ordering::SeqCst));
+                debug_assert!(old.up_to_date[i].load(Ordering::SeqCst));
+                debug_assert!(old.debug_is_init[i].load(Ordering::SeqCst));
+                // TODO: relax these
+                // try to acquire the mutable handle in old
+                if !old.has_mut_handle[i].swap(true, Ordering::SeqCst) {
+                    return None;
+                }
+                let node = old.mem[i].load(Ordering::SeqCst);
+                cur.mem[i].store(node, Ordering::SeqCst);
+                #[cfg(debug_assertions)]
+                cur.debug_is_init[i].store(true, Ordering::SeqCst);
+                // it's important to set cur.up_to_date before clearing old.up_to_date
+                cur.up_to_date[i].store(true, Ordering::SeqCst);
+                old.up_to_date[i].store(false, Ordering::SeqCst);
+                Some(())
+            }
+
+            debug_assert!(!self.realloc_lock.load(Ordering::SeqCst));
+            debug_assert!(self.can_alloc.load(Ordering::SeqCst));
+            self.can_alloc.store(false, Ordering::SeqCst);
+
+            let (old_capacity, old_len) = {
+                let cur = unsafe { &*self.cur.load(Ordering::SeqCst) };
+                (cur.mem.len(), cur.len.load(Ordering::SeqCst))
             };
 
-            // self.alloc_lock.store(false, Ordering::Release);
-            handle
+            let new = AllocInner::with_capacity(2 * old_capacity);
+
+            // allocate space in new
+            {
+                // TODO: we can do this all at once
+                // doing it this way is just a bit safer
+                debug_assert!(old_len % 4 == 0);
+                let handle0 = new.try_alloc::<1>().unwrap();
+                debug_assert!(handle0.to_index() == 3);
+                for _ in 0..old_len / 4 {
+                    new.try_alloc::<4>().unwrap();
+                }
+            }
+
+            // swing the pointers.
+            // immediately after this, all the gets and updates will fail and go to old,
+            // but this lets us reenable allocations sooner.
+            {
+                debug_assert!(self.old.load(Ordering::SeqCst).is_null());
+                let old = self.cur.load(Ordering::SeqCst);
+                self.old.store(old, Ordering::SeqCst);
+                let new = Box::into_raw(Box::new(new));
+                self.cur.store(new, Ordering::SeqCst);
+                debug_assert!(!self.can_alloc.load(Ordering::SeqCst));
+                self.can_alloc.store(true, Ordering::SeqCst);
+            }
+
+            // the pointers won't move anymore, so just get references to the things
+            #[expect(unused_variables)]
+            let new = ();
+            let cur = unsafe { &*self.cur.load(Ordering::SeqCst) };
+            let old = unsafe { &*self.old.load(Ordering::SeqCst) };
+
+            // move over the elements that we can immediately acquire mutable handles to
+            let mut unmoved_handles = Vec::with_capacity(old_capacity);
+            {
+                // let mut debug_mut_handles = Vec::with_capacity(old_capacity);
+                for i in 3..old_len {
+                    match try_move_node(cur, old, i) {
+                        Some(()) => {
+                            // debug_mut_handles.push(i);
+                        }
+                        None => {
+                            unmoved_handles.push(i);
+                        }
+                    }
+                }
+            }
+
+            // move over the rest of the elements
+            {
+                let mut index = 0;
+                while !unmoved_handles.is_empty() {
+                    let i = unmoved_handles[index];
+                    if try_move_node(cur, old, i).is_some() {
+                        unmoved_handles.swap_remove(index);
+                    } else {
+                        index += 1;
+                        index %= unmoved_handles.len();
+                    }
+                }
+            }
+
+            // free old
+            {
+                let old = old as *const AllocInner as *mut AllocInner;
+                debug_assert_eq!(self.old.load(Ordering::SeqCst), old);
+                debug_assert!(!old.is_null());
+                unsafe { Box::from_raw(old) };
+            }
         }
-        // pub(super) fn alloc1(&mut self) -> NodeId {
-        //     self.alloc::<1>()
+
+        fn alloc<const N: usize>(&self) -> NodeHandle {
+            loop {
+                if self.can_alloc.load(Ordering::SeqCst) {
+                    if let Some(handle) =
+                        unsafe { self.cur.load(Ordering::SeqCst).as_ref().unwrap() }
+                            .try_alloc::<N>()
+                    {
+                        return handle;
+                    } else {
+                        // maybe these can be `Relaxed`???
+                        if !self.realloc_lock.swap(true, Ordering::SeqCst) {
+                            self.realloc();
+                            self.realloc_lock.store(false, Ordering::SeqCst);
+                        }
+                    }
+                }
+                std::thread::yield_now();
+            }
+        }
+
+        // fn insert<const N: usize>(&self, nodes: [Node; N]) -> NodeId {
+        //     let handle = self.alloc::<N>();
+        //     self.init::<N>(handle, nodes);
+        //     handle
         // }
-        // pub(super) fn alloc4(&mut self) -> NodeId {
-        //     self.alloc::<4>()
-        // }
+        // insert_leaf_uncolored instead of insert so it's easier to transition to SOA
+        fn insert_leaf_uncolored<const N: usize>(&self, doms: [Domain; N]) -> NodeHandle {
+            let handle0 = self.alloc::<N>();
+            for (offset, dom) in doms.into_iter().enumerate() {
+                let handle = handle0.offset(offset);
+                let i = handle.to_index();
 
-        // fn set4(&mut self, handle: AllocHandle, nodes: [Node; 4]) {
-        //     let i = handle.to_index();
-        //     debug_assert_eq!(i % 4, 0);
-        //     for (offset, node) in nodes.into_iter().enumerate() {
-        //         self.mem[i + offset] = MaybeUninit::new(node);
-        //         self.is_init[i + offset] = true;
-        //     }
-        // }
+                debug_assert!(
+                    !unsafe { self.cur.load(Ordering::SeqCst).as_ref().unwrap() }.debug_is_init[i]
+                        .load(Ordering::SeqCst),
+                    "insert at already initialized memory at index {}",
+                    i
+                );
+                #[cfg(debug_assertions)]
+                unsafe { self.cur.load(Ordering::SeqCst).as_ref().unwrap() }.debug_is_init[i]
+                    .store(true, Ordering::SeqCst);
 
-        fn init<const N: usize>(&self, handle: NodeId, nodes: [Node; N]) {
-            // while self.alloc_lock.load(Ordering::Acquire) {
-            //     std::thread::yield_now();
-            // }
-            // self.touch_lock.fetch_add(1, Ordering::Acquire);
+                debug_assert!(
+                    !unsafe { self.cur.load(Ordering::SeqCst).as_ref().unwrap() }.up_to_date[i]
+                        .load(Ordering::SeqCst)
+                );
+                // TODO: relax this
+                unsafe { self.cur.load(Ordering::SeqCst).as_ref().unwrap() }.up_to_date[i]
+                    .store(true, Ordering::SeqCst);
 
-            // std::sync::RwLock::read(&self)
-
-            let inner = self.inner.load(Ordering::Relaxed);
-            // TODO: this is super unsafe
-            // the inner stuff needs to be atomic
-            // todo!("AAAAAAAAAA");
-            unsafe { &*inner }.init::<N>(handle, nodes);
-
-            // self.touch_lock.fetch_sub(1, Ordering::Release);
+                // we know statically that promoting the handle will succeed
+                // so maybe we should do this better
+                // we also know that the element is in cur not old
+                let handle = self
+                    .try_promote(handle)
+                    .expect("no one else could have promoted this handle since we haven't given it to anyone, and it's up_to_date because TODO: why?");
+                // TODO: this should panic bc it's uninit
+                // self.update(handle, |node| node.store(val, order));
+                unsafe { self.cur.load(Ordering::SeqCst).as_ref().unwrap() }.update_with(
+                    handle,
+                    |node| {
+                        node.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |node| {
+                            // debug_assert!(node.dom.is_uninit());
+                            Some(Node { dom, ..node })
+                        })
+                    },
+                );
+                self.demote(handle);
+            }
+            handle0
+        }
+        pub(super) fn insert_leaf_uncolored1(&self, dom: Domain) -> NodeHandle {
+            self.insert_leaf_uncolored::<1>([dom])
+        }
+        pub(super) fn insert_leaf_uncolored4(&self, doms: [Domain; 4]) -> NodeHandle {
+            self.insert_leaf_uncolored::<4>(doms)
         }
 
-        fn set<const N: usize>(&self, handle: NodeId, nodes: [Node; N]) {
-            // while self.alloc_lock.load(Ordering::Acquire) {
-            //     std::thread::yield_now();
-            // }
-            // self.touch_lock.fetch_add(1, Ordering::Acquire);
-
-            let inner = self.inner.load(Ordering::Relaxed);
-            unsafe { &*inner }.set::<N>(handle, nodes);
-
-            // self.touch_lock.fetch_sub(1, Ordering::Release);
+        fn get_with<Ret, F: Fn(Node) -> Ret>(&self, handle: NodeHandle, f: F) -> Ret {
+            // look in `cur`
+            // if not found, look in `old` (maybe here we need to do an expensive SeqCst thing)
+            if let Some(ret) =
+                unsafe { self.cur.load(Ordering::SeqCst).as_ref().unwrap() }.get_with(handle, &f)
+            {
+                return ret;
+            }
+            if let Some(ret) =
+                unsafe { self.old.load(Ordering::SeqCst).as_ref().unwrap() }.get_with(handle, &f)
+            {
+                return ret;
+            }
+            unreachable!("probably not actually unreachable");
+            if let Some(ret) =
+                unsafe { self.cur.load(Ordering::SeqCst).as_ref().unwrap() }.get_with(handle, &f)
+            {
+                return ret;
+            }
+            unreachable!();
         }
-        pub(super) fn set1(&mut self, handle: NodeId, node: Node) {
-            self.set::<1>(handle, [node]);
+        pub(super) fn get_dom(&self, handle: NodeHandle) -> Domain {
+            self.get_with(handle, |node| node.dom)
         }
-        pub(super) fn set4(&mut self, handle: NodeId, nodes: [Node; 4]) {
-            self.set::<4>(handle, nodes);
+        pub(super) fn get_leaf_distance_cache(&self, handle: NodeHandle) -> u32 {
+            self.get_with(handle, |node| node.leaf_distance_cache)
         }
-
-        fn get_cloned<const N: usize>(&self, handle: NodeId) -> [Node; N] {
-            // while self.alloc_lock.load(Ordering::Acquire) {
-            //     std::thread::yield_now();
-            // }
-            // self.touch_lock.fetch_add(1, Ordering::Acquire);
-
-            let inner = self.inner.load(Ordering::Relaxed);
-            let nodes = unsafe { &mut *inner }.get_cloned::<N>(handle);
-
-            // self.touch_lock.fetch_sub(1, Ordering::Release);
-            nodes
+        pub(super) fn get_color(&self, handle: NodeHandle) -> OptionColor {
+            self.get_with(handle, |node| node.color)
         }
-        pub(crate) fn get1_cloned(&self, handle: NodeId) -> Node {
-            let [node] = self.get_cloned::<1>(handle);
-            node
-        }
-        pub(crate) fn get4_cloned(&self, handle: NodeId) -> [Node; 4] {
-            self.get_cloned::<4>(handle)
+        pub(super) fn get_left_child(&self, handle: NodeHandle) -> Option<NodeHandle> {
+            self.get_with(handle, |node| node.left_child)
         }
 
-        fn insert<const N: usize>(&self, nodes: [Node; N]) -> NodeId {
-            let handle = self.alloc::<N>();
-            self.init::<N>(handle, nodes);
-            handle
+        /// returns the old value, or maybe just whatever the user wants to.
+        pub(super) fn update_with<Ret, F: Fn(&Atomic<Node>) -> Ret>(
+            &self,
+            handle: NodeHandleMut,
+            f: F,
+        ) -> Ret {
+            // look in `cur`
+            // if not found, it means another thread is waiting for us to be done
+            // we can't help out, bc what if they gave up after we exited `update` but before we released our mut handle
+            // so just look in `old`, and our caller should release this handle soon
+
+            if let Some(ret) =
+                unsafe { self.cur.load(Ordering::SeqCst).as_ref().unwrap() }.update_with(handle, &f)
+            {
+                return ret;
+            }
+            if let Some(ret) =
+                unsafe { self.old.load(Ordering::SeqCst).as_ref().unwrap() }.update_with(handle, &f)
+            {
+                return ret;
+            }
+            unreachable!();
         }
-        pub(super) fn insert1(&self, node: Node) -> NodeId {
-            self.insert::<1>([node])
-        }
-        pub(super) fn insert4(&self, nodes: [Node; 4]) -> NodeId {
-            self.insert::<4>(nodes)
-        }
-
-        pub(super) fn update(&self, handle: NodeId, f: impl FnOnce(&Atomic<Node>)) {
-            // while self.alloc_lock.load(Ordering::Acquire) {
-            //     std::thread::yield_now();
-            // }
-            // self.touch_lock.fetch_add(1, Ordering::Acquire);
-
-            let inner = self.inner.load(Ordering::Relaxed);
-            unsafe { &mut *inner }.update(handle, f);
-
-            // self.touch_lock.fetch_sub(1, Ordering::Release);
-        }
-
-        // pub(super) fn get1_mut(&mut self, handle: NodeId) -> &mut Node {
-        //     let i = handle.to_index();
-        //     // debug_assert_eq!(
-        //     //     i, 3,
-        //     //     "we should probably only use get1_mut for getting the root"
-        //     // );
-        //     debug_assert!(self.is_init[i], "read uninitialized memory at index {}", i);
-        //     unsafe { self.mem[i].assume_init_mut() }
-        // }
-
-        // pub(super) fn get1_uninit_and<F>(&self, handle: NodeId, f: F) -> (&Node, usize)
-        // where
-        //     F: FnMut(&mut Node),
-        // {
-        // }
-        // pub(super) fn get1_and<F>(&self, handle: NodeId, f: F) -> (&Node, usize)
-        // where
-        //     F: FnMut(&mut Node),
-        // { }
-
-        // /// used for getting the four children
-        // pub(super) fn get4(&self, handle: NodeId) -> [&Node; 4] {
-        //     let i = handle.to_index();
-        //     debug_assert!(i >= 4, "probably bad");
-        //     debug_assert_eq!(i % 4, 0, "unaligned read, probably bad");
-        //     for offset in 0..4 {
-        //         debug_assert!(
-        //             self.is_init[i + offset],
-        //             "read uninitialized memory at index {}",
-        //             i + offset
-        //         );
-        //     }
-        //     (self.mem[i..i + 4])
-        //         .as_array::<4>()
-        //         .unwrap()
-        //         .each_ref()
-        //         .map(|m| unsafe { m.assume_init_ref() })
-        // }
-
-        // pub(super) fn get4_mut(&mut self, handle: NodeId) -> [&mut Node; 4] {
-        //     let i = handle.to_index();
-        //     debug_assert!(i >= 4, "probably bad");
-        //     debug_assert_eq!(i % 4, 0, "unaligned read, probably bad");
-        //     for offset in 0..4 {
-        //         debug_assert!(
-        //             self.is_init[i + offset],
-        //             "read uninitialized memory at index {}",
-        //             i + offset
-        //         );
-        //     }
-        //     (self.mem[i..i + 4])
-        //         .as_mut_array::<4>()
-        //         .unwrap()
-        //         .each_mut()
-        //         .map(|m| unsafe { m.assume_init_mut() })
-        // }
     }
 
-    // struct AtomicFixed(AtomicU32);
-    // type AtomicReal = AtomicFixed;
-    // type AtomicImag = AtomicFixed;
-
-    // struct AtomicDomain {
-    //     real_mid: AtomicReal,
-    //     imag_mid: AtomicImag,
-    //     rad: AtomicFixed,
-    // }
-
-    // struct AtomicOptionColor {
-    //     r: AtomicU8,
-    //     g: AtomicU8,
-    //     b: AtomicU8,
-    //     a: AtomicU8,
-    // }
-
-    // struct AtomicOptionNodeId(AtomicU32);
-
-    // struct AtomicNode {
-    //     dom: AtomicDomain,
-    //     leaf_distance_cache: AtomicU32,
-    //     color: AtomicOptionColor,
-    //     /// leftmost child id
-    //     child_id: AtomicOptionNodeId,
-    // }
-
-    // #[derive(Debug)]
-    struct AllocInner {
-        len: AtomicUsize,
-        /// Option for maybe uninit runtime checking
-        /// TODO: remove
-        /// mem[0] is uninit/None so we can do `NonZeroU32` handles
-        // mem: Box<[MaybeUninit<Node>]>,
-        // mem: Box<[MaybeUninit<Atomic<Node>>]>,
-        mem: Box<[Atomic<Node>]>,
-        debug_is_init: Box<[AtomicBool]>,
-    }
-    // impl Default for AllocInner {
-    //     fn default() -> Self {
-    //         Self {
-    //             len: AtomicUsize::new(3),
-    //             mem: vec![
-    //                 MaybeUninit::uninit(),
-    //                 MaybeUninit::uninit(),
-    //                 MaybeUninit::uninit(),
-    //             ]
-    //             .into_boxed_slice(),
-    //             debug_is_init: vec![false; 3].into_boxed_slice(),
-    //         }
-    //     }
-    // }
     impl AllocInner {
-        fn new(size: usize) -> Self {
-            assert!(size >= 4);
-            // let mut mem = Vec::with_capacity(size);
-            // mem.resize_with(size, MaybeUninit::uninit);
-            let mut mem = Vec::with_capacity(size);
-            mem.resize_with(size, || Atomic::new(Node::uninit()));
-            let mut debug_is_init = Vec::with_capacity(size);
-            debug_is_init.resize_with(size, || AtomicBool::new(false));
+        fn with_capacity(capacity: usize) -> Self {
+            assert!(capacity >= 4);
+
+            let mut mem = Vec::with_capacity(capacity);
+            mem.resize_with(capacity, || Atomic::new(Node::uninit()));
+            let mut has_mut_handle = Vec::with_capacity(capacity);
+            has_mut_handle.resize_with(capacity, || AtomicBool::new(false));
+            let mut up_to_date = Vec::with_capacity(capacity);
+            up_to_date.resize_with(capacity, || AtomicBool::new(false));
+            let mut debug_is_init = Vec::with_capacity(capacity);
+            debug_is_init.resize_with(capacity, || AtomicBool::new(false));
+
             Self {
                 len: AtomicUsize::new(3),
                 mem: mem.into_boxed_slice(),
+                has_mut_handle: has_mut_handle.into_boxed_slice(),
+                up_to_date: up_to_date.into_boxed_slice(),
                 debug_is_init: debug_is_init.into_boxed_slice(),
             }
         }
 
-        fn try_alloc<const N: usize>(&self) -> Option<NodeId> {
+        fn capacity(&self) -> usize {
+            let ret = self.mem.len();
+            debug_assert_eq!(ret, self.has_mut_handle.len());
+            debug_assert_eq!(ret, self.up_to_date.len());
+            debug_assert_eq!(ret, self.debug_is_init.len());
+            ret
+        }
+
+        /// fails if we're out of memory.
+        fn try_alloc<const N: usize>(&self) -> Option<NodeHandle> {
             assert!(N == 1 || N == 4);
             let i = self.len.fetch_add(N, Ordering::SeqCst);
             if i + N > self.mem.len() {
                 return None;
             }
-            let handle = NodeId(NonZeroU32::new(i as u32).unwrap());
+            let handle = NodeHandle(NonZeroU32::new(i as u32).unwrap());
             if N == 1 {
                 debug_assert_eq!(i, 3);
             }
@@ -521,198 +1147,100 @@ mod alloc {
             Some(handle)
         }
 
-        // fn try_alloc4(&mut self) -> Option<NodeId> {
-        //     let handle = NonZeroU32::new(self.mem.len() as u32).unwrap();
-        //     debug_assert_eq!(handle.get() % 4, 0);
-        //     self.mem.extend([
-        //         MaybeUninit::uninit(),
-        //         MaybeUninit::uninit(),
-        //         MaybeUninit::uninit(),
-        //         MaybeUninit::uninit(),
-        //     ]);
-        //     self.debug_is_init.extend([false; 4]);
-        //     Some(NodeId(handle))
-        // }
-
-        // fn set4(&mut self, handle: AllocHandle, nodes: [Node; 4]) {
-        //     let i = handle.to_index();
-        //     debug_assert_eq!(i % 4, 0);
-        //     for (offset, node) in nodes.into_iter().enumerate() {
-        //         self.mem[i + offset] = MaybeUninit::new(node);
-        //         self.is_init[i + offset] = true;
-        //     }
-        // }
-
-        /// the memory must be uninitialized.
-        /// /// see also [`AllocInner::set`].
-        fn init<const N: usize>(&self, handle: NodeId, nodes: [Node; N]) {
-            assert!(N == 1 || N == 4);
+        /// returns `None` if the element isn't up_to_date.
+        /// this can fail spuriously (in the future).
+        fn get_with<Ret, F: FnOnce(Node) -> Ret>(&self, handle: NodeHandle, f: F) -> Option<Ret> {
             let i = handle.to_index();
-            if N == 1 {
-                debug_assert_eq!(i, 3);
-            }
-            if N == 4 {
-                debug_assert_eq!(i % 4, 0);
-            }
-            for (offset, node) in nodes.into_iter().enumerate() {
-                debug_assert!(
-                    !self.debug_is_init[i + offset].load(Ordering::SeqCst),
-                    "insert at already initialized memory at index {}",
-                    i + offset
-                );
-                self.mem[i + offset].store(node, Ordering::SeqCst);
-                self.debug_is_init[i + offset].store(true, Ordering::SeqCst);
+            // `Relaxed` implies this can fail spuriously
+            // TODO: relax these orderings
+            if self.up_to_date[i].load(Ordering::SeqCst) {
+                debug_assert!(self.debug_is_init[i].load(Ordering::SeqCst));
+                Some(f(self.mem[i].load(Ordering::SeqCst)))
+            } else {
+                None
             }
         }
 
-        /// the memory must already be initialized.
-        /// see also [`AllocInner::init`].
-        fn set<const N: usize>(&self, handle: NodeId, nodes: [Node; N]) {
-            assert!(N == 1 || N == 4);
-            let i = handle.to_index();
-            if N == 1 {
-                debug_assert_eq!(i, 3);
-            }
-            if N == 4 {
-                debug_assert_eq!(i % 4, 0);
-            }
-            for (offset, node) in nodes.into_iter().enumerate() {
-                debug_assert!(
-                    self.debug_is_init[i + offset].load(Ordering::SeqCst),
-                    "insert at already initialized memory at index {}",
-                    i + offset
-                );
-                self.mem[i + offset].store(node, Ordering::SeqCst);
-            }
-        }
-
-        // fn try_insert1(&mut self, node: Node) -> Option<NodeId> {
-        //     let handle = self.try_alloc1()?;
-        //     let i = handle.to_index();
-        //     debug_assert!(
-        //         !self.debug_is_init[i],
-        //         "insert at already initialized memory at index {}",
-        //         i
-        //     );
-        //     self.mem[i] = MaybeUninit::new(node);
-        //     self.debug_is_init[i] = true;
-        //     Some(handle)
-        // }
-
-        // fn try_insert4(&mut self, nodes: [Node; 4]) -> Option<NodeId> {
-        //     let handle = self.try_alloc4()?;
-        //     let i = handle.to_index();
-        //     for (offset, node) in nodes.into_iter().enumerate() {
-        //         debug_assert!(
-        //             !self.debug_is_init[i + offset],
-        //             "insert at already initialized memory at index {}",
-        //             i + offset
-        //         );
-        //         self.mem[i + offset] = MaybeUninit::new(node);
-        //         self.debug_is_init[i + offset] = true;
-        //     }
-        //     Some(handle)
-        // }
-
-        fn get_cloned<const N: usize>(&self, handle: NodeId) -> [Node; N] {
-            assert!(N == 1 || N == 4);
-            let i = handle.to_index();
-            if N == 4 {
-                debug_assert_eq!(i % 4, 0);
-            }
-            for offset in 0..N {
-                debug_assert!(
-                    self.debug_is_init[i + offset].load(Ordering::SeqCst),
-                    "read uninitialized memory at index {}",
-                    i + offset
-                );
-            }
-            (self.mem[i..i + N])
-                .as_array::<N>()
-                .unwrap()
-                .each_ref()
-                .map(|m| m.load(Ordering::SeqCst))
-            // (self.mem[i..i + N])
-            //     .as_array::<N>()
-            //     .unwrap()
-            //     .each_ref()
-            //     .map(|m| unsafe { m.assume_init_ref() }.clone())
-        }
-
-        // pub(crate) fn get1(&self, handle: NodeId) -> &Node {}
-
-        // fn get1_mut(&mut self, handle: NodeId) -> &mut Node {
-        //     let i = handle.to_index();
-        //     // debug_assert_eq!(
-        //     //     i, 3,
-        //     //     "we should probably only use get1_mut for getting the root"
-        //     // );
-        //     debug_assert!(
-        //         self.debug_is_init[i],
-        //         "read uninitialized memory at index {}",
-        //         i
-        //     );
-        //     unsafe { self.mem[i].assume_init_mut() }
-        // }
-
-        // /// used for getting the four children
-        // fn get4(&self, handle: NodeId) -> [&Node; 4] {
-        //     let i = handle.to_index();
-        //     debug_assert!(i >= 4, "probably bad");
-        //     debug_assert_eq!(i % 4, 0, "unaligned read, probably bad");
-        //     for offset in 0..4 {
-        //         debug_assert!(
-        //             self.debug_is_init[i + offset],
-        //             "read uninitialized memory at index {}",
-        //             i + offset
-        //         );
-        //     }
-        //     (self.mem[i..i + 4])
-        //         .as_array::<4>()
-        //         .unwrap()
-        //         .each_ref()
-        //         .map(|m| unsafe { m.assume_init_ref() })
-        // }
-
-        // fn get4_mut(&mut self, handle: NodeId) -> [&mut Node; 4] {
-        //     let i = handle.to_index();
-        //     debug_assert!(i >= 4, "probably bad");
-        //     debug_assert_eq!(i % 4, 0, "unaligned read, probably bad");
-        //     for offset in 0..4 {
-        //         debug_assert!(
-        //             self.debug_is_init[i + offset],
-        //             "read uninitialized memory at index {}",
-        //             i + offset
-        //         );
-        //     }
-        //     (self.mem[i..i + 4])
-        //         .as_mut_array::<4>()
-        //         .unwrap()
-        //         .each_mut()
-        //         .map(|m| unsafe { m.assume_init_mut() })
-        // }
-
-        fn update(
+        /// returns `None` if the element isn't up_to_date.
+        fn update_with<Ret, F: FnOnce(&Atomic<Node>) -> Ret>(
             &self,
-            handle: NodeId,
-            // set_order: Ordering,
-            // fetch_order: Ordering,
-            // f: impl FnMut(Node) -> Option<Node>,
-            f: impl FnOnce(&Atomic<Node>),
-        ) {
+            handle: NodeHandleMut,
+            f: F,
+        ) -> Option<Ret> {
             let i = handle.to_index();
-            debug_assert!(self.debug_is_init[i].load(Ordering::SeqCst));
-            // self.mem[i].fetch_update(set_order, fetch_order, f);
-            f(&self.mem[i]);
+            // TODO: relax these orderings
+            if self.up_to_date[i].load(Ordering::SeqCst) {
+                debug_assert!(self.debug_is_init[i].load(Ordering::SeqCst));
+                debug_assert!(self.has_mut_handle[i].load(Ordering::SeqCst));
+                Some(f(&self.mem[i]))
+            } else {
+                None
+            }
         }
     }
 }
+
+// mod new_alloc_soa {
+//     use super::*;
+
+//     struct NodeId(u32);
+//     struct DomHandle(u32);
+//     struct DomHandleMut(u32);
+//     struct LeafDistanceCacheHandle(u32);
+//     struct LeafDistanceCacheHandleMut(u32);
+//     struct ColorHandle(u32);
+//     struct ColorHandleMut(u32);
+//     struct ChildIdHandle(u32);
+//     struct ChildIdHandleMut(u32);
+
+//     struct Alloc {
+//         cur: AllocInner,
+//         old: Option<AllocInner>,
+//         // AllocInner should be inlined into Alloc
+//         cur.up_to_date: AllocInnerT<bool>,
+//     }
+
+//     struct AllocInner {
+//         doms: AllocInnerT<Domain>,
+//         leaf_distance_caches: AllocInnerT<u32>,
+//         colors: AllocInnerT<OptionColor>,
+//         child_ids: AllocInnerT<Option<NodeId>>,
+//         debug_is_init: AllocInnerT<bool>,
+//     }
+
+//     struct AllocInnerT<T> {
+//         mem: Box<[T]>,
+//         debug_is_init: Box<[T]>,
+//     }
+
+//     impl Alloc {
+//         fn realloc(&self) {
+//             let new_cur = AllocInner::with_capacity(self.cur.capacity() * 2);
+//             // clone over the elements that you can acquire mutable handles to
+//             // so we can start getting from the new alloc
+//             // then slowly acquire mutable handles to the rest of the elements and clone them over
+//             new_cur.partial_clone_from(self.cur);
+//             self.cur = new_cur;
+//         }
+
+//         fn get(&self) {
+//             // look in the current alloc
+//             // if not found, look in the old alloc
+//             todo!();
+//         }
+//     }
+
+//     impl AllocInner {}
+
+//     impl AllocInnerT<T> {}
+// }
+
 #[derive(Debug)]
 pub(crate) struct Tree {
     dom: Domain,
     // TODO: concurrent `Alloc`
     alloc: RwLock<Alloc>,
-    root: NodeId,
+    root: NodeHandle,
 }
 
 // impl Internal {
@@ -820,10 +1348,22 @@ pub(crate) struct Tree {
 impl Tree {
     pub(crate) fn new(dom: Domain) -> Self {
         let alloc = Alloc::default();
-        let root = alloc.insert1(Node::new_leaf_colored(
-            dom,
-            metabrot_sample(dom.mid()).color(),
-        ));
+        // let root = alloc.insert1(Node::new_leaf_colored(
+        //     dom,
+        //     metabrot_sample(dom.mid()).color(),
+        // ));
+        let root = alloc.insert_leaf_uncolored1(dom);
+        let root = alloc.promote(root);
+        alloc.update_with(root, |node| {
+            node.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |node| {
+                Some(Node {
+                    color: OptionColor::new_some(metabrot_sample(node.dom.mid()).color()),
+                    ..node
+                })
+            })
+            .unwrap();
+        });
+        let root = alloc.demote(root);
         Self {
             dom,
             alloc: RwLock::new(alloc),
@@ -836,56 +1376,63 @@ impl Tree {
         let mut stack = Vec::with_capacity(64);
 
         let alloc = self.alloc.read().unwrap();
-        stack.push(alloc.get1_cloned(self.root));
+        stack.push(self.root);
 
-        while let Some(node) = stack.pop() {
+        while let Some(handle) = stack.pop() {
             count += 1;
-            if let Some(child_id) = node.child_id {
-                let children = alloc.get4_cloned(child_id);
-                stack.extend(children);
+            if let Some(child_id) = alloc.get_left_child(handle) {
+                stack.extend(child_id.siblings());
             }
         }
         count
     }
 
-    pub(crate) fn mid_of_node_id(&self, node_id: NodeId) -> (Real, Imag) {
+    pub(crate) fn mid_of_node_id(&self, handle: NodeHandle) -> (Real, Imag) {
         let alloc = self.alloc.read().unwrap();
-        let node = alloc.get1_cloned(node_id);
-        node.dom.mid()
+        alloc.get_dom(handle).mid()
     }
 
     /// must have that leaf_id is a leaf.
     /// fails if the domain gets too small.
-    fn try_split(&mut self, leaf_id: NodeId) -> Option<()> {
+    fn try_split(&mut self, leaf_handle: NodeHandle) -> Option<()> {
         // let mut alloc = self.alloc.write().unwrap();
         let alloc = self.alloc.get_mut().expect("alloc poisoned");
-        let new_leafs = {
-            let node = alloc.get1_cloned(leaf_id);
-            assert!(node.child_id.is_none());
-            node.dom.split()?.map(Node::new_leaf_uncolored)
-        };
-        let child_id = alloc.insert4(new_leafs);
+        // let new_leafs = {
+        //     let node = alloc.get1_cloned(leaf_id);
+        //     assert!(node.child_id.is_none());
+        //     node.dom.split()?.map(Node::new_leaf_uncolored)
+        // };
+        // let child_id = alloc.insert4(new_leafs);
         // let node = alloc.get1_cloned(leaf_id);
-        alloc.update(leaf_id, |node| {
+        // alloc.update(leaf_id, |node| {
+        //     node.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |node| {
+        //         debug_assert!(node.child_id.is_none());
+        //         Some(Node {
+        //             left_child: Some(child_id),
+        //             ..node
+        //         })
+        //     })
+        //     .unwrap();
+        // });
+        let doms = {
+            let dom = alloc.get_dom(leaf_handle);
+            debug_assert!(alloc.get_left_child(leaf_handle).is_none());
+            dom.split()?
+        };
+        let child_handle = alloc.insert_leaf_uncolored4(doms);
+        let leaf_handle = alloc.promote(leaf_handle);
+        alloc.update_with(leaf_handle, |node| {
             node.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |node| {
-                debug_assert!(node.child_id.is_none());
+                debug_assert!(node.left_child.is_none());
+                debug_assert_eq!(node.leaf_distance_cache, 0);
                 Some(Node {
-                    child_id: Some(child_id),
+                    left_child: Some(child_handle),
+                    leaf_distance_cache: 1,
                     ..node
                 })
             })
-            .unwrap();
         });
-        // alloc.set1(
-        //     leaf_id,
-        //     Node {
-        //         dom: node.dom,
-        //         _pad: [0; 4],
-        //         leaf_distance_cache: 1,
-        //         color: node.color,
-        //         child_id: Some(child_id),
-        //     },
-        // );
+        alloc.demote(leaf_handle);
         Some(())
     }
 
@@ -1113,7 +1660,7 @@ impl Tree {
     // TODO: better ordering
     #[cfg_attr(feature = "profiling", inline(never))]
     // pub(crate) fn refine(slf: Arc<Self>, window: Window) -> Option<[NodeId; 4]> {
-    pub(crate) fn refine(&mut self, window: Window) -> Option<[NodeId; 4]> {
+    pub(crate) fn refine(&mut self, window: Window) -> Option<[NodeHandle; 4]> {
         let start = std::time::Instant::now();
 
         // /// returns `None` if no leaf intersects the window
@@ -1155,7 +1702,7 @@ impl Tree {
 
         #[cfg_attr(feature = "profiling", inline(never))]
         /// returns `None` if no leaf intersects the window
-        fn get_shallowest_leaf(tree: &Tree, window: Window) -> Option<(u32, NodeId)> {
+        fn get_shallowest_leaf(tree: &Tree, window: Window) -> Option<(u32, NodeHandle)> {
             // queue instead of stack bc we want to visit shallower nodes first
             // TODO: the queue is probably worse now
             let mut stack = Vec::with_capacity(64);
@@ -1169,27 +1716,35 @@ impl Tree {
             // while let Some((node, depth)) = queue.pop_front() {
             while let Some((node_id, depth)) = stack.pop() {
                 let alloc = tree.alloc.read().unwrap();
-                let node = alloc.get1_cloned(node_id);
+                // let node = alloc.get1_cloned(node_id);
                 // TODO: instead of doing this check on pop, do it on push
                 // this also lets us do less work in the case where the domain is contained inside the window
-                if !window.overlaps(node.dom) {
+                if !window.overlaps(alloc.get_dom(node_id)) {
                     continue;
                 }
                 if depth >= shallowest_depth {
                     continue;
                 }
-                match (node.color, node.child_id) {
+                match (alloc.get_color(node_id), alloc.get_left_child(node_id)) {
                     (_, Some(child_id)) => {
-                        let children = alloc.get4_cloned(child_id);
+                        // let children = alloc.get4_cloned(child_id);
                         // let leaf_distance = internal.compute_leaf_distance();
-                        let leaf_distance = children
+                        // let leaf_distance = children
+                        //     .iter()
+                        //     .map(|c| c.leaf_distance_cache)
+                        //     .min()
+                        //     .unwrap()
+                        //     + 1;
+                        let leaf_distance = child_id
+                            .siblings()
+                            .map(|child_handle| alloc.get_leaf_distance_cache(child_handle))
                             .iter()
-                            .map(|c| c.leaf_distance_cache)
                             .min()
                             .unwrap()
                             + 1;
-                        if leaf_distance < node.leaf_distance_cache {
-                            alloc.update(node_id, |node| {
+                        if leaf_distance < alloc.get_leaf_distance_cache(node_id) {
+                            let node_id = alloc.promote(node_id);
+                            alloc.update_with(node_id, |node| {
                                 let _ =
                                     node.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |node| {
                                         if leaf_distance < node.leaf_distance_cache {
@@ -1202,6 +1757,7 @@ impl Tree {
                                         }
                                     });
                             });
+                            alloc.demote(node_id);
                             // node.leaf_distance_cache = leaf_distance;
                             // todo!("this is incorrect now");
                         }
@@ -1325,7 +1881,7 @@ impl Tree {
         self.try_split(node_id);
         // let alloc = self.alloc.read().unwrap();
         let alloc = self.alloc.get_mut().expect("alloc poisoned");
-        let node = alloc.get1_cloned(node_id);
+        // let node = alloc.get1_cloned(node_id);
         // // we can't just `internal.children.map(|c| c.dom.mid())` bc of rust
         // let points = self
         //     .alloc
@@ -1341,7 +1897,12 @@ impl Tree {
             );
             COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
-        Some(node.child_id.expect("we just split it").siblings())
+        Some(
+            alloc
+                .get_left_child(node_id)
+                .expect("we just split it")
+                .siblings(),
+        )
     }
 
     // /// returns `None` if we shouldn't/can't refine
@@ -1543,7 +2104,7 @@ impl Tree {
     pub(crate) fn insert(
         &mut self,
         // (real, imag): (Real, Imag),
-        node_id: NodeId,
+        node_id: NodeHandle,
         color: Color32,
     ) {
         // assert!(self.dom.contains_point((real, imag)));
@@ -1563,7 +2124,8 @@ impl Tree {
         // }
         // let mut alloc = self.alloc.write().unwrap();
         let alloc = self.alloc.read().unwrap();
-        alloc.update(node_id, |node| {
+        let node_id = alloc.promote(node_id);
+        alloc.update_with(node_id, |node| {
             node.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |node| {
                 assert!(node.color.is_none());
                 Some(Node {
@@ -1573,6 +2135,7 @@ impl Tree {
             })
             .unwrap();
         });
+        alloc.demote(node_id);
         // let node = alloc.get1_mut(node_id);
         // node.set_color(color);
 
@@ -1623,23 +2186,21 @@ impl Tree {
         let alloc = self.alloc.read().unwrap();
         let mut node_id = self.root;
         let mut closest_sample_dist = distance(center, self.dom.mid());
-        let mut closest_sample_color = alloc
-            .get1_cloned(node_id)
-            .color
-            .expect("root must have a color");
+        let mut closest_sample_color = alloc.get_color(node_id).expect("root must have a color");
 
         loop {
-            let node = alloc.get1_cloned(node_id);
-            let Some(child_i) = node.child_i_containing(center) else {
+            // let node = alloc.get1_cloned(node_id);
+            let Some(left_child) = alloc.get_left_child(node_id) else {
                 break;
             };
+            let child_offset = alloc.get_dom(node_id).child_offset_containing(center);
+            node_id = left_child.siblings()[child_offset];
 
-            node_id = node.child_id.unwrap().siblings()[child_i];
-            let node = alloc.get1_cloned(node_id);
-            let dist = distance(center, node.dom.mid());
-            if dist < closest_sample_dist && node.color.is_some() {
+            let dist = distance(center, alloc.get_dom(node_id).mid());
+            let color = alloc.get_color(node_id);
+            if dist < closest_sample_dist && color.is_some() {
                 closest_sample_dist = dist;
-                closest_sample_color = node.color.unwrap();
+                closest_sample_color = color.unwrap();
             }
         }
         closest_sample_color
