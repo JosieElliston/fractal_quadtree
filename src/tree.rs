@@ -744,6 +744,7 @@ mod new_alloc {
     #[derive(Debug)]
     struct AllocInner {
         len: AtomicUsize,
+        /// xxxx xxxx xxxx root node node node node
         mem: Box<[Atomic<Node>]>,
         // TODO: pack these bools into a bitflag
         has_mut_handle: Box<[AtomicBool]>,
@@ -793,8 +794,8 @@ mod new_alloc {
 
     impl Default for Alloc {
         fn default() -> Self {
-            // const SIZE: usize = 16;
-            const SIZE: usize = 1048576;
+            const SIZE: usize = 16;
+            // const SIZE: usize = 1048576;
             Self {
                 cur: AtomicPtr::new(Box::into_raw(Box::new(AllocInner::with_capacity(SIZE)))),
                 old: AtomicPtr::new(std::ptr::null_mut()),
@@ -875,13 +876,13 @@ mod new_alloc {
                 Some(())
             }
 
-            debug_assert!(!self.realloc_lock.load(Ordering::SeqCst));
+            debug_assert!(self.realloc_lock.load(Ordering::SeqCst));
             debug_assert!(self.can_alloc.load(Ordering::SeqCst));
             self.can_alloc.store(false, Ordering::SeqCst);
 
             let (old_capacity, old_len) = {
                 let cur = unsafe { &*self.cur.load(Ordering::SeqCst) };
-                (cur.mem.len(), cur.len.load(Ordering::SeqCst))
+                (cur.capacity(), cur.len.load(Ordering::SeqCst))
             };
 
             let new = AllocInner::with_capacity(2 * old_capacity);
@@ -893,9 +894,17 @@ mod new_alloc {
                 debug_assert!(old_len % 4 == 0);
                 let handle0 = new.try_alloc::<1>().unwrap();
                 debug_assert!(handle0.to_index() == 3);
-                for _ in 0..old_len / 4 {
+                for _ in ((handle0.to_index() + 1)..old_len).step_by(4) {
                     new.try_alloc::<4>().unwrap();
                 }
+                debug_assert_eq!(new.capacity(), 2 * old_capacity);
+                debug_assert_eq!(old_len, new.len.load(Ordering::SeqCst));
+                debug_assert_eq!(
+                    old_len,
+                    unsafe { &*self.cur.load(Ordering::SeqCst) }
+                        .len
+                        .load(Ordering::SeqCst)
+                );
             }
 
             // swing the pointers.
@@ -952,7 +961,8 @@ mod new_alloc {
                 let old = old as *const AllocInner as *mut AllocInner;
                 debug_assert_eq!(self.old.load(Ordering::SeqCst), old);
                 debug_assert!(!old.is_null());
-                unsafe { Box::from_raw(old) };
+                unsafe { drop(Box::from_raw(old)) };
+                self.old.store(std::ptr::null_mut(), Ordering::SeqCst);
             }
         }
 
@@ -1127,7 +1137,8 @@ mod new_alloc {
         fn try_alloc<const N: usize>(&self) -> Option<NodeHandle> {
             assert!(N == 1 || N == 4);
             let i = self.len.fetch_add(N, Ordering::SeqCst);
-            if i + N > self.mem.len() {
+            if i + N >= self.mem.len() {
+                self.len.fetch_sub(N, Ordering::SeqCst);
                 return None;
             }
             let handle = NodeHandle(NonZeroU32::new(i as u32).unwrap());
