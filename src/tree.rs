@@ -123,69 +123,6 @@ impl Node {
             left_child: None,
         }
     }
-
-    // fn new_internal_colored
-
-    // invalid probably
-    // fn new_internal_uncolored
-
-    // /// the point must be inside the domain.
-    // /// returns `None` if we're a leaf.
-    // // fn child_i_containing(&self, alloc: &Alloc, (real, imag): (Real, Imag)) -> Option<usize> {
-    // fn child_i_containing(self, alloc: &Alloc, (real, imag): (Real, Imag)) -> Option<usize> {
-    //     let child_id = self.child_id?;
-    //     let children = alloc.get4_cloned(child_id);
-    //     debug_assert!(self.dom.contains_point((real, imag)));
-    //     let ret = (if real < self.dom.real_mid() { 0 } else { 1 })
-    //         + (if imag >= self.dom.imag_mid() { 0 } else { 2 });
-    //     debug_assert!(children[ret].dom.contains_point((real, imag)));
-    //     Some(ret)
-    // }
-
-    /// the point must be inside the domain.
-    /// returns `None` if we're a leaf.
-    // fn child_i_containing(&self, alloc: &Alloc, (real, imag): (Real, Imag)) -> Option<usize> {
-    fn child_i_containing(&self, (real, imag): (Real, Imag)) -> Option<usize> {
-        debug_assert!(self.dom.contains_point((real, imag)));
-        if self.left_child.is_none() {
-            return None;
-        }
-        let ret = (if real < self.dom.real_mid() { 0 } else { 1 })
-            + (if imag >= self.dom.imag_mid() { 0 } else { 2 });
-        Some(ret)
-    }
-
-    // /// the point must be inside one of the children.
-    // fn child_i_containing(dom: &Domain, children: &[Node; 4], (real, imag): (Real, Imag)) -> usize {
-    //     debug_assert!(dom.contains_point((real, imag)));
-    //     let ret = (if real < dom.real_mid() { 0 } else { 1 })
-    //         + (if imag >= dom.imag_mid() { 0 } else { 2 });
-    //     debug_assert!(children[ret].dom.contains_point((real, imag)));
-    //     ret
-    // }
-
-    // /// must have that leaf_id is a leaf.
-    // /// fails if the domain gets too small.
-    // fn try_split(leaf_id: NodeId, alloc: &mut Alloc) -> Option<()> {
-    //     let child_id = {
-    //         let node = alloc.get1(leaf_id);
-    //         assert!(node.child_id.is_none());
-    //         alloc.insert4(node.dom.split()?.map(Self::new_leaf_uncolored))
-    //     };
-    //     let node = alloc.get1_mut(leaf_id);
-    //     *node = Self {
-    //         dom: node.dom,
-    //         leaf_distance_cache: AtomicU32::new(1),
-    //         color: node.color,
-    //         child_id: Some(child_id),
-    //     };
-    //     Some(())
-    // }
-
-    // fn set_color(&mut self, color: Color32) {
-    //     assert!(self.color.is_none());
-    //     self.color = Some(color);
-    // }
 }
 
 // pub(crate) use alloc::*;
@@ -705,11 +642,12 @@ impl Node {
 //     }
 // }
 
-pub(crate) use new_alloc::*;
-mod new_alloc {
+pub(crate) use alloc2::*;
+mod alloc2 {
     use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize};
 
     use atomic::Atomic;
+    use egui::Order;
 
     use super::*;
 
@@ -725,6 +663,10 @@ mod new_alloc {
     #[derive(Debug, Clone, Copy, PartialEq, Eq, bytemuck::NoUninit)]
     pub(super) struct NodeHandleMut(NonZeroU32);
 
+    #[repr(transparent)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, bytemuck::NoUninit)]
+    struct BitFlag(u8);
+
     // invariant: cur.has_mut_handle implies cur.up_to_date
     // invariant: if someone is reallocating, cur.up_to_date implies old.has_mut_handle
     #[derive(Debug)]
@@ -734,23 +676,22 @@ mod new_alloc {
         /// true iff you're allowed to allocate
         /// !can_alloc implies realloc_lock, !realloc_lock implies can_alloc
         can_alloc: AtomicBool,
-        /// false iff you're allowed to reallocate
+        /// true iff someone is reallocating
         realloc_lock: AtomicBool,
     }
 
     #[derive(Debug)]
     struct AllocInner {
-        len: AtomicUsize,
+        /// the actual allocated length, len_lo <= capacity
+        len_real: AtomicUsize,
+        /// the length we speculatively update when we allocate, len_lo <= len_hi, can be > capacity
+        len_speculative: AtomicUsize,
         /// xxxx xxxx xxxx root node node node node
         mem: Box<[Atomic<Node>]>,
         // TODO: pack these bools into a bitflag
-        has_mut_handle: Box<[AtomicBool]>,
-        /// whether it's ok to read from this memory.
-        /// in the new alloc, it's whether we've moved the element.
-        /// in the old alloc, once we've moved something away, set up_to_date to false.
-        /// the canonical one is cur.up_to_date, the one in old is just for debugging.
-        /// TODO: rename.
-        up_to_date: Box<[AtomicBool]>,
+        flags: Box<[Atomic<BitFlag>]>,
+        // has_mut_handle: Box<[AtomicBool]>,
+        // up_to_date: Box<[AtomicBool]>,
         /// whether it's defined to read from this memory.
         /// we might not need this now that we have up to date.
         /// except that we use SeqCst for debug_is_init, so it might still catch bugs.
@@ -787,12 +728,58 @@ mod new_alloc {
         fn to_index(self) -> usize {
             self.0.get() as usize
         }
+
+        /// note that this doesn't release the mutable handle, use `Alloc::demote` for that.
+        /// this just exists for convenience for some APIs that want a const handle.
+        pub(super) fn to_const(self) -> NodeHandle {
+            NodeHandle(self.0)
+        }
+    }
+
+    impl BitFlag {
+        // they're in this order bc we might allow multiple mutable handles in the future
+
+        const NONE: Self = BitFlag(0);
+        /// whether it's ok to read from this memory.
+        /// in the new alloc, it's whether we've moved the element.
+        /// in the old alloc, once we've moved something away, set up_to_date to false.
+        /// the canonical one is cur.up_to_date, the one in old is just for debugging.
+        /// TODO: rename.
+        const UP_TO_DATE: Self = BitFlag(1);
+        const HAS_MUT_HANDLE: Self = BitFlag(2);
+        const BOTH: Self = BitFlag(Self::UP_TO_DATE.0 | Self::HAS_MUT_HANDLE.0);
+
+        const fn new(up_to_date: bool, has_mut_handle: bool) -> Self {
+            let mut flags = 0;
+            if up_to_date {
+                flags |= Self::UP_TO_DATE.0;
+            }
+            if has_mut_handle {
+                flags |= Self::HAS_MUT_HANDLE.0;
+            }
+            Self(flags)
+        }
+
+        const fn up_to_date(self) -> bool {
+            self.0 & Self::UP_TO_DATE.0 != 0
+        }
+
+        const fn has_mut_handle(self) -> bool {
+            self.0 & Self::HAS_MUT_HANDLE.0 != 0
+        }
+    }
+    impl std::ops::BitOr for BitFlag {
+        type Output = Self;
+
+        fn bitor(self, rhs: Self) -> Self {
+            Self(self.0 | rhs.0)
+        }
     }
 
     impl Default for Alloc {
         fn default() -> Self {
-            const SIZE: usize = 16;
-            // const SIZE: usize = 1048576;
+            // const SIZE: usize = 16;
+            const SIZE: usize = 1048576;
             Self {
                 cur: AtomicPtr::new(Box::into_raw(Box::new(AllocInner::with_capacity(SIZE)))),
                 old: AtomicPtr::new(std::ptr::null_mut()),
@@ -805,30 +792,49 @@ mod new_alloc {
         /// you must demote the returned mut handle to avoid ~leaking memory.
         /// fails if someone already has a mut handle.
         /// fails if the thread reallocating hasn't moved this element over yet.
-        fn try_promote(&self, handle: NodeHandle) -> Option<NodeHandleMut> {
+        pub(super) fn try_promote(&self, handle: NodeHandle) -> Option<NodeHandleMut> {
             let i = handle.to_index();
-            // TODO: what if the pointers swap between here
-            if !unsafe { self.cur.load(Ordering::SeqCst).as_ref().unwrap() }.up_to_date[i]
-                .load(Ordering::SeqCst)
+
+            // // TODO: what if the pointers swap between here
+            // if !unsafe { self.cur.load(Ordering::SeqCst).as_ref().unwrap() }.up_to_date[i]
+            //     .load(Ordering::SeqCst)
+            // {
+            //     return None;
+            // }
+            // // TODO: i'm pretty sure this can be `Relaxed`
+            // // if self.cur.has_mut_handle[i]
+            // //     .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            // //     .is_err()
+            // if unsafe { self.cur.load(Ordering::SeqCst).as_ref().unwrap() }.has_mut_handle[i]
+            //     .swap(true, Ordering::Relaxed)
+            // {
+            //     return None;
+            // }
+            if unsafe { self.cur.load(Ordering::SeqCst).as_ref().unwrap() }.flags[i]
+                .compare_exchange(
+                    BitFlag::new(true, false),
+                    BitFlag::new(true, true),
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                )
+                .is_err()
             {
                 return None;
             }
-            // TODO: i'm pretty sure this can be `Relaxed`
-            // if self.cur.has_mut_handle[i]
-            //     .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-            //     .is_err()
-            if unsafe { self.cur.load(Ordering::SeqCst).as_ref().unwrap() }.has_mut_handle[i]
-                .swap(true, Ordering::Relaxed)
-            {
-                return None;
-            }
+            debug_assert!(
+                unsafe { self.cur.load(Ordering::SeqCst).as_ref().unwrap() }.debug_is_init[i]
+                    .load(Ordering::SeqCst)
+            );
+            println!("promoted handle {}", i);
             Some(NodeHandleMut(handle.0))
         }
         /// this can block.
         /// you must demote the returned mut handle to avoid ~leaking memory.
         pub(super) fn promote(&self, handle: NodeHandle) -> NodeHandleMut {
+            println!("promote start handle {}", handle.to_index());
             loop {
                 if let Some(handle_mut) = self.try_promote(handle) {
+                    println!("promote end handle {}", handle.to_index());
                     return handle_mut;
                 }
                 std::thread::yield_now();
@@ -840,8 +846,13 @@ mod new_alloc {
             let i = handle.to_index();
             // debug_assert!(self.cur.has_mut_handle[i].load(Ordering::SeqCst));
             // self.cur.has_mut_handle[i].store(false, Ordering::Relaxed);
-            let cur = unsafe { self.cur.load(Ordering::Relaxed).as_ref().unwrap() };
-            assert!(cur.has_mut_handle[i].swap(false, Ordering::Relaxed));
+            let cur = unsafe { self.cur.load(Ordering::SeqCst).as_ref().unwrap() };
+            // assert!(cur.has_mut_handle[i].swap(false, Ordering::Relaxed));
+            assert_eq!(
+                cur.flags[i].swap(BitFlag::new(true, false), Ordering::SeqCst),
+                BitFlag::new(true, true)
+            );
+            println!("demoted handle {}", i);
             NodeHandle(handle.0)
         }
 
@@ -852,15 +863,29 @@ mod new_alloc {
             // then slowly acquire mutable handles to the rest of the elements and move them over
             // once you have all the mutable handles, free old
 
+            dbg!("reallocating");
+
             fn try_move_node(cur: &AllocInner, old: &AllocInner, i: usize) -> Option<()> {
-                debug_assert!(!cur.has_mut_handle[i].load(Ordering::SeqCst));
-                debug_assert!(!cur.up_to_date[i].load(Ordering::SeqCst));
+                // debug_assert!(!cur.has_mut_handle[i].load(Ordering::SeqCst));
+                // debug_assert!(!cur.up_to_date[i].load(Ordering::SeqCst));
+                debug_assert_eq!(
+                    cur.flags[i].load(Ordering::SeqCst),
+                    BitFlag::new(false, false)
+                );
                 debug_assert!(!cur.debug_is_init[i].load(Ordering::SeqCst));
-                debug_assert!(old.up_to_date[i].load(Ordering::SeqCst));
+                // debug_assert!(old.up_to_date[i].load(Ordering::SeqCst));
+                debug_assert!(old.flags[i].load(Ordering::SeqCst).up_to_date());
                 debug_assert!(old.debug_is_init[i].load(Ordering::SeqCst));
                 // TODO: relax these
                 // try to acquire the mutable handle in old
-                if !old.has_mut_handle[i].swap(true, Ordering::SeqCst) {
+                // if !old.has_mut_handle[i].swap(true, Ordering::SeqCst) {
+                //     return None;
+                // }
+                // TODO: was i doing the opposite?
+                if old.flags[i]
+                    .swap(BitFlag::new(true, true), Ordering::SeqCst)
+                    .has_mut_handle()
+                {
                     return None;
                 }
                 let node = old.mem[i].load(Ordering::SeqCst);
@@ -868,8 +893,17 @@ mod new_alloc {
                 #[cfg(debug_assertions)]
                 cur.debug_is_init[i].store(true, Ordering::SeqCst);
                 // it's important to set cur.up_to_date before clearing old.up_to_date
-                cur.up_to_date[i].store(true, Ordering::SeqCst);
-                old.up_to_date[i].store(false, Ordering::SeqCst);
+                // cur.up_to_date[i].store(true, Ordering::SeqCst);
+                // old.up_to_date[i].store(false, Ordering::SeqCst);
+                assert_eq!(
+                    cur.flags[i].swap(BitFlag::new(true, false), Ordering::SeqCst),
+                    BitFlag::new(false, false)
+                );
+                // the value of old.has_mut_handle[i] is a bit unconstrained
+                assert_eq!(
+                    old.flags[i].swap(BitFlag::new(false, true), Ordering::SeqCst),
+                    BitFlag::new(true, true)
+                );
                 Some(())
             }
 
@@ -879,7 +913,7 @@ mod new_alloc {
 
             let (old_capacity, old_len) = {
                 let cur = unsafe { &*self.cur.load(Ordering::SeqCst) };
-                (cur.capacity(), cur.len.load(Ordering::SeqCst))
+                (cur.capacity(), cur.len_real.load(Ordering::SeqCst))
             };
 
             let new = AllocInner::with_capacity(2 * old_capacity);
@@ -895,11 +929,11 @@ mod new_alloc {
                     new.try_alloc::<4>().unwrap();
                 }
                 debug_assert_eq!(new.capacity(), 2 * old_capacity);
-                debug_assert_eq!(old_len, new.len.load(Ordering::SeqCst));
+                debug_assert_eq!(old_len, new.len_real.load(Ordering::SeqCst));
                 debug_assert_eq!(
                     old_len,
                     unsafe { &*self.cur.load(Ordering::SeqCst) }
-                        .len
+                        .len_real
                         .load(Ordering::SeqCst)
                 );
             }
@@ -939,6 +973,14 @@ mod new_alloc {
                 }
             }
 
+            dbg!(&cur.flags);
+            dbg!(&cur.debug_is_init);
+            dbg!(&old.flags);
+            dbg!(&old.debug_is_init);
+            todo!(
+                "it currently looks like someone (not one that uses try_promote) isn't freeing their handle, making it deadlock"
+            );
+
             // move over the rest of the elements
             {
                 let mut index = 0;
@@ -961,6 +1003,8 @@ mod new_alloc {
                 unsafe { drop(Box::from_raw(old)) };
                 self.old.store(std::ptr::null_mut(), Ordering::SeqCst);
             }
+
+            dbg!("done reallocating");
         }
 
         fn alloc<const N: usize>(&self) -> NodeHandle {
@@ -1005,13 +1049,18 @@ mod new_alloc {
                 unsafe { self.cur.load(Ordering::SeqCst).as_ref().unwrap() }.debug_is_init[i]
                     .store(true, Ordering::SeqCst);
 
-                debug_assert!(
-                    !unsafe { self.cur.load(Ordering::SeqCst).as_ref().unwrap() }.up_to_date[i]
-                        .load(Ordering::SeqCst)
+                // debug_assert!(
+                //     !unsafe { self.cur.load(Ordering::SeqCst).as_ref().unwrap() }.up_to_date[i]
+                //         .load(Ordering::SeqCst)
+                // );
+                // // TODO: relax this
+                // unsafe { self.cur.load(Ordering::SeqCst).as_ref().unwrap() }.up_to_date[i]
+                //     .store(true, Ordering::SeqCst);
+                assert_eq!(
+                    unsafe { self.cur.load(Ordering::SeqCst).as_ref().unwrap() }.flags[i]
+                        .swap(BitFlag::new(true, false), Ordering::SeqCst),
+                    BitFlag::new(false, false)
                 );
-                // TODO: relax this
-                unsafe { self.cur.load(Ordering::SeqCst).as_ref().unwrap() }.up_to_date[i]
-                    .store(true, Ordering::SeqCst);
 
                 // we know statically that promoting the handle will succeed
                 // so maybe we should do this better
@@ -1098,6 +1147,13 @@ mod new_alloc {
             }
             unreachable!();
         }
+
+        pub(super) fn debug(&self) {
+            // let cur = unsafe { self.cur.load(Ordering::SeqCst).as_ref().unwrap() };
+            // dbg!(cur);
+            dbg!(self.can_alloc.load(Ordering::SeqCst));
+            dbg!(self.realloc_lock.load(Ordering::SeqCst));
+        }
     }
 
     impl AllocInner {
@@ -1106,26 +1162,23 @@ mod new_alloc {
 
             let mut mem = Vec::with_capacity(capacity);
             mem.resize_with(capacity, || Atomic::new(Node::uninit()));
-            let mut has_mut_handle = Vec::with_capacity(capacity);
-            has_mut_handle.resize_with(capacity, || AtomicBool::new(false));
-            let mut up_to_date = Vec::with_capacity(capacity);
-            up_to_date.resize_with(capacity, || AtomicBool::new(false));
+            let mut flags = Vec::with_capacity(capacity);
+            flags.resize_with(capacity, || Atomic::new(BitFlag::NONE));
             let mut debug_is_init = Vec::with_capacity(capacity);
             debug_is_init.resize_with(capacity, || AtomicBool::new(false));
 
             Self {
-                len: AtomicUsize::new(3),
+                len_real: AtomicUsize::new(3),
+                len_speculative: AtomicUsize::new(3),
                 mem: mem.into_boxed_slice(),
-                has_mut_handle: has_mut_handle.into_boxed_slice(),
-                up_to_date: up_to_date.into_boxed_slice(),
+                flags: flags.into_boxed_slice(),
                 debug_is_init: debug_is_init.into_boxed_slice(),
             }
         }
 
         fn capacity(&self) -> usize {
             let ret = self.mem.len();
-            debug_assert_eq!(ret, self.has_mut_handle.len());
-            debug_assert_eq!(ret, self.up_to_date.len());
+            debug_assert_eq!(ret, self.flags.len());
             debug_assert_eq!(ret, self.debug_is_init.len());
             ret
         }
@@ -1133,11 +1186,11 @@ mod new_alloc {
         /// fails if we're out of memory.
         fn try_alloc<const N: usize>(&self) -> Option<NodeHandle> {
             assert!(N == 1 || N == 4);
-            let i = self.len.fetch_add(N, Ordering::SeqCst);
-            if i + N >= self.mem.len() {
-                self.len.fetch_sub(N, Ordering::SeqCst);
+            let i = self.len_speculative.fetch_add(N, Ordering::SeqCst);
+            if i + N > self.mem.len() {
                 return None;
             }
+            let i = self.len_real.fetch_add(N, Ordering::SeqCst);
             let handle = NodeHandle(NonZeroU32::new(i as u32).unwrap());
             if N == 1 {
                 debug_assert_eq!(i, 3);
@@ -1161,7 +1214,7 @@ mod new_alloc {
             let i = handle.to_index();
             // `Relaxed` implies this can fail spuriously
             // TODO: relax these orderings
-            if self.up_to_date[i].load(Ordering::SeqCst) {
+            if self.flags[i].load(Ordering::SeqCst).up_to_date() {
                 debug_assert!(self.debug_is_init[i].load(Ordering::SeqCst));
                 Some(f(self.mem[i].load(Ordering::SeqCst)))
             } else {
@@ -1177,9 +1230,10 @@ mod new_alloc {
         ) -> Option<Ret> {
             let i = handle.to_index();
             // TODO: relax these orderings
-            if self.up_to_date[i].load(Ordering::SeqCst) {
+            let flag = self.flags[i].load(Ordering::SeqCst);
+            if flag.up_to_date() {
                 debug_assert!(self.debug_is_init[i].load(Ordering::SeqCst));
-                debug_assert!(self.has_mut_handle[i].load(Ordering::SeqCst));
+                debug_assert!(flag.has_mut_handle());
                 Some(f(&self.mem[i]))
             } else {
                 None
@@ -1397,46 +1451,31 @@ impl Tree {
 
     /// must have that leaf_id is a leaf.
     /// fails if the domain gets too small.
-    fn try_split(&mut self, leaf_handle: NodeHandle) -> Option<()> {
-        // let mut alloc = self.alloc.write().unwrap();
-        // let alloc = self.alloc.get_mut().expect("alloc poisoned");
-        // let new_leafs = {
-        //     let node = alloc.get1_cloned(leaf_id);
-        //     assert!(node.child_id.is_none());
-        //     node.dom.split()?.map(Node::new_leaf_uncolored)
-        // };
-        // let child_id = alloc.insert4(new_leafs);
-        // let node = alloc.get1_cloned(leaf_id);
-        // alloc.update(leaf_id, |node| {
-        //     node.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |node| {
-        //         debug_assert!(node.child_id.is_none());
-        //         Some(Node {
-        //             left_child: Some(child_id),
-        //             ..node
-        //         })
-        //     })
-        //     .unwrap();
-        // });
+    /// returns left child.
+    fn try_split(&self, leaf_handle: NodeHandleMut) -> Option<NodeHandle> {
+        debug_assert!(
+            self.alloc.get_color(leaf_handle.to_const()).is_some(),
+            "right now we only allow splitting colored leafs"
+        );
+
         let doms = {
-            let dom = self.alloc.get_dom(leaf_handle);
-            debug_assert!(self.alloc.get_left_child(leaf_handle).is_none());
+            let dom = self.alloc.get_dom(leaf_handle.to_const());
+            debug_assert!(self.alloc.get_left_child(leaf_handle.to_const()).is_none());
             dom.split()?
         };
         let child_handle = self.alloc.insert_leaf_uncolored4(doms);
-        let leaf_handle = self.alloc.promote(leaf_handle);
         self.alloc.update_with(leaf_handle, |node| {
-            node.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |node| {
-                debug_assert!(node.left_child.is_none());
+            let _ = node.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |node| {
+                assert!(node.left_child.is_none());
                 debug_assert_eq!(node.leaf_distance_cache, 0);
                 Some(Node {
                     left_child: Some(child_handle),
                     leaf_distance_cache: 1,
                     ..node
                 })
-            })
+            });
         });
-        self.alloc.demote(leaf_handle);
-        Some(())
+        Some(child_handle)
     }
 
     // /// ensures that we have < n nodes
@@ -1663,51 +1702,13 @@ impl Tree {
     // TODO: better ordering
     #[cfg_attr(feature = "profiling", inline(never))]
     // pub(crate) fn refine(slf: Arc<Self>, window: Window) -> Option<[NodeId; 4]> {
-    pub(crate) fn refine(&mut self, window: Window) -> Option<[NodeHandle; 4]> {
+    pub(crate) fn refine(&self, window: Window) -> Option<[NodeHandle; 4]> {
         let start = std::time::Instant::now();
-
-        // /// returns `None` if no leaf intersects the window
-        // #[cfg_attr(feature = "profiling", inline(never))]
-        // // fn get_shallowest_leaf(tree: &mut Tree, window: Window) -> Option<&mut Node> {
-        // fn get_shallowest_leaf_oracle(
-        //     tree: &mut Tree,
-        //     window: Window,
-        // ) -> Option<(u32, (Real, Imag))> {
-        //     // queue instead of stack bc we want to visit shallower nodes first
-        //     let mut queue = VecDeque::with_capacity(64);
-        //     queue.push_back((&mut tree.root, 0));
-        //     let mut shallowest_depth = u32::MAX;
-        //     // TODO: change this to a Vec and store all the shallowest leafs
-        //     let mut shallowest_leaf = None;
-        //     while let Some((node, depth)) = queue.pop_front() {
-        //         if !window.overlaps(node.dom) {
-        //             continue;
-        //         }
-        //         if depth >= shallowest_depth {
-        //             continue;
-        //         }
-        //         match (&node.color, node.children.as_deref_mut()) {
-        //             (_, Some(children)) => {
-        //                 queue.extend((children).iter_mut().map(|c| (c, depth + 1)));
-        //             }
-        //             (Some(color), None) => {
-        //                 if depth < shallowest_depth {
-        //                     shallowest_depth = depth;
-        //                     shallowest_leaf = Some(node);
-        //                 }
-        //             }
-        //             (None, None) => {}
-        //         }
-        //     }
-        //     // shallowest_leaf
-        //     Some((shallowest_depth, shallowest_leaf?.dom.mid()))
-        // }
 
         #[cfg_attr(feature = "profiling", inline(never))]
         /// returns `None` if no leaf intersects the window
         fn get_shallowest_leaf(tree: &Tree, window: Window) -> Option<(u32, NodeHandle)> {
-            // queue instead of stack bc we want to visit shallower nodes first
-            // TODO: the queue is probably worse now
+            // TODO: avoid this allocation
             let mut stack = Vec::with_capacity(64);
             // stack.push((&mut *tree.alloc.get1(tree.root), 0));
             stack.push((tree.root, 0));
@@ -1728,63 +1729,60 @@ impl Tree {
                 if depth >= shallowest_depth {
                     continue;
                 }
-                match (tree.alloc.get_color(node_id), tree.alloc.get_left_child(node_id)) {
-                    (_, Some(child_id)) => {
-                        // let children = alloc.get4_cloned(child_id);
-                        // let leaf_distance = internal.compute_leaf_distance();
-                        // let leaf_distance = children
-                        //     .iter()
-                        //     .map(|c| c.leaf_distance_cache)
-                        //     .min()
-                        //     .unwrap()
-                        //     + 1;
-                        let leaf_distance = child_id
-                            .siblings()
-                            .map(|child_handle| tree.alloc.get_leaf_distance_cache(child_handle))
-                            .iter()
-                            .min()
-                            .unwrap()
-                            + 1;
-                        if leaf_distance < tree.alloc.get_leaf_distance_cache(node_id) {
-                            let node_id = tree.alloc.promote(node_id);
-                            tree.alloc.update_with(node_id, |node| {
-                                let _ =
-                                    node.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |node| {
-                                        if leaf_distance < node.leaf_distance_cache {
-                                            Some(Node {
-                                                leaf_distance_cache: leaf_distance,
-                                                ..node
-                                            })
-                                        } else {
-                                            None
-                                        }
-                                    });
+                if let Some(child_id) = tree.alloc.get_left_child(node_id) {
+                    // let children = alloc.get4_cloned(child_id);
+                    // let leaf_distance = internal.compute_leaf_distance();
+                    // let leaf_distance = children
+                    //     .iter()
+                    //     .map(|c| c.leaf_distance_cache)
+                    //     .min()
+                    //     .unwrap()
+                    //     + 1;
+                    let leaf_distance = child_id
+                        .siblings()
+                        .map(|child_handle| tree.alloc.get_leaf_distance_cache(child_handle))
+                        .iter()
+                        .min()
+                        .unwrap()
+                        + 1;
+                    if leaf_distance < tree.alloc.get_leaf_distance_cache(node_id) {
+                        let node_id = tree.alloc.promote(node_id);
+                        tree.alloc.update_with(node_id, |node| {
+                            let _ = node.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |node| {
+                                if leaf_distance < node.leaf_distance_cache {
+                                    Some(Node {
+                                        leaf_distance_cache: leaf_distance,
+                                        ..node
+                                    })
+                                } else {
+                                    None
+                                }
                             });
-                            tree.alloc.demote(node_id);
-                            // node.leaf_distance_cache = leaf_distance;
-                            // todo!("this is incorrect now");
-                        }
-                        // node.leaf_distance_cache.fetch_min(leaf_distance, Ordering::Relaxed);
-                        if leaf_distance + depth >= shallowest_depth {
-                            continue;
-                        }
-                        // stack.extend(
-                        //     internal
-                        //         .children
-                        //         .iter_mut()
-                        //         .map(|c| (c.as_mut(), depth + 1)),
-                        // );
-                        // // TODO: does this sort the nodes in place???
-                        // let mut children: [&mut Node; 4] = children.each_mut();
-                        // children.sort_by_key(|c| c.leaf_distance_cache());
-                        // stack.extend(children.into_iter().map(|c| (c, depth + 1)));
-                        stack.extend(child_id.siblings().map(|c| (c, depth + 1)).into_iter());
+                        });
+                        tree.alloc.demote(node_id);
+                        // node.leaf_distance_cache = leaf_distance;
+                        // todo!("this is incorrect now");
                     }
-                    (color, None) => {
-                        if color.is_some() && depth < shallowest_depth {
-                            shallowest_depth = depth;
-                            shallowest_leaf_id = Some(node_id);
-                        }
+                    // node.leaf_distance_cache.fetch_min(leaf_distance, Ordering::Relaxed);
+                    if leaf_distance + depth >= shallowest_depth {
+                        continue;
+                    }
+                    // stack.extend(
+                    //     internal
+                    //         .children
+                    //         .iter_mut()
+                    //         .map(|c| (c.as_mut(), depth + 1)),
+                    // );
+                    // // TODO: does this sort the nodes in place???
+                    // let mut children: [&mut Node; 4] = children.each_mut();
+                    // children.sort_by_key(|c| c.leaf_distance_cache());
+                    // stack.extend(children.into_iter().map(|c| (c, depth + 1)));
+                    stack.extend(child_id.siblings().map(|c| (c, depth + 1)).into_iter());
+                } else {
+                    let color = tree.alloc.get_color(node_id);
+                    if color.is_some() && depth < shallowest_depth {
+                        shallowest_depth = depth;
+                        shallowest_leaf_id = Some(node_id);
                     }
                 }
             }
@@ -1793,79 +1791,45 @@ impl Tree {
             Some((shallowest_depth, shallowest_leaf_id?))
         }
 
+        fn colored_leafs_in_window_at_depth(
+            tree: &Tree,
+            window: Window,
+            shallowest_depth: u32,
+        ) -> impl Iterator<Item = NodeHandle> {
+            // TODO: avoid this allocation
+            let mut stack = Vec::with_capacity(64);
+            stack.push((tree.root, 0));
+            std::iter::from_fn(move || {
+                while let Some((node_id, depth)) = stack.pop() {
+                    if !window.overlaps(tree.alloc.get_dom(node_id)) {
+                        continue;
+                    }
+                    if depth > shallowest_depth {
+                        continue;
+                    }
+                    if let Some(child_id) = tree.alloc.get_left_child(node_id) {
+                        // don't bother updating the caches
+                        let leaf_distance = tree.alloc.get_leaf_distance_cache(node_id);
+                        if leaf_distance + depth > shallowest_depth {
+                            continue;
+                        }
+                        stack.extend(child_id.siblings().map(|c| (c, depth + 1)).into_iter());
+                    } else {
+                        let color = tree.alloc.get_color(node_id);
+                        if color.is_some() && depth == shallowest_depth {
+                            return Some(node_id);
+                        }
+                    }
+                }
+                None
+            })
+        }
+
         // how deep is the shallowest leaf that intersects the window?
         // let node = get_shallowest_leaf(self, window)?;
 
         // TODO: is this really correct?
-        let (shallowest_depth, node_id) = get_shallowest_leaf(self, window)?;
-        // let (shallowest_depth_oracle, _) = get_shallowest_leaf_oracle(self, window)?;
-        // assert_eq!(shallowest_depth, shallowest_depth_oracle,);
-
-        // #[inline(never)]
-        // fn update_leaf_distance(tree: &mut Tree, leaf_mid: (Real, Imag)) {
-        //     // let mut stack: Vec<&mut Internal> = Vec::with_capacity(64);
-        //     // {
-        //     //     let mut node = &mut tree.root;
-        //     //     while let Node::Internal(internal) = node {
-        //     //         let child_i = internal.child_i_containing(leaf_mid).unwrap();
-        //     //         node = internal.children[child_i].as_mut();
-        //     //         stack.push(internal);
-        //     //     }
-        //     // }
-        //     let mut stack: Vec<&mut Internal> = Vec::with_capacity(64);
-        //     {
-        //         let mut node = &mut tree.root;
-        //         while let Node::Internal(internal) = node {
-        //             let child_i = internal.child_i_containing(leaf_mid).unwrap();
-        //             unsafe {
-        //                 node = (internal as *mut Internal).as_mut().unwrap().children[child_i]
-        //                     .as_mut();
-        //             }
-        //             stack.push(internal);
-        //         }
-        //     }
-
-        //     if let Some(internal) = stack.pop() {
-        //         assert!(internal.leaf_distance == 1 || internal.leaf_distance == 2);
-        //         // if internal.leaf_distance == 2 {
-        //         //     return;
-        //         // }
-        //         internal.leaf_distance = 2;
-        //     }
-        //     while let Some(internal) = stack.pop() {
-        //         // let internal = unsafe { &mut *internal };
-        //         let leaf_distance = internal
-        //             .children
-        //             .iter()
-        //             .map(|c| c.leaf_distance())
-        //             .min()
-        //             .unwrap()
-        //             + 1;
-        //         assert!(
-        //             leaf_distance == internal.leaf_distance
-        //                 || leaf_distance == internal.leaf_distance + 1
-        //         );
-        //         if leaf_distance == internal.leaf_distance {
-        //             break;
-        //         }
-        //         internal.leaf_distance = leaf_distance;
-        //     }
-        // }
-        // update_leaf_distance(self, node_mid);
-
-        // #[cfg_attr(feature = "profiling", inline(never))]
-        // fn get_leaf_from_mid(tree: &mut Tree, mid: (Real, Imag)) -> &mut Node {
-        //     let mut node = &mut tree.root;
-        //     // while let Some(children) = node.children {
-        //     //     let child_i = node.child_i_containing(mid);
-        //     while let Some(child_i) = node.child_i_containing(mid) {
-        //         node = &mut node.children.as_mut().unwrap()[child_i];
-        //     }
-        //     node
-        // }
-        // let node = get_leaf_from_mid(self, node_mid);
-
-        // let node = self.alloc.get1_mut(node_id);
+        let (shallowest_depth, handle) = get_shallowest_leaf(self, window)?;
 
         // assert!(node.color.is_some());
         // assert!(node.child_id.is_none());
@@ -1879,33 +1843,39 @@ impl Tree {
         // we should try to split another node,
         // rather than failing immediately
 
-        // Node::try_split(node_id, &mut self.alloc)?;
-        // Self::try_split(slf.clone(), node_id);
-        self.try_split(node_id);
-        // let alloc = self.alloc.read().unwrap();
-        // let alloc = self.alloc.get_mut().expect("alloc poisoned");
-        // let node = alloc.get1_cloned(node_id);
-        // // we can't just `internal.children.map(|c| c.dom.mid())` bc of rust
-        // let points = self
-        //     .alloc
-        //     .get4(node.child_id.expect("we just split the node"))
-        //     .map(|c| c.dom.mid());
+        // self.alloc.debug();
+        // dbg!(shallowest_depth);
 
-        #[cfg(false)]
-        {
-            let elapsed = start.elapsed();
-            ELAPSED_NANOS.fetch_add(
-                elapsed.as_nanos() as u64,
-                std::sync::atomic::Ordering::Relaxed,
-            );
-            COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        for handle in colored_leafs_in_window_at_depth(self, window, shallowest_depth) {
+            if let Some(handle) = self.alloc.try_promote(handle) {
+                // check that it's still a leaf, someone might have split it before we got the mutable handle
+                let left_child = self
+                    .alloc
+                    .get_left_child(handle.to_const())
+                    .or_else(|| self.try_split(handle));
+                self.alloc.demote(handle);
+                if let Some(left_child) = left_child {
+                    return Some(left_child.siblings());
+                }
+            }
         }
-        Some(
-            self.alloc
-                .get_left_child(node_id)
-                .expect("we just split it")
-                .siblings(),
-        )
+        None
+
+        // #[cfg(false)]
+        // {
+        //     let elapsed = start.elapsed();
+        //     ELAPSED_NANOS.fetch_add(
+        //         elapsed.as_nanos() as u64,
+        //         std::sync::atomic::Ordering::Relaxed,
+        //     );
+        //     COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // }
+        // Some(
+        //     self.alloc
+        //         .get_left_child(node_id)
+        //         .expect("we just split it")
+        //         .siblings(),
+        // )
     }
 
     // /// returns `None` if we shouldn't/can't refine
@@ -2104,12 +2074,7 @@ impl Tree {
     /// promoting a `LeafReserved` to a `LeafColor`
     // TODO: should the point and color actually be a [_; 4]?
     #[cfg_attr(feature = "profiling", inline(never))]
-    pub(crate) fn insert(
-        &mut self,
-        // (real, imag): (Real, Imag),
-        node_id: NodeHandle,
-        color: Color32,
-    ) {
+    pub(crate) fn insert(&self, handle: NodeHandle, color: Color32) {
         // assert!(self.dom.contains_point((real, imag)));
         // let mut node = &mut self.root;
         // // while let Node::Internal(internal) = node {
@@ -2127,10 +2092,15 @@ impl Tree {
         // }
         // let mut alloc = self.alloc.write().unwrap();
         // let alloc = self.alloc.read().unwrap();
-        let node_id = self.alloc.promote(node_id);
+        let node_id = self.alloc.promote(handle);
         self.alloc.update_with(node_id, |node| {
             node.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |node| {
-                assert!(node.color.is_none());
+                assert!(
+                    node.color.is_none(),
+                    "node_id: {:?}, node: {:?}",
+                    node_id,
+                    node
+                );
                 Some(Node {
                     color: OptionColor::new_some(color),
                     ..node
@@ -2189,7 +2159,10 @@ impl Tree {
         // let alloc = self.alloc.read().unwrap();
         let mut node_id = self.root;
         let mut closest_sample_dist = distance(center, self.dom.mid());
-        let mut closest_sample_color = self.alloc.get_color(node_id).expect("root must have a color");
+        let mut closest_sample_color = self
+            .alloc
+            .get_color(node_id)
+            .expect("root must have a color");
 
         loop {
             // let node = self.alloc.get1_cloned(node_id);

@@ -130,6 +130,7 @@ impl Domain {
         // ) <= self.rad()
     }
 
+    /// the point must be inside the domain
     pub(crate) fn child_offset_containing(&self, (real, imag): (Real, Imag)) -> usize {
         debug_assert!(self.contains_point((real, imag)));
         (if real < self.real_mid() { 0 } else { 1 }) + (if imag >= self.imag_mid() { 0 } else { 2 })

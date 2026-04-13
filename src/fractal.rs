@@ -2,7 +2,7 @@ use core::panic;
 use std::{
     sync::{
         Arc, Mutex, RwLock, TryLockError,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc,
     },
     thread,
@@ -39,9 +39,14 @@ pub(crate) struct Fractal {
     pub(crate) tree: Arc<RwLock<Tree>>,
     // pub(crate) tree: RefCell<Tree>,
     // pub(crate) tree: Arc<Tree>,
-    /// the `Window` in which we're sampling
-    /// note: this is currently unused
-    window: Option<Window>,
+    /// the `Window` in which we're sampling.
+    /// `None` iff sampling is disabled.
+    /// note that this is similar to shared_texture.camera_map.window,
+    /// it's just that sampling and rendering are decoupled (eg either one may be disabled).
+    /// TODO: this could be an atomic option instead of a `RwLock`.
+    window: Arc<RwLock<Option<Window>>>,
+    /// how many samples were taken since we last cleared this?
+    sample_counter: Arc<AtomicU64>,
     shared_texture: SharedTexture,
     workers: Vec<WorkerHandle>,
     sample_response_i: usize,
@@ -54,16 +59,19 @@ impl Fractal {
             - 1)
         .max(1);
         let tree = Arc::new(RwLock::new(Tree::new(Domain::default())));
-        let window = None;
+        let window = Arc::new(RwLock::new(None));
+        let sample_counter = Arc::new(AtomicU64::new(0));
         let shared_texture = SharedTexture::default();
         let workers = (0..thread_count)
             .map(|thread_i| {
-                let (sample_response_sender, sample_response_receiver) = mpsc::channel();
-                let (sample_request_sender, sample_request_receiver) = mpsc::channel();
+                // let (sample_response_sender, sample_response_receiver) = mpsc::channel();
+                // let (sample_request_sender, sample_request_receiver) = mpsc::channel();
                 // let (render_response_sender, render_response_receiver) = mpsc::channel();
                 // let (render_request_sender, render_request_receiver) = mpsc::channel();
 
                 let tree = Arc::clone(&tree);
+                let window = Arc::clone(&window);
+                let sample_counter = Arc::clone(&sample_counter);
                 let shared_texture = Arc::clone(&shared_texture);
 
                 let handle = thread::Builder::new()
@@ -72,10 +80,12 @@ impl Fractal {
                         WorkerLocal {
                             thread_i,
                             tree,
-                            window: None,
+                            window,
+                            sample_counter,
+                            to_be_colored: Vec::with_capacity(4),
                             shared_texture,
-                            sample_request_receiver,
-                            sample_response_sender,
+                            // sample_request_receiver,
+                            // sample_response_sender,
                             // render_request_receiver,
                             // render_response_sender,
                         }
@@ -84,9 +94,9 @@ impl Fractal {
                     .unwrap();
                 WorkerHandle {
                     handle,
-                    sample_request_sender,
-                    sample_response_receiver,
-                    samples_in_flight: 0,
+                    // sample_request_sender,
+                    // sample_response_receiver,
+                    // samples_in_flight: 0,
                     // render_request_sender,
                     // render_response_receiver,
                     // render_in_flight: 0,
@@ -96,6 +106,7 @@ impl Fractal {
         Self {
             tree,
             window,
+            sample_counter,
             shared_texture,
             workers,
             sample_response_i: 0,
@@ -111,12 +122,12 @@ impl Fractal {
     //     Self::new(Box::new(|point| sample::mandelbrot_sample(point).color()), pool)
     // }
 
-    pub(crate) fn samples_in_flight(&self) -> usize {
-        self.workers
-            .iter()
-            .map(|worker| worker.samples_in_flight)
-            .sum()
-    }
+    // pub(crate) fn samples_in_flight(&self) -> usize {
+    //     self.workers
+    //         .iter()
+    //         .map(|worker| worker.samples_in_flight)
+    //         .sum()
+    // }
 
     // pub(crate) fn render_in_flight(&self) -> usize {
     //     self.workers
@@ -133,116 +144,123 @@ impl Fractal {
     //     self.pool.join();
     // }
 
-    /// kinda hacky bc it'll change in the future.
-    /// currently, you need to call this every frame.
-    /// but in the future you'll only need to call this when the sampling state changes.
-    /// i could make it match the future api by having Fractal spawn a thread and communicate with it, but whatever.
+    /// updates the window we're sampling in.
+    /// should be called every frame.
     /// returns how many samples were taken since the last time this was called.
+    /// TODO: rename.
     #[cfg_attr(feature = "profiling", inline(never))]
-    pub(crate) fn enable_sampling(&mut self, window: Window) -> usize {
-        self.window = Some(window);
+    pub(crate) fn enable_sampling(&mut self, window: Window) -> u64 {
+        // self.window = Some(window);
 
-        #[cfg_attr(feature = "profiling", inline(never))]
-        fn receive_sample(
-            workers: &mut [WorkerHandle],
-            sample_response_i: &mut usize,
-        ) -> Option<SampleResponse> {
-            let old_sample_response_i = *sample_response_i;
-            loop {
-                let worker = &mut workers[*sample_response_i];
-                if let Ok((point, (real, imag), color)) = worker.sample_response_receiver.try_recv()
-                {
-                    assert!(
-                        worker.samples_in_flight > 0,
-                        "this is an invariant of the type"
-                    );
-                    worker.samples_in_flight -= 1;
-                    return Some((point, (real, imag), color));
-                }
-                *sample_response_i += 1;
-                *sample_response_i %= workers.len();
-                if *sample_response_i == old_sample_response_i {
-                    return None;
-                }
-            }
-        }
-
-        // take samples out of the pool
-        let mut sample_count = 0;
-        while let Some((node_id, (real, imag), color)) =
-            receive_sample(&mut self.workers, &mut self.sample_response_i)
-        {
-            // Arc::get_mut(&mut self.tree).unwrap().insert(node_id, color);
-            self.tree
-                .write()
-                .expect("tree poisoned")
-                .insert(node_id, color);
-            sample_count += 1;
-        }
-
-        // if self.pool.samples_in_flight() == 0 {
-        //     println!("threads were starved, no samples in flight");
+        // #[cfg_attr(feature = "profiling", inline(never))]
+        // fn receive_sample(
+        //     workers: &mut [WorkerHandle],
+        //     sample_response_i: &mut usize,
+        // ) -> Option<SampleResponse> {
+        //     let old_sample_response_i = *sample_response_i;
+        //     loop {
+        //         let worker = &mut workers[*sample_response_i];
+        //         if let Ok((point, (real, imag), color)) = worker.sample_response_receiver.try_recv()
+        //         {
+        //             assert!(
+        //                 worker.samples_in_flight > 0,
+        //                 "this is an invariant of the type"
+        //             );
+        //             worker.samples_in_flight -= 1;
+        //             return Some((point, (real, imag), color));
+        //         }
+        //         *sample_response_i += 1;
+        //         *sample_response_i %= workers.len();
+        //         if *sample_response_i == old_sample_response_i {
+        //             return None;
+        //         }
+        //     }
         // }
 
-        #[cfg_attr(feature = "profiling", inline(never))]
-        fn request_sample(
-            workers: &mut [WorkerHandle],
-            node_id: NodeHandle,
-            (real, imag): (Real, Imag),
-        ) {
-            // TODO: or maybe just do round robin
-            // actually with how efficiently cores work that would be bad
-            // actually threads get put on different cores, so maybe it's not that bad
-            // but it's still bad over a single frame
-            #[cfg(false)]
-            {
-                WORKER_HIST[self
-                    .workers
-                    .iter()
-                    .enumerate()
-                    .min_by_key(|(i, worker)| worker.sample_in_flight)
-                    .unwrap()
-                    .0]
-                    .fetch_add(1, std::sync::atomic::Ordering::Release);
-            }
-            let worker = workers
-                .iter_mut()
-                .min_by_key(|worker| worker.samples_in_flight)
-                .unwrap();
-            worker
-                .sample_request_sender
-                .send((node_id, (real, imag)))
-                .unwrap();
-            worker.samples_in_flight += 1;
+        // // take samples out of the pool
+        // let mut sample_count = 0;
+        // while let Some((node_id, (real, imag), color)) =
+        //     receive_sample(&mut self.workers, &mut self.sample_response_i)
+        // {
+        //     // Arc::get_mut(&mut self.tree).unwrap().insert(node_id, color);
+        //     self.tree
+        //         .write()
+        //         .expect("tree poisoned")
+        //         .insert(node_id, color);
+        //     sample_count += 1;
+        // }
+
+        // // if self.pool.samples_in_flight() == 0 {
+        // //     println!("threads were starved, no samples in flight");
+        // // }
+
+        // #[cfg_attr(feature = "profiling", inline(never))]
+        // fn request_sample(
+        //     workers: &mut [WorkerHandle],
+        //     node_id: NodeHandle,
+        //     (real, imag): (Real, Imag),
+        // ) {
+        //     // TODO: or maybe just do round robin
+        //     // actually with how efficiently cores work that would be bad
+        //     // actually threads get put on different cores, so maybe it's not that bad
+        //     // but it's still bad over a single frame
+        //     #[cfg(false)]
+        //     {
+        //         WORKER_HIST[self
+        //             .workers
+        //             .iter()
+        //             .enumerate()
+        //             .min_by_key(|(i, worker)| worker.sample_in_flight)
+        //             .unwrap()
+        //             .0]
+        //             .fetch_add(1, std::sync::atomic::Ordering::Release);
+        //     }
+        //     let worker = workers
+        //         .iter_mut()
+        //         .min_by_key(|worker| worker.samples_in_flight)
+        //         .unwrap();
+        //     worker
+        //         .sample_request_sender
+        //         .send((node_id, (real, imag)))
+        //         .unwrap();
+        //     worker.samples_in_flight += 1;
+        // }
+
+        // // request samples
+        // // TODO: cancel samples if we pan away (this won't be needed in the future)
+        // const MAX_IN_FLIGHT: usize = 512;
+        // while self.samples_in_flight() < MAX_IN_FLIGHT {
+        //     let Some(node_ids) =
+        //         Tree::refine(&mut self.tree.write().expect("tree poisoned"), window)
+        //     else {
+        //         break;
+        //     };
+        //     for node_id in node_ids {
+        //         request_sample(
+        //             &mut self.workers,
+        //             node_id,
+        //             self.tree
+        //                 .try_read()
+        //                 .expect("only the main thread should be writing the tree")
+        //                 .mid_of_node_id(node_id),
+        //         );
+        //     }
+        // }
+
+        // update the shared window
+        {
+            let mut shared_window = self.window.write().expect("window poisoned");
+            *shared_window = Some(window);
         }
 
-        // request samples
-        // TODO: cancel samples if we pan away (this won't be needed in the future)
-        const MAX_IN_FLIGHT: usize = 512;
-        while self.samples_in_flight() < MAX_IN_FLIGHT {
-            let Some(node_ids) =
-                Tree::refine(&mut self.tree.write().expect("tree poisoned"), window)
-            else {
-                break;
-            };
-            for node_id in node_ids {
-                request_sample(
-                    &mut self.workers,
-                    node_id,
-                    self.tree
-                        .try_read()
-                        .expect("only the main thread should be writing the tree")
-                        .mid_of_node_id(node_id),
-                );
-            }
-        }
-        sample_count
+        self.sample_counter.swap(0, Ordering::SeqCst)
     }
 
-    /// currently nearly a nop, but won't be in the future
+    /// sets the shared window to `None`
     #[cfg_attr(feature = "profiling", inline(never))]
     pub(crate) fn disable_sampling(&mut self) {
-        self.window = None;
+        let mut shared_window = self.window.write().expect("window poisoned");
+        *shared_window = None;
     }
 
     /// it's optional to call this every frame
@@ -557,14 +575,14 @@ type RenderResponse = (usize, Vec<Color32>);
 /// owned by the pool/main thread
 struct WorkerHandle {
     handle: thread::JoinHandle<()>,
-    sample_request_sender: mpsc::Sender<SampleRequest>,
-    /// instead of having one response channel per worker,
-    /// we could just have one owned by pool,
-    /// but this is more symmetric,
-    /// and will be removed anyway once i do better parallelism
-    sample_response_receiver: mpsc::Receiver<SampleResponse>,
-    /// how many samples have been requested but not yet received a response for?
-    samples_in_flight: usize,
+    // sample_request_sender: mpsc::Sender<SampleRequest>,
+    // /// instead of having one response channel per worker,
+    // /// we could just have one owned by pool,
+    // /// but this is more symmetric,
+    // /// and will be removed anyway once i do better parallelism
+    // sample_response_receiver: mpsc::Receiver<SampleResponse>,
+    // /// how many samples have been requested but not yet received a response for?
+    // samples_in_flight: usize,
     // render_request_sender: mpsc::Sender<RenderRequest>,
     // render_response_receiver: mpsc::Receiver<RenderResponse>,
     // render_in_flight: usize,
@@ -760,23 +778,30 @@ struct WorkerLocal {
     thread_i: usize,
     tree: Arc<RwLock<Tree>>,
     // tree: Arc<Tree>,
-    /// the `Window` in which we're sampling
-    /// `None` iff sampling is disabled
-    window: Option<Window>,
+    /// the `Window` in which we're sampling.
+    /// `None` iff sampling is disabled.
+    /// note that this is similar to shared_texture.camera_map.window,
+    /// it's just that sampling and rendering are decoupled (eg either one may be disabled).
+    /// TODO: this could be an atomic option instead of a `RwLock`.
+    window: Arc<RwLock<Option<Window>>>,
+    /// how many samples were taken since we last cleared this?
+    sample_counter: Arc<AtomicU64>,
+    /// nodes we split and need to find the color of.
+    /// note that the len should be <= 4.
+    /// TODO: rename
+    to_be_colored: Vec<NodeHandle>,
     shared_texture: SharedTexture,
-    sample_request_receiver: mpsc::Receiver<SampleRequest>,
-    sample_response_sender: mpsc::Sender<SampleResponse>,
+    // sample_request_receiver: mpsc::Receiver<SampleRequest>,
+    // sample_response_sender: mpsc::Sender<SampleResponse>,
     // render_request_receiver: mpsc::Receiver<RenderRequest>,
     // render_response_sender: mpsc::Sender<RenderResponse>,
 }
 impl WorkerLocal {
     fn run(mut self) {
         loop {
-            // render requests are higher priority than sample requests
-            // if let Some((row, line)) = self.try_render() {
-            //     self.render_response_sender.send((row, line)).unwrap();
-            //     continue;
-            // }
+            // rendering is highest priority
+            // followed by sampling
+            // followed by splitting
 
             if let Some(shared_texture) = match &self.shared_texture.try_read() {
                 Ok(shared_texture) => Some(shared_texture),
@@ -833,35 +858,43 @@ impl WorkerLocal {
                     // shared_texture.reset_camera_map();
                     // self.camera_map = None;
                 }
-                // don't sample, keep rendering
-                continue;
+            } else if let Some(handle) = self.to_be_colored.pop() {
+                // sample
+                // dbg!("sample");
+                let tree = self.tree.read().expect("tree poisoned");
+                let (real, imag) = tree.mid_of_node_id(handle);
+                let color = sample::metabrot_sample((real, imag)).color();
+                tree.insert(handle, color);
+                self.sample_counter.fetch_add(1, Ordering::Relaxed);
+            } else if let Some(window) = match self.window.try_read() {
+                Ok(window) => *window,
+                Err(TryLockError::Poisoned(_)) => panic!("window poisoned"),
+                Err(TryLockError::WouldBlock) => {
+                    // the main thread is updating the window
+                    None
+                }
+            } {
+                // split
+                // dbg!("split");
+                let tree = self.tree.try_read().expect("tree poisoned");
+                if let Some(handles) = tree.refine(window) {
+                    self.to_be_colored.extend(handles);
+                }
             }
-
-            if let Some(response) = self.try_sample() {
-                self.sample_response_sender.send(response).unwrap();
-                continue;
-            }
-
-            // we don't tokio::select!, so just block on sample_request
-            // it deadlocks if we block on sample_request, so just yield the thread
-            // TODO: maybe yield the thread
-            // actually just busy wait
-            // TODO: block on both
-            // thread::yield_now();
         }
     }
 
-    #[cfg_attr(feature = "profiling", inline(never))]
-    fn try_sample(&self) -> Option<SampleResponse> {
-        let Ok((node_id, (real, imag))) = self.sample_request_receiver.try_recv() else {
-            return None;
-        };
-        // metabrot
-        let color = sample::metabrot_sample((real, imag)).color();
-        // // mandelbrot
-        // let color = sample::quadratic_map((Real::ZERO, Imag::ZERO), point).color();
-        Some((node_id, (real, imag), color))
-    }
+    // #[cfg_attr(feature = "profiling", inline(never))]
+    // fn try_sample(&self) -> Option<SampleResponse> {
+    //     let Ok((node_id, (real, imag))) = self.sample_request_receiver.try_recv() else {
+    //         return None;
+    //     };
+    //     // metabrot
+    //     let color = sample::metabrot_sample((real, imag)).color();
+    //     // // mandelbrot
+    //     // let color = sample::quadratic_map((Real::ZERO, Imag::ZERO), point).color();
+    //     Some((node_id, (real, imag), color))
+    // }
 
     // #[cfg_attr(feature = "profiling", inline(never))]
     // fn try_render(&self) -> Option<RenderResponse> {

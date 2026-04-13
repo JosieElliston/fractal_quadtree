@@ -25,7 +25,7 @@ pub(crate) struct App {
     secondary_camera_velocity: Vec2,
     dts: egui::util::History<f32>,
     /// how many samples we received on each frame
-    sample_counts: egui::util::History<usize>,
+    sample_counts: egui::util::History<u64>,
     texture: egui::TextureHandle,
     sampling: bool,
     current_fractal: usize,
@@ -586,7 +586,7 @@ impl eframe::App for App {
                                 "    dt: {:08.04}\n1/dt: {:08.04}\nsamples/s: {:08.04}\nnodes: {}",
                                 average_dt,
                                 1.0 / average_dt,
-                                self.sample_counts.values().sum::<usize>() as f32
+                                self.sample_counts.values().sum::<u64>() as f32
                                     / self.sample_counts.len() as f32,
                                 self.metabrot
                                     .tree

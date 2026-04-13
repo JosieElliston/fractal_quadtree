@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 atomic = "0.6.1"
+bumpalo = "3.20.2"
 # version determined by atomic
 bytemuck = "*"
 eframe = { version = "0.32.3" }

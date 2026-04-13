@@ -3,14 +3,30 @@
 ## unorganized
 
 - organize `TODO.md`
-- search for concurrent/parallel dynamic array/resizable ... instead of arena/linear allocator
+- search for concurrent/parallel dynamic array/resizable ... instead of arena/linear/bump/heap allocator
 - my epoch idea doesn't work bc we might be writing to the old array. actually we can only write after we've called a method on arena so maybe it's workable
 - make arena align(16), ie cache_size / 4, bc there's four leaves?
 - try to use SOA for cache reasons and partial mut borrowing
 - can we have non exclusive mut NodeHandles you can specialize into at most one mut ColorHandle and (not or) multiple ColorHandles?
 - so to free stuff, a thread collects all the mut handles. or we can permit multiple mut handles at once, just that the freeing thread needs to prevent issuing new mut handles.
 - do raii for the handles?
-- remove RwLock around Alloc
+- texture barrier should just be counters
+- debugging: try starting with a large capacity to separate whether it's realloc that's deadlocking
+- on successful get in cur, debug_assert that old flag ... is false
+- during realloc, if we halt reads until the end, can we get reads to only ever look in cur
+- when improving leaf_distance_cache, use try_promote not promote
+- maybe have the api never give out mutable handles and make everything be atomic?
+- debugging: maybe realloc is deadlocking because the reallocing thread owns a mut handle
+- after we fail to get in cur, it might be that old has become null in the meantime, and that's the case in which we should recheck cur
+- make leaf_distance_cache exact, find parents by searching dom.mid
+- document that leaf_distance_cache is monotonically increasing and guaranteed to never overestimate (except maybe not guaranteed with `Relaxed`)
+- between looking in the alloc inner pointer, the reallocing thread might free the buffer, then we read the buffer, and this is a read after free. tho this happens inside get, and isn't the users fault at all. maybe we can use a relaxed fetch add? and store data inside the pointer. maybe we can set the `mem: Box<[Atomic<Node>]>` pointer to null before deallocating it. actually i think get checks that it's up_to_date
+- have each thread own a vec that only it can resize/alloc to
+    - switch to child pointers?
+    - use mmap
+- `mem: Vec<Box<Block>>` for BLOCK_SIZE = my guess at the page size, with `Block([T; BLOCK_SIZE / sizeof::<T>()])` align(BLOCK_SIZE)?
+- probably should just use child pointers
+- allocator is linked list but with big blocks, handles wrap pointers
 
 ## optimization
 
@@ -123,3 +139,4 @@
 - reread comments on my project, i think i deleted my notes
 - make a writeup, send to iosevich
 - 3cycle presentation
+- present minimal alloc, then motivate additional features by the problem, then show implementing each feature
