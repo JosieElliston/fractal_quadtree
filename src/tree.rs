@@ -112,15 +112,7 @@ mod alloc3 {
         sync::atomic::{AtomicPtr, AtomicUsize},
     };
 
-    use atomic::Atomic;
-
     use super::*;
-
-    // #[repr(transparent)]
-    // #[derive(Debug, Clone, Copy, PartialEq, Eq, bytemuck::NoUninit)]
-    // pub(crate) struct NodeHandle(NonZeroU32);
-    // unsafe impl bytemuck::ZeroableInOption for NodeHandle {}
-    // unsafe impl bytemuck::PodInOption for NodeHandle {}
 
     const _: () = assert!(size_of::<Node>() == 64);
     const _: () = assert!(align_of::<Node>() == 64);
@@ -183,6 +175,8 @@ mod alloc3 {
         //     Self::new(self.to_block(), self.to_index() + offset)
         // }
 
+        #[cfg_attr(feature = "profiling", inline(never))]
+        // TODO: make it fast when someone immediately indexes into ret
         pub(super) fn siblings(self) -> [NodeHandle; 4] {
             let block = self.to_block();
             let i = self.to_index();
@@ -707,6 +701,7 @@ impl Tree {
     /// returns white if not in the trees domain
     #[inline(never)]
     pub(crate) fn color_of_pixel(&self, pixel: Pixel) -> Color32 {
+        #[cfg_attr(feature = "profiling", inline(never))]
         fn distance((real_0, imag_0): (Real, Imag), (real_1, imag_1): (Real, Imag)) -> Fixed {
             let real_delta = real_0 - real_1;
             let imag_delta = imag_0 - imag_1;
@@ -730,12 +725,12 @@ impl Tree {
             .alloc
             .get(node_id)
             .color
-            .load(Ordering::SeqCst)
+            .load(Ordering::Relaxed)
             .expect("root must have a color");
 
         loop {
             let node = self.alloc.get(node_id);
-            let Some(left_child) = node.left_child.load(Ordering::SeqCst) else {
+            let Some(left_child) = node.left_child.load(Ordering::Relaxed) else {
                 break;
             };
             let child_offset = node.dom.child_offset_containing(center);
@@ -743,7 +738,7 @@ impl Tree {
             let node = self.alloc.get(node_id);
 
             let dist = distance(center, node.dom.mid());
-            let color = node.color.load(Ordering::SeqCst);
+            let color = node.color.load(Ordering::Relaxed);
             // for debugging, draw uncolored leafs
             if dist < closest_sample_dist {
                 closest_sample_dist = dist;

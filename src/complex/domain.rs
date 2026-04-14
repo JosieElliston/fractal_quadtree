@@ -122,6 +122,7 @@ impl Domain {
 
     // pub(crate) fn contains_point(self, (real, imag): (ExactReal, ExactImag)) -> bool {
     // pub(crate) fn contains_point(self, (real, imag): (Real, Imag)) -> bool {
+    #[cfg_attr(feature = "profiling", inline(never))]
     pub(crate) fn contains_point(self, (real, imag): (Real, Imag)) -> bool {
         (self.real_lo()..self.real_hi()).contains(&real)
             && (self.imag_lo()..self.imag_hi()).contains(&imag)
@@ -135,6 +136,7 @@ impl Domain {
     }
 
     /// the point must be inside the domain
+    #[cfg_attr(feature = "profiling", inline(never))]
     pub(crate) fn child_offset_containing(&self, (real, imag): (Real, Imag)) -> usize {
         debug_assert!(self.contains_point((real, imag)));
         (if real < self.real_mid() { 0 } else { 1 }) + (if imag >= self.imag_mid() { 0 } else { 2 })
