@@ -21,6 +21,10 @@ impl Default for Domain {
     }
 }
 impl Domain {
+    pub(crate) fn uninit() -> Self {
+        unsafe { std::mem::zeroed() }
+    }
+
     // /// returns `None` if the radius is too small
     // /// the caller must ensure that the stuff will maintain the invariant
     // fn from_mid_rad(real_mid: Real, imag_mid: Imag, rad: Fixed) -> Option<Self> {
