@@ -80,47 +80,47 @@ impl OptionColor {
 
 // TODO: Node where each field is atomic? NodeWrapper(Atomic<Node>)?
 // we need atomic load/store
-#[repr(C)]
+#[repr(C, align(64))]
 #[derive(Debug, Clone, Copy, bytemuck::NoUninit)]
 struct Node {
     // write_lock: bool,
     dom: Domain,
     // lock: bool,
-    _pad: [u8; 4],
     // color: Option<Color32>,
     leaf_distance_cache: u32,
     color: OptionColor,
     /// leftmost child id
     left_child: Option<NodeHandle>,
+    _pad: [u8; 24],
 }
 impl Node {
     fn uninit() -> Self {
         Self {
             dom: Domain::default(),
-            _pad: [0; 4],
             leaf_distance_cache: 0,
             color: OptionColor::NONE,
             left_child: None,
+            _pad: Default::default(),
         }
     }
 
     fn new_leaf_uncolored(dom: Domain) -> Self {
         Self {
             dom,
-            _pad: [0; 4],
             leaf_distance_cache: 0,
             color: OptionColor::NONE,
             left_child: None,
+            _pad: Default::default(),
         }
     }
 
     fn new_leaf_colored(dom: Domain, color: Color32) -> Self {
         Self {
             dom,
-            _pad: [0; 4],
             leaf_distance_cache: 0,
             color: OptionColor::new_some(color),
             left_child: None,
+            _pad: Default::default(),
         }
     }
 }
@@ -642,605 +642,604 @@ impl Node {
 //     }
 // }
 
-pub(crate) use alloc2::*;
-mod alloc2 {
-    use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize};
+// pub(crate) use alloc2::*;
+// mod alloc2 {
+//     use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize};
 
-    use atomic::Atomic;
-    use egui::Order;
+//     use atomic::Atomic;
 
-    use super::*;
+//     use super::*;
 
-    #[repr(transparent)]
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, bytemuck::NoUninit)]
-    pub(crate) struct NodeHandle(NonZeroU32);
-    unsafe impl bytemuck::ZeroableInOption for NodeHandle {}
-    unsafe impl bytemuck::PodInOption for NodeHandle {}
+//     #[repr(transparent)]
+//     #[derive(Debug, Clone, Copy, PartialEq, Eq, bytemuck::NoUninit)]
+//     pub(crate) struct NodeHandle(NonZeroU32);
+//     unsafe impl bytemuck::ZeroableInOption for NodeHandle {}
+//     unsafe impl bytemuck::PodInOption for NodeHandle {}
 
-    /// the differences from &mut is that we can have one `NodeHandleMut` and multiple `NodeHandle` existing at the same time
-    /// TODO: maybe we can have more than one?
-    #[repr(transparent)]
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, bytemuck::NoUninit)]
-    pub(super) struct NodeHandleMut(NonZeroU32);
+//     /// the differences from &mut is that we can have one `NodeHandleMut` and multiple `NodeHandle` existing at the same time
+//     /// TODO: maybe we can have more than one?
+//     #[repr(transparent)]
+//     #[derive(Debug, Clone, Copy, PartialEq, Eq, bytemuck::NoUninit)]
+//     pub(super) struct NodeHandleMut(NonZeroU32);
 
-    #[repr(transparent)]
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, bytemuck::NoUninit)]
-    struct BitFlag(u8);
+//     #[repr(transparent)]
+//     #[derive(Debug, Clone, Copy, PartialEq, Eq, bytemuck::NoUninit)]
+//     struct BitFlag(u8);
 
-    // invariant: cur.has_mut_handle implies cur.up_to_date
-    // invariant: if someone is reallocating, cur.up_to_date implies old.has_mut_handle
-    #[derive(Debug)]
-    pub(super) struct Alloc {
-        cur: AtomicPtr<AllocInner>,
-        old: AtomicPtr<AllocInner>,
-        /// true iff you're allowed to allocate
-        /// !can_alloc implies realloc_lock, !realloc_lock implies can_alloc
-        can_alloc: AtomicBool,
-        /// true iff someone is reallocating
-        realloc_lock: AtomicBool,
-    }
+//     // invariant: cur.has_mut_handle implies cur.up_to_date
+//     // invariant: if someone is reallocating, cur.up_to_date implies old.has_mut_handle
+//     #[derive(Debug)]
+//     pub(super) struct Alloc {
+//         cur: AtomicPtr<AllocInner>,
+//         old: AtomicPtr<AllocInner>,
+//         /// true iff you're allowed to allocate
+//         /// !can_alloc implies realloc_lock, !realloc_lock implies can_alloc
+//         can_alloc: AtomicBool,
+//         /// true iff someone is reallocating
+//         realloc_lock: AtomicBool,
+//     }
 
-    #[derive(Debug)]
-    struct AllocInner {
-        /// the actual allocated length, len_lo <= capacity
-        len_real: AtomicUsize,
-        /// the length we speculatively update when we allocate, len_lo <= len_hi, can be > capacity
-        len_speculative: AtomicUsize,
-        /// xxxx xxxx xxxx root node node node node
-        mem: Box<[Atomic<Node>]>,
-        // TODO: pack these bools into a bitflag
-        flags: Box<[Atomic<BitFlag>]>,
-        // has_mut_handle: Box<[AtomicBool]>,
-        // up_to_date: Box<[AtomicBool]>,
-        /// whether it's defined to read from this memory.
-        /// we might not need this now that we have up to date.
-        /// except that we use SeqCst for debug_is_init, so it might still catch bugs.
-        /// this is also about whether up_to_date is uninit maybe.
-        debug_is_init: Box<[AtomicBool]>,
-    }
+//     #[derive(Debug)]
+//     struct AllocInner {
+//         /// the actual allocated length, len_lo <= capacity
+//         len_real: AtomicUsize,
+//         /// the length we speculatively update when we allocate, len_lo <= len_hi, can be > capacity
+//         len_speculative: AtomicUsize,
+//         /// xxxx xxxx xxxx root node node node node
+//         mem: Box<[Atomic<Node>]>,
+//         // TODO: pack these bools into a bitflag
+//         flags: Box<[Atomic<BitFlag>]>,
+//         // has_mut_handle: Box<[AtomicBool]>,
+//         // up_to_date: Box<[AtomicBool]>,
+//         /// whether it's defined to read from this memory.
+//         /// we might not need this now that we have up to date.
+//         /// except that we use SeqCst for debug_is_init, so it might still catch bugs.
+//         /// this is also about whether up_to_date is uninit maybe.
+//         debug_is_init: Box<[AtomicBool]>,
+//     }
 
-    impl NodeHandle {
-        fn to_index(self) -> usize {
-            self.0.get() as usize
-        }
+//     impl NodeHandle {
+//         fn to_index(self) -> usize {
+//             self.0.get() as usize
+//         }
 
-        fn offset(self, offset: usize) -> Self {
-            debug_assert!(offset < 4);
-            unsafe { NodeHandle(NonZeroU32::new_unchecked(self.0.get() + offset as u32)) }
-        }
+//         fn offset(self, offset: usize) -> Self {
+//             debug_assert!(offset < 4);
+//             unsafe { NodeHandle(NonZeroU32::new_unchecked(self.0.get() + offset as u32)) }
+//         }
 
-        /// ret[0] == self
-        pub(super) fn siblings(self) -> [NodeHandle; 4] {
-            let i = self.to_index();
-            debug_assert_eq!(i % 4, 0, "unaligned handle in siblings");
-            unsafe {
-                [
-                    NodeHandle(NonZeroU32::new_unchecked(self.0.get())),
-                    NodeHandle(NonZeroU32::new_unchecked(self.0.get() + 1)),
-                    NodeHandle(NonZeroU32::new_unchecked(self.0.get() + 2)),
-                    NodeHandle(NonZeroU32::new_unchecked(self.0.get() + 3)),
-                ]
-            }
-        }
-    }
+//         /// ret[0] == self
+//         pub(super) fn siblings(self) -> [NodeHandle; 4] {
+//             let i = self.to_index();
+//             debug_assert_eq!(i % 4, 0, "unaligned handle in siblings");
+//             unsafe {
+//                 [
+//                     NodeHandle(NonZeroU32::new_unchecked(self.0.get())),
+//                     NodeHandle(NonZeroU32::new_unchecked(self.0.get() + 1)),
+//                     NodeHandle(NonZeroU32::new_unchecked(self.0.get() + 2)),
+//                     NodeHandle(NonZeroU32::new_unchecked(self.0.get() + 3)),
+//                 ]
+//             }
+//         }
+//     }
 
-    impl NodeHandleMut {
-        fn to_index(self) -> usize {
-            self.0.get() as usize
-        }
+//     impl NodeHandleMut {
+//         fn to_index(self) -> usize {
+//             self.0.get() as usize
+//         }
 
-        /// note that this doesn't release the mutable handle, use `Alloc::demote` for that.
-        /// this just exists for convenience for some APIs that want a const handle.
-        pub(super) fn to_const(self) -> NodeHandle {
-            NodeHandle(self.0)
-        }
-    }
+//         /// note that this doesn't release the mutable handle, use `Alloc::demote` for that.
+//         /// this just exists for convenience for some APIs that want a const handle.
+//         pub(super) fn to_const(self) -> NodeHandle {
+//             NodeHandle(self.0)
+//         }
+//     }
 
-    impl BitFlag {
-        // they're in this order bc we might allow multiple mutable handles in the future
+//     impl BitFlag {
+//         // they're in this order bc we might allow multiple mutable handles in the future
 
-        const NONE: Self = BitFlag(0);
-        /// whether it's ok to read from this memory.
-        /// in the new alloc, it's whether we've moved the element.
-        /// in the old alloc, once we've moved something away, set up_to_date to false.
-        /// the canonical one is cur.up_to_date, the one in old is just for debugging.
-        /// TODO: rename.
-        const UP_TO_DATE: Self = BitFlag(1);
-        const HAS_MUT_HANDLE: Self = BitFlag(2);
-        const BOTH: Self = BitFlag(Self::UP_TO_DATE.0 | Self::HAS_MUT_HANDLE.0);
+//         const NONE: Self = BitFlag(0);
+//         /// whether it's ok to read from this memory.
+//         /// in the new alloc, it's whether we've moved the element.
+//         /// in the old alloc, once we've moved something away, set up_to_date to false.
+//         /// the canonical one is cur.up_to_date, the one in old is just for debugging.
+//         /// TODO: rename.
+//         const UP_TO_DATE: Self = BitFlag(1);
+//         const HAS_MUT_HANDLE: Self = BitFlag(2);
+//         const BOTH: Self = BitFlag(Self::UP_TO_DATE.0 | Self::HAS_MUT_HANDLE.0);
 
-        const fn new(up_to_date: bool, has_mut_handle: bool) -> Self {
-            let mut flags = 0;
-            if up_to_date {
-                flags |= Self::UP_TO_DATE.0;
-            }
-            if has_mut_handle {
-                flags |= Self::HAS_MUT_HANDLE.0;
-            }
-            Self(flags)
-        }
+//         const fn new(up_to_date: bool, has_mut_handle: bool) -> Self {
+//             let mut flags = 0;
+//             if up_to_date {
+//                 flags |= Self::UP_TO_DATE.0;
+//             }
+//             if has_mut_handle {
+//                 flags |= Self::HAS_MUT_HANDLE.0;
+//             }
+//             Self(flags)
+//         }
 
-        const fn up_to_date(self) -> bool {
-            self.0 & Self::UP_TO_DATE.0 != 0
-        }
+//         const fn up_to_date(self) -> bool {
+//             self.0 & Self::UP_TO_DATE.0 != 0
+//         }
 
-        const fn has_mut_handle(self) -> bool {
-            self.0 & Self::HAS_MUT_HANDLE.0 != 0
-        }
-    }
-    impl std::ops::BitOr for BitFlag {
-        type Output = Self;
+//         const fn has_mut_handle(self) -> bool {
+//             self.0 & Self::HAS_MUT_HANDLE.0 != 0
+//         }
+//     }
+//     impl std::ops::BitOr for BitFlag {
+//         type Output = Self;
 
-        fn bitor(self, rhs: Self) -> Self {
-            Self(self.0 | rhs.0)
-        }
-    }
+//         fn bitor(self, rhs: Self) -> Self {
+//             Self(self.0 | rhs.0)
+//         }
+//     }
 
-    impl Default for Alloc {
-        fn default() -> Self {
-            // const SIZE: usize = 16;
-            const SIZE: usize = 1048576;
-            Self {
-                cur: AtomicPtr::new(Box::into_raw(Box::new(AllocInner::with_capacity(SIZE)))),
-                old: AtomicPtr::new(std::ptr::null_mut()),
-                can_alloc: AtomicBool::new(true),
-                realloc_lock: AtomicBool::new(false),
-            }
-        }
-    }
-    impl Alloc {
-        /// you must demote the returned mut handle to avoid ~leaking memory.
-        /// fails if someone already has a mut handle.
-        /// fails if the thread reallocating hasn't moved this element over yet.
-        pub(super) fn try_promote(&self, handle: NodeHandle) -> Option<NodeHandleMut> {
-            let i = handle.to_index();
+//     impl Default for Alloc {
+//         fn default() -> Self {
+//             // const SIZE: usize = 16;
+//             const SIZE: usize = 1048576;
+//             Self {
+//                 cur: AtomicPtr::new(Box::into_raw(Box::new(AllocInner::with_capacity(SIZE)))),
+//                 old: AtomicPtr::new(std::ptr::null_mut()),
+//                 can_alloc: AtomicBool::new(true),
+//                 realloc_lock: AtomicBool::new(false),
+//             }
+//         }
+//     }
+//     impl Alloc {
+//         /// you must demote the returned mut handle to avoid ~leaking memory.
+//         /// fails if someone already has a mut handle.
+//         /// fails if the thread reallocating hasn't moved this element over yet.
+//         pub(super) fn try_promote(&self, handle: NodeHandle) -> Option<NodeHandleMut> {
+//             let i = handle.to_index();
 
-            // // TODO: what if the pointers swap between here
-            // if !unsafe { self.cur.load(Ordering::SeqCst).as_ref().unwrap() }.up_to_date[i]
-            //     .load(Ordering::SeqCst)
-            // {
-            //     return None;
-            // }
-            // // TODO: i'm pretty sure this can be `Relaxed`
-            // // if self.cur.has_mut_handle[i]
-            // //     .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-            // //     .is_err()
-            // if unsafe { self.cur.load(Ordering::SeqCst).as_ref().unwrap() }.has_mut_handle[i]
-            //     .swap(true, Ordering::Relaxed)
-            // {
-            //     return None;
-            // }
-            if unsafe { self.cur.load(Ordering::SeqCst).as_ref().unwrap() }.flags[i]
-                .compare_exchange(
-                    BitFlag::new(true, false),
-                    BitFlag::new(true, true),
-                    Ordering::SeqCst,
-                    Ordering::SeqCst,
-                )
-                .is_err()
-            {
-                return None;
-            }
-            debug_assert!(
-                unsafe { self.cur.load(Ordering::SeqCst).as_ref().unwrap() }.debug_is_init[i]
-                    .load(Ordering::SeqCst)
-            );
-            println!("promoted handle {}", i);
-            Some(NodeHandleMut(handle.0))
-        }
-        /// this can block.
-        /// you must demote the returned mut handle to avoid ~leaking memory.
-        pub(super) fn promote(&self, handle: NodeHandle) -> NodeHandleMut {
-            println!("promote start handle {}", handle.to_index());
-            loop {
-                if let Some(handle_mut) = self.try_promote(handle) {
-                    println!("promote end handle {}", handle.to_index());
-                    return handle_mut;
-                }
-                std::thread::yield_now();
-            }
-        }
-        /// you must call this to release the mutable handle.
-        /// returns the immutable handle for convenience.
-        pub(super) fn demote(&self, handle: NodeHandleMut) -> NodeHandle {
-            let i = handle.to_index();
-            // debug_assert!(self.cur.has_mut_handle[i].load(Ordering::SeqCst));
-            // self.cur.has_mut_handle[i].store(false, Ordering::Relaxed);
-            let cur = unsafe { self.cur.load(Ordering::SeqCst).as_ref().unwrap() };
-            // assert!(cur.has_mut_handle[i].swap(false, Ordering::Relaxed));
-            assert_eq!(
-                cur.flags[i].swap(BitFlag::new(true, false), Ordering::SeqCst),
-                BitFlag::new(true, true)
-            );
-            println!("demoted handle {}", i);
-            NodeHandle(handle.0)
-        }
+//             // // TODO: what if the pointers swap between here
+//             // if !unsafe { self.cur.load(Ordering::SeqCst).as_ref().unwrap() }.up_to_date[i]
+//             //     .load(Ordering::SeqCst)
+//             // {
+//             //     return None;
+//             // }
+//             // // TODO: i'm pretty sure this can be `Relaxed`
+//             // // if self.cur.has_mut_handle[i]
+//             // //     .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+//             // //     .is_err()
+//             // if unsafe { self.cur.load(Ordering::SeqCst).as_ref().unwrap() }.has_mut_handle[i]
+//             //     .swap(true, Ordering::Relaxed)
+//             // {
+//             //     return None;
+//             // }
+//             if unsafe { self.cur.load(Ordering::SeqCst).as_ref().unwrap() }.flags[i]
+//                 .compare_exchange(
+//                     BitFlag::new(true, false),
+//                     BitFlag::new(true, true),
+//                     Ordering::SeqCst,
+//                     Ordering::SeqCst,
+//                 )
+//                 .is_err()
+//             {
+//                 return None;
+//             }
+//             debug_assert!(
+//                 unsafe { self.cur.load(Ordering::SeqCst).as_ref().unwrap() }.debug_is_init[i]
+//                     .load(Ordering::SeqCst)
+//             );
+//             println!("promoted handle {}", i);
+//             Some(NodeHandleMut(handle.0))
+//         }
+//         /// this can block.
+//         /// you must demote the returned mut handle to avoid ~leaking memory.
+//         pub(super) fn promote(&self, handle: NodeHandle) -> NodeHandleMut {
+//             println!("promote start handle {}", handle.to_index());
+//             loop {
+//                 if let Some(handle_mut) = self.try_promote(handle) {
+//                     println!("promote end handle {}", handle.to_index());
+//                     return handle_mut;
+//                 }
+//                 std::thread::yield_now();
+//             }
+//         }
+//         /// you must call this to release the mutable handle.
+//         /// returns the immutable handle for convenience.
+//         pub(super) fn demote(&self, handle: NodeHandleMut) -> NodeHandle {
+//             let i = handle.to_index();
+//             // debug_assert!(self.cur.has_mut_handle[i].load(Ordering::SeqCst));
+//             // self.cur.has_mut_handle[i].store(false, Ordering::Relaxed);
+//             let cur = unsafe { self.cur.load(Ordering::SeqCst).as_ref().unwrap() };
+//             // assert!(cur.has_mut_handle[i].swap(false, Ordering::Relaxed));
+//             assert_eq!(
+//                 cur.flags[i].swap(BitFlag::new(true, false), Ordering::SeqCst),
+//                 BitFlag::new(true, true)
+//             );
+//             println!("demoted handle {}", i);
+//             NodeHandle(handle.0)
+//         }
 
-        /// note that this will use the thread for a while.
-        fn realloc(&self) {
-            // move over the elements that you can acquire mutable handles to
-            // so we can start getting from the new alloc
-            // then slowly acquire mutable handles to the rest of the elements and move them over
-            // once you have all the mutable handles, free old
+//         /// note that this will use the thread for a while.
+//         fn realloc(&self) {
+//             // move over the elements that you can acquire mutable handles to
+//             // so we can start getting from the new alloc
+//             // then slowly acquire mutable handles to the rest of the elements and move them over
+//             // once you have all the mutable handles, free old
 
-            dbg!("reallocating");
+//             dbg!("reallocating");
 
-            fn try_move_node(cur: &AllocInner, old: &AllocInner, i: usize) -> Option<()> {
-                // debug_assert!(!cur.has_mut_handle[i].load(Ordering::SeqCst));
-                // debug_assert!(!cur.up_to_date[i].load(Ordering::SeqCst));
-                debug_assert_eq!(
-                    cur.flags[i].load(Ordering::SeqCst),
-                    BitFlag::new(false, false)
-                );
-                debug_assert!(!cur.debug_is_init[i].load(Ordering::SeqCst));
-                // debug_assert!(old.up_to_date[i].load(Ordering::SeqCst));
-                debug_assert!(old.flags[i].load(Ordering::SeqCst).up_to_date());
-                debug_assert!(old.debug_is_init[i].load(Ordering::SeqCst));
-                // TODO: relax these
-                // try to acquire the mutable handle in old
-                // if !old.has_mut_handle[i].swap(true, Ordering::SeqCst) {
-                //     return None;
-                // }
-                // TODO: was i doing the opposite?
-                if old.flags[i]
-                    .swap(BitFlag::new(true, true), Ordering::SeqCst)
-                    .has_mut_handle()
-                {
-                    return None;
-                }
-                let node = old.mem[i].load(Ordering::SeqCst);
-                cur.mem[i].store(node, Ordering::SeqCst);
-                #[cfg(debug_assertions)]
-                cur.debug_is_init[i].store(true, Ordering::SeqCst);
-                // it's important to set cur.up_to_date before clearing old.up_to_date
-                // cur.up_to_date[i].store(true, Ordering::SeqCst);
-                // old.up_to_date[i].store(false, Ordering::SeqCst);
-                assert_eq!(
-                    cur.flags[i].swap(BitFlag::new(true, false), Ordering::SeqCst),
-                    BitFlag::new(false, false)
-                );
-                // the value of old.has_mut_handle[i] is a bit unconstrained
-                assert_eq!(
-                    old.flags[i].swap(BitFlag::new(false, true), Ordering::SeqCst),
-                    BitFlag::new(true, true)
-                );
-                Some(())
-            }
+//             fn try_move_node(cur: &AllocInner, old: &AllocInner, i: usize) -> Option<()> {
+//                 // debug_assert!(!cur.has_mut_handle[i].load(Ordering::SeqCst));
+//                 // debug_assert!(!cur.up_to_date[i].load(Ordering::SeqCst));
+//                 debug_assert_eq!(
+//                     cur.flags[i].load(Ordering::SeqCst),
+//                     BitFlag::new(false, false)
+//                 );
+//                 debug_assert!(!cur.debug_is_init[i].load(Ordering::SeqCst));
+//                 // debug_assert!(old.up_to_date[i].load(Ordering::SeqCst));
+//                 debug_assert!(old.flags[i].load(Ordering::SeqCst).up_to_date());
+//                 debug_assert!(old.debug_is_init[i].load(Ordering::SeqCst));
+//                 // TODO: relax these
+//                 // try to acquire the mutable handle in old
+//                 // if !old.has_mut_handle[i].swap(true, Ordering::SeqCst) {
+//                 //     return None;
+//                 // }
+//                 // TODO: was i doing the opposite?
+//                 if old.flags[i]
+//                     .swap(BitFlag::new(true, true), Ordering::SeqCst)
+//                     .has_mut_handle()
+//                 {
+//                     return None;
+//                 }
+//                 let node = old.mem[i].load(Ordering::SeqCst);
+//                 cur.mem[i].store(node, Ordering::SeqCst);
+//                 #[cfg(debug_assertions)]
+//                 cur.debug_is_init[i].store(true, Ordering::SeqCst);
+//                 // it's important to set cur.up_to_date before clearing old.up_to_date
+//                 // cur.up_to_date[i].store(true, Ordering::SeqCst);
+//                 // old.up_to_date[i].store(false, Ordering::SeqCst);
+//                 assert_eq!(
+//                     cur.flags[i].swap(BitFlag::new(true, false), Ordering::SeqCst),
+//                     BitFlag::new(false, false)
+//                 );
+//                 // the value of old.has_mut_handle[i] is a bit unconstrained
+//                 assert_eq!(
+//                     old.flags[i].swap(BitFlag::new(false, true), Ordering::SeqCst),
+//                     BitFlag::new(true, true)
+//                 );
+//                 Some(())
+//             }
 
-            debug_assert!(self.realloc_lock.load(Ordering::SeqCst));
-            debug_assert!(self.can_alloc.load(Ordering::SeqCst));
-            self.can_alloc.store(false, Ordering::SeqCst);
+//             debug_assert!(self.realloc_lock.load(Ordering::SeqCst));
+//             debug_assert!(self.can_alloc.load(Ordering::SeqCst));
+//             self.can_alloc.store(false, Ordering::SeqCst);
 
-            let (old_capacity, old_len) = {
-                let cur = unsafe { &*self.cur.load(Ordering::SeqCst) };
-                (cur.capacity(), cur.len_real.load(Ordering::SeqCst))
-            };
+//             let (old_capacity, old_len) = {
+//                 let cur = unsafe { &*self.cur.load(Ordering::SeqCst) };
+//                 (cur.capacity(), cur.len_real.load(Ordering::SeqCst))
+//             };
 
-            let new = AllocInner::with_capacity(2 * old_capacity);
+//             let new = AllocInner::with_capacity(2 * old_capacity);
 
-            // allocate space in new
-            {
-                // TODO: we can do this all at once
-                // doing it this way is just a bit safer
-                debug_assert!(old_len % 4 == 0);
-                let handle0 = new.try_alloc::<1>().unwrap();
-                debug_assert!(handle0.to_index() == 3);
-                for _ in ((handle0.to_index() + 1)..old_len).step_by(4) {
-                    new.try_alloc::<4>().unwrap();
-                }
-                debug_assert_eq!(new.capacity(), 2 * old_capacity);
-                debug_assert_eq!(old_len, new.len_real.load(Ordering::SeqCst));
-                debug_assert_eq!(
-                    old_len,
-                    unsafe { &*self.cur.load(Ordering::SeqCst) }
-                        .len_real
-                        .load(Ordering::SeqCst)
-                );
-            }
+//             // allocate space in new
+//             {
+//                 // TODO: we can do this all at once
+//                 // doing it this way is just a bit safer
+//                 debug_assert!(old_len % 4 == 0);
+//                 let handle0 = new.try_alloc::<1>().unwrap();
+//                 debug_assert!(handle0.to_index() == 3);
+//                 for _ in ((handle0.to_index() + 1)..old_len).step_by(4) {
+//                     new.try_alloc::<4>().unwrap();
+//                 }
+//                 debug_assert_eq!(new.capacity(), 2 * old_capacity);
+//                 debug_assert_eq!(old_len, new.len_real.load(Ordering::SeqCst));
+//                 debug_assert_eq!(
+//                     old_len,
+//                     unsafe { &*self.cur.load(Ordering::SeqCst) }
+//                         .len_real
+//                         .load(Ordering::SeqCst)
+//                 );
+//             }
 
-            // swing the pointers.
-            // immediately after this, all the gets and updates will fail and go to old,
-            // but this lets us reenable allocations sooner.
-            {
-                debug_assert!(self.old.load(Ordering::SeqCst).is_null());
-                let old = self.cur.load(Ordering::SeqCst);
-                self.old.store(old, Ordering::SeqCst);
-                let new = Box::into_raw(Box::new(new));
-                self.cur.store(new, Ordering::SeqCst);
-                debug_assert!(!self.can_alloc.load(Ordering::SeqCst));
-                self.can_alloc.store(true, Ordering::SeqCst);
-            }
+//             // swing the pointers.
+//             // immediately after this, all the gets and updates will fail and go to old,
+//             // but this lets us reenable allocations sooner.
+//             {
+//                 debug_assert!(self.old.load(Ordering::SeqCst).is_null());
+//                 let old = self.cur.load(Ordering::SeqCst);
+//                 self.old.store(old, Ordering::SeqCst);
+//                 let new = Box::into_raw(Box::new(new));
+//                 self.cur.store(new, Ordering::SeqCst);
+//                 debug_assert!(!self.can_alloc.load(Ordering::SeqCst));
+//                 self.can_alloc.store(true, Ordering::SeqCst);
+//             }
 
-            // the pointers won't move anymore, so just get references to the things
-            #[expect(unused_variables)]
-            let new = ();
-            let cur = unsafe { &*self.cur.load(Ordering::SeqCst) };
-            let old = unsafe { &*self.old.load(Ordering::SeqCst) };
+//             // the pointers won't move anymore, so just get references to the things
+//             #[expect(unused_variables)]
+//             let new = ();
+//             let cur = unsafe { &*self.cur.load(Ordering::SeqCst) };
+//             let old = unsafe { &*self.old.load(Ordering::SeqCst) };
 
-            // move over the elements that we can immediately acquire mutable handles to
-            let mut unmoved_handles = Vec::with_capacity(old_capacity);
-            {
-                // let mut debug_mut_handles = Vec::with_capacity(old_capacity);
-                for i in 3..old_len {
-                    match try_move_node(cur, old, i) {
-                        Some(()) => {
-                            // debug_mut_handles.push(i);
-                        }
-                        None => {
-                            unmoved_handles.push(i);
-                        }
-                    }
-                }
-            }
+//             // move over the elements that we can immediately acquire mutable handles to
+//             let mut unmoved_handles = Vec::with_capacity(old_capacity);
+//             {
+//                 // let mut debug_mut_handles = Vec::with_capacity(old_capacity);
+//                 for i in 3..old_len {
+//                     match try_move_node(cur, old, i) {
+//                         Some(()) => {
+//                             // debug_mut_handles.push(i);
+//                         }
+//                         None => {
+//                             unmoved_handles.push(i);
+//                         }
+//                     }
+//                 }
+//             }
 
-            dbg!(&cur.flags);
-            dbg!(&cur.debug_is_init);
-            dbg!(&old.flags);
-            dbg!(&old.debug_is_init);
-            todo!(
-                "it currently looks like someone (not one that uses try_promote) isn't freeing their handle, making it deadlock"
-            );
+//             dbg!(&cur.flags);
+//             dbg!(&cur.debug_is_init);
+//             dbg!(&old.flags);
+//             dbg!(&old.debug_is_init);
+//             todo!(
+//                 "it currently looks like someone (not one that uses try_promote) isn't freeing their handle, making it deadlock"
+//             );
 
-            // move over the rest of the elements
-            {
-                let mut index = 0;
-                while !unmoved_handles.is_empty() {
-                    let i = unmoved_handles[index];
-                    if try_move_node(cur, old, i).is_some() {
-                        unmoved_handles.swap_remove(index);
-                    } else {
-                        index += 1;
-                        index %= unmoved_handles.len();
-                    }
-                }
-            }
+//             // move over the rest of the elements
+//             {
+//                 let mut index = 0;
+//                 while !unmoved_handles.is_empty() {
+//                     let i = unmoved_handles[index];
+//                     if try_move_node(cur, old, i).is_some() {
+//                         unmoved_handles.swap_remove(index);
+//                     } else {
+//                         index += 1;
+//                         index %= unmoved_handles.len();
+//                     }
+//                 }
+//             }
 
-            // free old
-            {
-                let old = old as *const AllocInner as *mut AllocInner;
-                debug_assert_eq!(self.old.load(Ordering::SeqCst), old);
-                debug_assert!(!old.is_null());
-                unsafe { drop(Box::from_raw(old)) };
-                self.old.store(std::ptr::null_mut(), Ordering::SeqCst);
-            }
+//             // free old
+//             {
+//                 let old = old as *const AllocInner as *mut AllocInner;
+//                 debug_assert_eq!(self.old.load(Ordering::SeqCst), old);
+//                 debug_assert!(!old.is_null());
+//                 unsafe { drop(Box::from_raw(old)) };
+//                 self.old.store(std::ptr::null_mut(), Ordering::SeqCst);
+//             }
 
-            dbg!("done reallocating");
-        }
+//             dbg!("done reallocating");
+//         }
 
-        fn alloc<const N: usize>(&self) -> NodeHandle {
-            loop {
-                if self.can_alloc.load(Ordering::SeqCst) {
-                    if let Some(handle) =
-                        unsafe { self.cur.load(Ordering::SeqCst).as_ref().unwrap() }
-                            .try_alloc::<N>()
-                    {
-                        return handle;
-                    } else {
-                        // maybe these can be `Relaxed`???
-                        if !self.realloc_lock.swap(true, Ordering::SeqCst) {
-                            self.realloc();
-                            self.realloc_lock.store(false, Ordering::SeqCst);
-                        }
-                    }
-                }
-                std::thread::yield_now();
-            }
-        }
+//         fn alloc<const N: usize>(&self) -> NodeHandle {
+//             loop {
+//                 if self.can_alloc.load(Ordering::SeqCst) {
+//                     if let Some(handle) =
+//                         unsafe { self.cur.load(Ordering::SeqCst).as_ref().unwrap() }
+//                             .try_alloc::<N>()
+//                     {
+//                         return handle;
+//                     } else {
+//                         // maybe these can be `Relaxed`???
+//                         if !self.realloc_lock.swap(true, Ordering::SeqCst) {
+//                             self.realloc();
+//                             self.realloc_lock.store(false, Ordering::SeqCst);
+//                         }
+//                     }
+//                 }
+//                 std::thread::yield_now();
+//             }
+//         }
 
-        // fn insert<const N: usize>(&self, nodes: [Node; N]) -> NodeId {
-        //     let handle = self.alloc::<N>();
-        //     self.init::<N>(handle, nodes);
-        //     handle
-        // }
-        // insert_leaf_uncolored instead of insert so it's easier to transition to SOA
-        fn insert_leaf_uncolored<const N: usize>(&self, doms: [Domain; N]) -> NodeHandle {
-            let handle0 = self.alloc::<N>();
-            for (offset, dom) in doms.into_iter().enumerate() {
-                let handle = handle0.offset(offset);
-                let i = handle.to_index();
+//         // fn insert<const N: usize>(&self, nodes: [Node; N]) -> NodeId {
+//         //     let handle = self.alloc::<N>();
+//         //     self.init::<N>(handle, nodes);
+//         //     handle
+//         // }
+//         // insert_leaf_uncolored instead of insert so it's easier to transition to SOA
+//         fn insert_leaf_uncolored<const N: usize>(&self, doms: [Domain; N]) -> NodeHandle {
+//             let handle0 = self.alloc::<N>();
+//             for (offset, dom) in doms.into_iter().enumerate() {
+//                 let handle = handle0.offset(offset);
+//                 let i = handle.to_index();
 
-                debug_assert!(
-                    !unsafe { self.cur.load(Ordering::SeqCst).as_ref().unwrap() }.debug_is_init[i]
-                        .load(Ordering::SeqCst),
-                    "insert at already initialized memory at index {}",
-                    i
-                );
-                #[cfg(debug_assertions)]
-                unsafe { self.cur.load(Ordering::SeqCst).as_ref().unwrap() }.debug_is_init[i]
-                    .store(true, Ordering::SeqCst);
+//                 debug_assert!(
+//                     !unsafe { self.cur.load(Ordering::SeqCst).as_ref().unwrap() }.debug_is_init[i]
+//                         .load(Ordering::SeqCst),
+//                     "insert at already initialized memory at index {}",
+//                     i
+//                 );
+//                 #[cfg(debug_assertions)]
+//                 unsafe { self.cur.load(Ordering::SeqCst).as_ref().unwrap() }.debug_is_init[i]
+//                     .store(true, Ordering::SeqCst);
 
-                // debug_assert!(
-                //     !unsafe { self.cur.load(Ordering::SeqCst).as_ref().unwrap() }.up_to_date[i]
-                //         .load(Ordering::SeqCst)
-                // );
-                // // TODO: relax this
-                // unsafe { self.cur.load(Ordering::SeqCst).as_ref().unwrap() }.up_to_date[i]
-                //     .store(true, Ordering::SeqCst);
-                assert_eq!(
-                    unsafe { self.cur.load(Ordering::SeqCst).as_ref().unwrap() }.flags[i]
-                        .swap(BitFlag::new(true, false), Ordering::SeqCst),
-                    BitFlag::new(false, false)
-                );
+//                 // debug_assert!(
+//                 //     !unsafe { self.cur.load(Ordering::SeqCst).as_ref().unwrap() }.up_to_date[i]
+//                 //         .load(Ordering::SeqCst)
+//                 // );
+//                 // // TODO: relax this
+//                 // unsafe { self.cur.load(Ordering::SeqCst).as_ref().unwrap() }.up_to_date[i]
+//                 //     .store(true, Ordering::SeqCst);
+//                 assert_eq!(
+//                     unsafe { self.cur.load(Ordering::SeqCst).as_ref().unwrap() }.flags[i]
+//                         .swap(BitFlag::new(true, false), Ordering::SeqCst),
+//                     BitFlag::new(false, false)
+//                 );
 
-                // we know statically that promoting the handle will succeed
-                // so maybe we should do this better
-                // we also know that the element is in cur not old
-                let handle = self
-                    .try_promote(handle)
-                    .expect("no one else could have promoted this handle since we haven't given it to anyone, and it's up_to_date because TODO: why?");
-                // TODO: this should panic bc it's uninit
-                // self.update(handle, |node| node.store(val, order));
-                unsafe { self.cur.load(Ordering::SeqCst).as_ref().unwrap() }.update_with(
-                    handle,
-                    |node| {
-                        node.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |node| {
-                            // debug_assert!(node.dom.is_uninit());
-                            Some(Node { dom, ..node })
-                        })
-                    },
-                );
-                self.demote(handle);
-            }
-            handle0
-        }
-        pub(super) fn insert_leaf_uncolored1(&self, dom: Domain) -> NodeHandle {
-            self.insert_leaf_uncolored::<1>([dom])
-        }
-        pub(super) fn insert_leaf_uncolored4(&self, doms: [Domain; 4]) -> NodeHandle {
-            self.insert_leaf_uncolored::<4>(doms)
-        }
+//                 // we know statically that promoting the handle will succeed
+//                 // so maybe we should do this better
+//                 // we also know that the element is in cur not old
+//                 let handle = self
+//                     .try_promote(handle)
+//                     .expect("no one else could have promoted this handle since we haven't given it to anyone, and it's up_to_date because TODO: why?");
+//                 // TODO: this should panic bc it's uninit
+//                 // self.update(handle, |node| node.store(val, order));
+//                 unsafe { self.cur.load(Ordering::SeqCst).as_ref().unwrap() }.update_with(
+//                     handle,
+//                     |node| {
+//                         node.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |node| {
+//                             // debug_assert!(node.dom.is_uninit());
+//                             Some(Node { dom, ..node })
+//                         })
+//                     },
+//                 );
+//                 self.demote(handle);
+//             }
+//             handle0
+//         }
+//         pub(super) fn insert_leaf_uncolored1(&self, dom: Domain) -> NodeHandle {
+//             self.insert_leaf_uncolored::<1>([dom])
+//         }
+//         pub(super) fn insert_leaf_uncolored4(&self, doms: [Domain; 4]) -> NodeHandle {
+//             self.insert_leaf_uncolored::<4>(doms)
+//         }
 
-        fn get_with<Ret, F: Fn(Node) -> Ret>(&self, handle: NodeHandle, f: F) -> Ret {
-            // look in `cur`
-            // if not found, look in `old` (maybe here we need to do an expensive SeqCst thing)
-            if let Some(ret) =
-                unsafe { self.cur.load(Ordering::SeqCst).as_ref().unwrap() }.get_with(handle, &f)
-            {
-                return ret;
-            }
-            if let Some(ret) =
-                unsafe { self.old.load(Ordering::SeqCst).as_ref().unwrap() }.get_with(handle, &f)
-            {
-                return ret;
-            }
-            unreachable!("probably not actually unreachable");
-            if let Some(ret) =
-                unsafe { self.cur.load(Ordering::SeqCst).as_ref().unwrap() }.get_with(handle, &f)
-            {
-                return ret;
-            }
-            unreachable!();
-        }
-        pub(super) fn get_dom(&self, handle: NodeHandle) -> Domain {
-            self.get_with(handle, |node| node.dom)
-        }
-        pub(super) fn get_leaf_distance_cache(&self, handle: NodeHandle) -> u32 {
-            self.get_with(handle, |node| node.leaf_distance_cache)
-        }
-        pub(super) fn get_color(&self, handle: NodeHandle) -> OptionColor {
-            self.get_with(handle, |node| node.color)
-        }
-        pub(super) fn get_left_child(&self, handle: NodeHandle) -> Option<NodeHandle> {
-            self.get_with(handle, |node| node.left_child)
-        }
+//         fn get_with<Ret, F: Fn(Node) -> Ret>(&self, handle: NodeHandle, f: F) -> Ret {
+//             // look in `cur`
+//             // if not found, look in `old` (maybe here we need to do an expensive SeqCst thing)
+//             if let Some(ret) =
+//                 unsafe { self.cur.load(Ordering::SeqCst).as_ref().unwrap() }.get_with(handle, &f)
+//             {
+//                 return ret;
+//             }
+//             if let Some(ret) =
+//                 unsafe { self.old.load(Ordering::SeqCst).as_ref().unwrap() }.get_with(handle, &f)
+//             {
+//                 return ret;
+//             }
+//             unreachable!("probably not actually unreachable");
+//             if let Some(ret) =
+//                 unsafe { self.cur.load(Ordering::SeqCst).as_ref().unwrap() }.get_with(handle, &f)
+//             {
+//                 return ret;
+//             }
+//             unreachable!();
+//         }
+//         pub(super) fn get_dom(&self, handle: NodeHandle) -> Domain {
+//             self.get_with(handle, |node| node.dom)
+//         }
+//         pub(super) fn get_leaf_distance_cache(&self, handle: NodeHandle) -> u32 {
+//             self.get_with(handle, |node| node.leaf_distance_cache)
+//         }
+//         pub(super) fn get_color(&self, handle: NodeHandle) -> OptionColor {
+//             self.get_with(handle, |node| node.color)
+//         }
+//         pub(super) fn get_left_child(&self, handle: NodeHandle) -> Option<NodeHandle> {
+//             self.get_with(handle, |node| node.left_child)
+//         }
 
-        /// returns the old value, or maybe just whatever the user wants to.
-        pub(super) fn update_with<Ret, F: Fn(&Atomic<Node>) -> Ret>(
-            &self,
-            handle: NodeHandleMut,
-            f: F,
-        ) -> Ret {
-            // look in `cur`
-            // if not found, it means another thread is waiting for us to be done
-            // we can't help out, bc what if they gave up after we exited `update` but before we released our mut handle
-            // so just look in `old`, and our caller should release this handle soon
+//         /// returns the old value, or maybe just whatever the user wants to.
+//         pub(super) fn update_with<Ret, F: Fn(&Atomic<Node>) -> Ret>(
+//             &self,
+//             handle: NodeHandleMut,
+//             f: F,
+//         ) -> Ret {
+//             // look in `cur`
+//             // if not found, it means another thread is waiting for us to be done
+//             // we can't help out, bc what if they gave up after we exited `update` but before we released our mut handle
+//             // so just look in `old`, and our caller should release this handle soon
 
-            if let Some(ret) =
-                unsafe { self.cur.load(Ordering::SeqCst).as_ref().unwrap() }.update_with(handle, &f)
-            {
-                return ret;
-            }
-            if let Some(ret) =
-                unsafe { self.old.load(Ordering::SeqCst).as_ref().unwrap() }.update_with(handle, &f)
-            {
-                return ret;
-            }
-            unreachable!();
-        }
+//             if let Some(ret) =
+//                 unsafe { self.cur.load(Ordering::SeqCst).as_ref().unwrap() }.update_with(handle, &f)
+//             {
+//                 return ret;
+//             }
+//             if let Some(ret) =
+//                 unsafe { self.old.load(Ordering::SeqCst).as_ref().unwrap() }.update_with(handle, &f)
+//             {
+//                 return ret;
+//             }
+//             unreachable!();
+//         }
 
-        pub(super) fn debug(&self) {
-            // let cur = unsafe { self.cur.load(Ordering::SeqCst).as_ref().unwrap() };
-            // dbg!(cur);
-            dbg!(self.can_alloc.load(Ordering::SeqCst));
-            dbg!(self.realloc_lock.load(Ordering::SeqCst));
-        }
-    }
+//         pub(super) fn debug(&self) {
+//             // let cur = unsafe { self.cur.load(Ordering::SeqCst).as_ref().unwrap() };
+//             // dbg!(cur);
+//             dbg!(self.can_alloc.load(Ordering::SeqCst));
+//             dbg!(self.realloc_lock.load(Ordering::SeqCst));
+//         }
+//     }
 
-    impl AllocInner {
-        fn with_capacity(capacity: usize) -> Self {
-            assert!(capacity >= 4);
+//     impl AllocInner {
+//         fn with_capacity(capacity: usize) -> Self {
+//             assert!(capacity >= 4);
 
-            let mut mem = Vec::with_capacity(capacity);
-            mem.resize_with(capacity, || Atomic::new(Node::uninit()));
-            let mut flags = Vec::with_capacity(capacity);
-            flags.resize_with(capacity, || Atomic::new(BitFlag::NONE));
-            let mut debug_is_init = Vec::with_capacity(capacity);
-            debug_is_init.resize_with(capacity, || AtomicBool::new(false));
+//             let mut mem = Vec::with_capacity(capacity);
+//             mem.resize_with(capacity, || Atomic::new(Node::uninit()));
+//             let mut flags = Vec::with_capacity(capacity);
+//             flags.resize_with(capacity, || Atomic::new(BitFlag::NONE));
+//             let mut debug_is_init = Vec::with_capacity(capacity);
+//             debug_is_init.resize_with(capacity, || AtomicBool::new(false));
 
-            Self {
-                len_real: AtomicUsize::new(3),
-                len_speculative: AtomicUsize::new(3),
-                mem: mem.into_boxed_slice(),
-                flags: flags.into_boxed_slice(),
-                debug_is_init: debug_is_init.into_boxed_slice(),
-            }
-        }
+//             Self {
+//                 len_real: AtomicUsize::new(3),
+//                 len_speculative: AtomicUsize::new(3),
+//                 mem: mem.into_boxed_slice(),
+//                 flags: flags.into_boxed_slice(),
+//                 debug_is_init: debug_is_init.into_boxed_slice(),
+//             }
+//         }
 
-        fn capacity(&self) -> usize {
-            let ret = self.mem.len();
-            debug_assert_eq!(ret, self.flags.len());
-            debug_assert_eq!(ret, self.debug_is_init.len());
-            ret
-        }
+//         fn capacity(&self) -> usize {
+//             let ret = self.mem.len();
+//             debug_assert_eq!(ret, self.flags.len());
+//             debug_assert_eq!(ret, self.debug_is_init.len());
+//             ret
+//         }
 
-        /// fails if we're out of memory.
-        fn try_alloc<const N: usize>(&self) -> Option<NodeHandle> {
-            assert!(N == 1 || N == 4);
-            let i = self.len_speculative.fetch_add(N, Ordering::SeqCst);
-            if i + N > self.mem.len() {
-                return None;
-            }
-            let i = self.len_real.fetch_add(N, Ordering::SeqCst);
-            let handle = NodeHandle(NonZeroU32::new(i as u32).unwrap());
-            if N == 1 {
-                debug_assert_eq!(i, 3);
-            }
-            if N == 4 {
-                debug_assert_eq!(i % 4, 0);
-            }
-            for offset in 0..N {
-                debug_assert!(
-                    !self.debug_is_init[i + offset].load(Ordering::SeqCst),
-                    "allocate at already initialized memory at index {}",
-                    i + offset
-                );
-            }
-            Some(handle)
-        }
+//         /// fails if we're out of memory.
+//         fn try_alloc<const N: usize>(&self) -> Option<NodeHandle> {
+//             assert!(N == 1 || N == 4);
+//             let i = self.len_speculative.fetch_add(N, Ordering::SeqCst);
+//             if i + N > self.mem.len() {
+//                 return None;
+//             }
+//             let i = self.len_real.fetch_add(N, Ordering::SeqCst);
+//             let handle = NodeHandle(NonZeroU32::new(i as u32).unwrap());
+//             if N == 1 {
+//                 debug_assert_eq!(i, 3);
+//             }
+//             if N == 4 {
+//                 debug_assert_eq!(i % 4, 0);
+//             }
+//             for offset in 0..N {
+//                 debug_assert!(
+//                     !self.debug_is_init[i + offset].load(Ordering::SeqCst),
+//                     "allocate at already initialized memory at index {}",
+//                     i + offset
+//                 );
+//             }
+//             Some(handle)
+//         }
 
-        /// returns `None` if the element isn't up_to_date.
-        /// this can fail spuriously (in the future).
-        fn get_with<Ret, F: FnOnce(Node) -> Ret>(&self, handle: NodeHandle, f: F) -> Option<Ret> {
-            let i = handle.to_index();
-            // `Relaxed` implies this can fail spuriously
-            // TODO: relax these orderings
-            if self.flags[i].load(Ordering::SeqCst).up_to_date() {
-                debug_assert!(self.debug_is_init[i].load(Ordering::SeqCst));
-                Some(f(self.mem[i].load(Ordering::SeqCst)))
-            } else {
-                None
-            }
-        }
+//         /// returns `None` if the element isn't up_to_date.
+//         /// this can fail spuriously (in the future).
+//         fn get_with<Ret, F: FnOnce(Node) -> Ret>(&self, handle: NodeHandle, f: F) -> Option<Ret> {
+//             let i = handle.to_index();
+//             // `Relaxed` implies this can fail spuriously
+//             // TODO: relax these orderings
+//             if self.flags[i].load(Ordering::SeqCst).up_to_date() {
+//                 debug_assert!(self.debug_is_init[i].load(Ordering::SeqCst));
+//                 Some(f(self.mem[i].load(Ordering::SeqCst)))
+//             } else {
+//                 None
+//             }
+//         }
 
-        /// returns `None` if the element isn't up_to_date.
-        fn update_with<Ret, F: FnOnce(&Atomic<Node>) -> Ret>(
-            &self,
-            handle: NodeHandleMut,
-            f: F,
-        ) -> Option<Ret> {
-            let i = handle.to_index();
-            // TODO: relax these orderings
-            let flag = self.flags[i].load(Ordering::SeqCst);
-            if flag.up_to_date() {
-                debug_assert!(self.debug_is_init[i].load(Ordering::SeqCst));
-                debug_assert!(flag.has_mut_handle());
-                Some(f(&self.mem[i]))
-            } else {
-                None
-            }
-        }
-    }
-}
+//         /// returns `None` if the element isn't up_to_date.
+//         fn update_with<Ret, F: FnOnce(&Atomic<Node>) -> Ret>(
+//             &self,
+//             handle: NodeHandleMut,
+//             f: F,
+//         ) -> Option<Ret> {
+//             let i = handle.to_index();
+//             // TODO: relax these orderings
+//             let flag = self.flags[i].load(Ordering::SeqCst);
+//             if flag.up_to_date() {
+//                 debug_assert!(self.debug_is_init[i].load(Ordering::SeqCst));
+//                 debug_assert!(flag.has_mut_handle());
+//                 Some(f(&self.mem[i]))
+//             } else {
+//                 None
+//             }
+//         }
+//     }
+// }
 
 // mod new_alloc_soa {
 //     use super::*;
@@ -1296,6 +1295,265 @@ mod alloc2 {
 
 //     impl AllocInnerT<T> {}
 // }
+
+pub(crate) use alloc3::*;
+mod alloc3 {
+    use std::{
+        num::NonZeroUsize,
+        ptr::NonNull,
+        sync::atomic::{AtomicPtr, AtomicUsize},
+    };
+
+    use atomic::Atomic;
+
+    use super::*;
+
+    // #[repr(transparent)]
+    // #[derive(Debug, Clone, Copy, PartialEq, Eq, bytemuck::NoUninit)]
+    // pub(crate) struct NodeHandle(NonZeroU32);
+    // unsafe impl bytemuck::ZeroableInOption for NodeHandle {}
+    // unsafe impl bytemuck::PodInOption for NodeHandle {}
+
+    const _: () = assert!(size_of::<Node>() == 64);
+    const _: () = assert!(align_of::<Node>() == 64);
+    /// bits 0..6: unused (for epoch stuff maybe?)
+    ///
+    /// bits 6..12: index of node within the block
+    ///
+    /// bits 12..: block pointer (the lower bits are 0 because of alignment)
+    ///
+    /// bits 6..: `Node` pointer
+    // TODO: we can store [Node; 4] and get two more bits in the pointer
+    #[repr(transparent)]
+    #[derive(Clone, Copy, PartialEq, Eq, bytemuck::NoUninit)]
+    pub(crate) struct NodeHandle(NonZeroUsize);
+    unsafe impl bytemuck::ZeroableInOption for NodeHandle {}
+    unsafe impl bytemuck::PodInOption for NodeHandle {}
+    impl NodeHandle {
+        /// index is the index of the node in the block
+        fn new(block: NonNull<Block>, index: usize) -> Self {
+            debug_assert!(index < Block::CAPACITY);
+            let block = block.as_ptr() as usize;
+            debug_assert_eq!(block % Block::SIZE, 0);
+            let offset = index * size_of::<Node>();
+            debug_assert_eq!(block & offset, 0);
+            let ret = block + offset;
+            debug_assert_eq!(
+                ret % size_of::<Node>(),
+                0,
+                "ret: {:?}",
+                NodeHandle(NonZeroUsize::new(ret).unwrap())
+            );
+            NodeHandle(NonZeroUsize::new(ret).unwrap())
+        }
+
+        fn to_block(self) -> NonNull<Block> {
+            let block = self.0.get() & !(Block::SIZE - 1);
+            debug_assert_eq!(block % Block::SIZE, 0);
+            NonNull::new(block as *mut Block).unwrap()
+        }
+
+        fn to_index(self) -> usize {
+            let index = (self.0.get() % Block::SIZE) / size_of::<Node>();
+            debug_assert!(index < Block::CAPACITY);
+            index
+        }
+
+        // /// offsets the node index within the block by `offset`.
+        // /// should have that self is the first node in a group of 4,
+        // /// ie has greater alignment.
+        // fn offset(self, offset: usize) -> Self {
+        //     debug_assert!(offset < 4);
+        //     debug_assert_eq!(self.to_index() % 4, 0);
+        //     // could just add offset * size_of::<Node>(), but this is a bit safer
+        //     Self::new(self.to_block(), self.to_index() + offset)
+        // }
+
+        pub(super) fn siblings(self) -> [NodeHandle; 4] {
+            let block = self.to_block();
+            let i = self.to_index();
+            debug_assert_eq!(i % 4, 0, "unaligned handle in siblings");
+            [
+                NodeHandle::new(block, i),
+                NodeHandle::new(block, i + 1),
+                NodeHandle::new(block, i + 2),
+                NodeHandle::new(block, i + 3),
+            ]
+        }
+    }
+    impl std::fmt::Debug for NodeHandle {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_tuple("NodeHandle")
+                .field(&format_args!("hex: {:x}", self.0.get()))
+                .field(&format_args!(
+                    "block: {:x}",
+                    self.to_block().as_ptr() as usize
+                ))
+                .field(&format_args!("index: {}", self.to_index()))
+                .finish()
+        }
+    }
+
+    /// footer rather than header because then indexing the node array
+    /// is an offset from the block pointer,
+    /// rather than the block pointer + header size.
+    #[derive(Debug)]
+    struct BlockFooter {
+        // TODO: consider having the head point to itself instead of `None` / null
+        // prev: *mut Block,
+        prev: Option<NonNull<Block>>,
+        /// how many nodes are allocated in this block.
+        /// note that this can be > capacity.
+        len: AtomicUsize,
+    }
+
+    // align requires an integer literal
+    #[repr(C, align(4096))]
+    #[derive(Debug)]
+    struct Block {
+        // TODO: get rid of `Atomic<T>` somehow
+        mem: [Atomic<Node>; Self::CAPACITY],
+        foot: BlockFooter,
+    }
+    const _: () = assert!(size_of::<Block>() == Block::SIZE);
+    const _: () = assert!(align_of::<Block>() == Block::SIZE);
+    impl Block {
+        // small size to force more reallocation for testing
+        // actually i also need to change the bitfield in `NodeHandle` for this
+        // const SIZE: usize = 128;
+        // const SIZE: usize = 256;
+        const SIZE: usize = 4096;
+        const CAPACITY: usize = (Self::SIZE - size_of::<BlockFooter>()) / size_of::<Node>();
+
+        fn with_prev(prev: Option<NonNull<Block>>) -> Self {
+            Self {
+                mem: std::array::from_fn(|_| Atomic::new(Node::uninit())),
+                foot: BlockFooter {
+                    prev,
+                    len: AtomicUsize::new(0),
+                },
+            }
+        }
+    }
+
+    #[derive(Debug)]
+    pub(super) struct Alloc {
+        last: AtomicPtr<Block>,
+        // last_len: AtomicUsize,
+        // TODO: use this caching thing
+        // /// if you allocate a block but the CAS fails
+        // /// (bc another thread already allocated a block),
+        // /// instead of deallocating, store it for the next time we need to allocate a block.
+        // /// null if there's no cached block.
+        // local_cache: Box<[*mut Block]>,
+    }
+    impl Default for Alloc {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+    impl Alloc {
+        // fn new(thread_count: usize) -> Self {
+        fn new() -> Self {
+            Self {
+                last: AtomicPtr::new(Box::into_raw(Box::new(Block::with_prev(None)))),
+                // last_len: AtomicUsize::new(0),
+                // local_cache: vec![std::ptr::null_mut(); thread_count].into_boxed_slice(),
+            }
+        }
+
+        fn realloc(&self, old_last: NonNull<Block>) {
+            let new_block = Box::into_raw(Box::new(Block::with_prev(Some(old_last))));
+            match self.last.compare_exchange(
+                old_last.as_ptr(),
+                new_block,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => {
+                    // successfully swapped in the new block, so we can just use it
+                    // self.local_cache[thread_i] = std::ptr::null_mut();
+                }
+                Err(actual) => {
+                    // another thread already swapped in a new block, so we can just use that one
+                    // self.local_cache[thread_i] = new_block;
+                    unsafe { drop(Box::from_raw(new_block)) };
+                    debug_assert_ne!(actual, old_last.as_ptr());
+                }
+            }
+        }
+
+        fn alloc<const N: usize>(&self) -> NodeHandle {
+            // loop bc it's technically possible that after reallocating
+            // or during waiting for another thread to reallocate,
+            // we go to sleep and the new block fills up.
+            loop {
+                let last = unsafe { self.last.load(Ordering::SeqCst).as_ref().unwrap() };
+                let len = last.foot.len.fetch_add(N, Ordering::SeqCst);
+                if len + N <= Block::CAPACITY {
+                    return NodeHandle::new(last.into(), len.into());
+                }
+                // we could say that whoever got len == Block::CAPACITY is responsible for reallocating,
+                // but what if that thread went to sleep during reallocation?
+                // so just have all the threads realloc
+                self.realloc(last.into());
+            }
+        }
+
+        fn insert_leaf_uncolored<const N: usize>(&self, doms: [Domain; N]) -> NodeHandle {
+            let handle0 = self.alloc::<4>();
+            // if N == 1, the last three nodes will be uninit
+            for (offset, dom) in doms.into_iter().enumerate() {
+                let handle = handle0.siblings()[offset];
+                self.update_with(handle, |node| {
+                    node.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |node| {
+                        Some(Node::new_leaf_uncolored(dom))
+                    })
+                    .unwrap()
+                });
+            }
+            handle0
+        }
+        pub(super) fn insert_leaf_uncolored1(&self, dom: Domain) -> NodeHandle {
+            self.insert_leaf_uncolored::<1>([dom])
+        }
+        pub(super) fn insert_leaf_uncolored4(&self, doms: [Domain; 4]) -> NodeHandle {
+            self.insert_leaf_uncolored::<4>(doms)
+        }
+
+        fn get_with<Ret, F: Fn(Node) -> Ret>(&self, handle: NodeHandle, f: F) -> Ret {
+            // we could get the node pointer directly,
+            // but this is a bit safer.
+            let block = handle.to_block();
+            let block = unsafe { block.as_ref() };
+            let node = block.mem[handle.to_index()].load(Ordering::SeqCst);
+            f(node)
+        }
+        pub(super) fn get_dom(&self, handle: NodeHandle) -> Domain {
+            self.get_with(handle, |node| node.dom)
+        }
+        pub(super) fn get_leaf_distance_cache(&self, handle: NodeHandle) -> u32 {
+            self.get_with(handle, |node| node.leaf_distance_cache)
+        }
+        pub(super) fn get_color(&self, handle: NodeHandle) -> OptionColor {
+            self.get_with(handle, |node| node.color)
+        }
+        pub(super) fn get_left_child(&self, handle: NodeHandle) -> Option<NodeHandle> {
+            self.get_with(handle, |node| node.left_child)
+        }
+
+        /// returns the old value, or maybe just whatever the user wants to.
+        pub(super) fn update_with<Ret, F: Fn(&Atomic<Node>) -> Ret>(
+            &self,
+            handle: NodeHandle,
+            f: F,
+        ) -> Ret {
+            let block = handle.to_block();
+            let block = unsafe { block.as_ref() };
+            f(&block.mem[handle.to_index()])
+        }
+    }
+}
 
 #[derive(Debug)]
 pub(crate) struct Tree {
@@ -1414,7 +1672,7 @@ impl Tree {
         //     metabrot_sample(dom.mid()).color(),
         // ));
         let root = alloc.insert_leaf_uncolored1(dom);
-        let root = alloc.promote(root);
+        // let root = alloc.promote(root);
         alloc.update_with(root, |node| {
             node.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |node| {
                 Some(Node {
@@ -1424,7 +1682,7 @@ impl Tree {
             })
             .unwrap();
         });
-        let root = alloc.demote(root);
+        // let root = alloc.demote(root);
         Self { dom, alloc, root }
     }
 
@@ -1452,21 +1710,21 @@ impl Tree {
     /// must have that leaf_id is a leaf.
     /// fails if the domain gets too small.
     /// returns left child.
-    fn try_split(&self, leaf_handle: NodeHandleMut) -> Option<NodeHandle> {
+    fn try_split(&self, leaf_handle: NodeHandle) -> Option<NodeHandle> {
         debug_assert!(
-            self.alloc.get_color(leaf_handle.to_const()).is_some(),
+            self.alloc.get_color(leaf_handle).is_some(),
             "right now we only allow splitting colored leafs"
         );
 
         let doms = {
-            let dom = self.alloc.get_dom(leaf_handle.to_const());
-            debug_assert!(self.alloc.get_left_child(leaf_handle.to_const()).is_none());
+            let dom = self.alloc.get_dom(leaf_handle);
+            debug_assert!(self.alloc.get_left_child(leaf_handle).is_none());
             dom.split()?
         };
         let child_handle = self.alloc.insert_leaf_uncolored4(doms);
         self.alloc.update_with(leaf_handle, |node| {
             let _ = node.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |node| {
-                assert!(node.left_child.is_none());
+                assert!(node.left_child.is_none(), "child: {:?}", node.left_child);
                 debug_assert_eq!(node.leaf_distance_cache, 0);
                 Some(Node {
                     left_child: Some(child_handle),
@@ -1746,7 +2004,7 @@ impl Tree {
                         .unwrap()
                         + 1;
                     if leaf_distance < tree.alloc.get_leaf_distance_cache(node_id) {
-                        let node_id = tree.alloc.promote(node_id);
+                        // let node_id = tree.alloc.promote(node_id);
                         tree.alloc.update_with(node_id, |node| {
                             let _ = node.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |node| {
                                 if leaf_distance < node.leaf_distance_cache {
@@ -1759,7 +2017,7 @@ impl Tree {
                                 }
                             });
                         });
-                        tree.alloc.demote(node_id);
+                        // tree.alloc.demote(node_id);
                         // node.leaf_distance_cache = leaf_distance;
                         // todo!("this is incorrect now");
                     }
@@ -1847,16 +2105,15 @@ impl Tree {
         // dbg!(shallowest_depth);
 
         for handle in colored_leafs_in_window_at_depth(self, window, shallowest_depth) {
-            if let Some(handle) = self.alloc.try_promote(handle) {
-                // check that it's still a leaf, someone might have split it before we got the mutable handle
-                let left_child = self
-                    .alloc
-                    .get_left_child(handle.to_const())
-                    .or_else(|| self.try_split(handle));
-                self.alloc.demote(handle);
-                if let Some(left_child) = left_child {
-                    return Some(left_child.siblings());
-                }
+            // if let Some(handle) = self.alloc.try_promote(handle) {
+            // check that it's still a leaf, someone might have split it before we got the mutable handle
+            let left_child = self
+                .alloc
+                .get_left_child(handle)
+                .or_else(|| self.try_split(handle));
+            // self.alloc.demote(handle);
+            if let Some(left_child) = left_child {
+                return Some(left_child.siblings());
             }
         }
         None
@@ -2092,13 +2349,13 @@ impl Tree {
         // }
         // let mut alloc = self.alloc.write().unwrap();
         // let alloc = self.alloc.read().unwrap();
-        let node_id = self.alloc.promote(handle);
-        self.alloc.update_with(node_id, |node| {
+        // let node_id = self.alloc.promote(handle);
+        self.alloc.update_with(handle, |node| {
             node.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |node| {
                 assert!(
                     node.color.is_none(),
                     "node_id: {:?}, node: {:?}",
-                    node_id,
+                    handle,
                     node
                 );
                 Some(Node {
@@ -2108,7 +2365,7 @@ impl Tree {
             })
             .unwrap();
         });
-        self.alloc.demote(node_id);
+        // self.alloc.demote(node_id);
         // let node = alloc.get1_mut(node_id);
         // node.set_color(color);
 
