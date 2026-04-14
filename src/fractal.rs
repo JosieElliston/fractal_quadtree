@@ -10,7 +10,7 @@ use std::{
 use eframe::egui::{self, Color32};
 
 use crate::{
-    complex::{CameraMap, Domain, Window, fixed::*},
+    complex::{CameraMap, Window, fixed::*},
     sample,
     tree::{NodeHandle, Tree},
 };

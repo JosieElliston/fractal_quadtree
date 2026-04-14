@@ -45,7 +45,7 @@ pub(crate) static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::Ato
 
 /// `None` iff self == 0
 /// `Some` iff alpha == 255
-#[repr(C)]
+#[repr(C, align(4))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, bytemuck::NoUninit)]
 struct OptionColor(Color32);
 // unsafe impl bytemuck::ZeroableInOption for NodeId {}
@@ -98,19 +98,24 @@ impl OptionColor {
 #[derive(Debug)]
 struct Node {
     // write_lock: bool,
-    dom: Atomic<Domain>,
+    dom: Domain,
     // lock: bool,
     // color: Option<Color32>,
     leaf_distance_cache: AtomicU32,
+    // TODO: remove Atomic wrapper around color maybe
     color: Atomic<OptionColor>,
     /// leftmost child id
     left_child: Atomic<Option<NodeHandle>>,
     _pad: [u8; 24],
 }
+const _: () = assert!(size_of::<Node>() == 64);
+const _: () = assert!(align_of::<Node>() == 64);
+const _: () = assert!(Atomic::<OptionColor>::is_lock_free());
+const _: () = assert!(Atomic::<Option<NodeHandle>>::is_lock_free());
 impl Node {
     fn uninit() -> Self {
         Self {
-            dom: Atomic::new(Domain::uninit()),
+            dom: Domain::uninit(),
             leaf_distance_cache: AtomicU32::new(0),
             color: Atomic::new(OptionColor::NONE),
             left_child: Atomic::new(None),
@@ -120,7 +125,7 @@ impl Node {
 
     fn new_leaf_uncolored(dom: Domain) -> Self {
         Self {
-            dom: Atomic::new(dom),
+            dom,
             leaf_distance_cache: AtomicU32::new(0),
             color: Atomic::new(OptionColor::NONE),
             left_child: Atomic::new(None),
@@ -130,11 +135,20 @@ impl Node {
 
     fn new_leaf_colored(dom: Domain, color: Color32) -> Self {
         Self {
-            dom: Atomic::new(dom),
+            dom,
             leaf_distance_cache: AtomicU32::new(0),
             color: Atomic::new(OptionColor::new_some(color)),
             left_child: Atomic::new(None),
             _pad: Default::default(),
+        }
+    }
+
+    /// the caller probably should ensure that we have exclusive access to the child,
+    /// tho maybe it's fine even without.
+    unsafe fn dom_write(&self, dom: Domain) {
+        unsafe {
+            (&raw const self.dom as *mut Domain).write(dom);
+            // (child as *const Node as *mut Node).as_mut().unwrap().dom = dom;
         }
     }
 }
@@ -1716,7 +1730,7 @@ impl Tree {
         // we leave 3 nodes uninit
         let root_handle = alloc.alloc4();
         let root = alloc.get(root_handle);
-        root.dom.store(dom, Ordering::Relaxed);
+        unsafe { root.dom_write(dom) };
         root.leaf_distance_cache.store(0, Ordering::Relaxed);
         root.color.store(color, Ordering::Relaxed);
         root.left_child.store(None, Ordering::Relaxed);
@@ -1744,7 +1758,7 @@ impl Tree {
     }
 
     pub(crate) fn mid_of_node_id(&self, handle: NodeHandle) -> (Real, Imag) {
-        self.alloc.get(handle).dom.load(Ordering::SeqCst).mid()
+        self.alloc.get(handle).dom.mid()
     }
 
     // /// must have that leaf_id is a leaf.
@@ -2001,7 +2015,7 @@ impl Tree {
                 let node = tree.alloc.get(node_id);
                 // TODO: instead of doing this check on pop, do it on push
                 // this also lets us do less work in the case where the domain is contained inside the window
-                if !window.overlaps(node.dom.load(Ordering::SeqCst)) {
+                if !window.overlaps(node.dom) {
                     continue;
                 }
                 if depth >= shallowest_depth {
@@ -2079,7 +2093,7 @@ impl Tree {
             stack.push((tree.root, 0));
             std::iter::from_fn(move || {
                 while let Some((node_id, depth)) = stack.pop() {
-                    if !window.overlaps(tree.alloc.get(node_id).dom.load(Ordering::SeqCst)) {
+                    if !window.overlaps(tree.alloc.get(node_id).dom) {
                         continue;
                     }
                     if depth > shallowest_depth {
@@ -2126,7 +2140,7 @@ impl Tree {
         fn try_split(tree: &Tree, left_child: NodeHandle, leaf_handle: NodeHandle) -> Option<()> {
             let leaf = tree.alloc.get(leaf_handle);
 
-            let leaf_dom = leaf.dom.load(Ordering::SeqCst);
+            let leaf_dom = leaf.dom;
             // #[cfg(debug_assertions)]
             // {
             //     let leaf_leaf_distance_cache = leaf.leaf_distance_cache.load(Ordering::SeqCst);
@@ -2151,7 +2165,9 @@ impl Tree {
                 for (offset, dom) in doms.into_iter().enumerate() {
                     let child_handle = left_child.siblings()[offset];
                     let child = tree.alloc.get(child_handle);
-                    child.dom.store(dom, Ordering::SeqCst);
+                    // SAFETY: we allocated the children and never gave them to anyone,
+                    // so we have exclusive access.
+                    unsafe { child.dom_write(dom) };
                 }
             }
 
@@ -2514,14 +2530,11 @@ impl Tree {
             let Some(left_child) = node.left_child.load(Ordering::SeqCst) else {
                 break;
             };
-            let child_offset = node
-                .dom
-                .load(Ordering::SeqCst)
-                .child_offset_containing(center);
+            let child_offset = node.dom.child_offset_containing(center);
             node_id = left_child.siblings()[child_offset];
             let node = self.alloc.get(node_id);
 
-            let dist = distance(center, node.dom.load(Ordering::SeqCst).mid());
+            let dist = distance(center, node.dom.mid());
             let color = node.color.load(Ordering::SeqCst);
             // for debugging, draw uncolored leafs
             if dist < closest_sample_dist {
