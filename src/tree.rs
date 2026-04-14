@@ -1387,6 +1387,12 @@ mod alloc3 {
             index
         }
 
+        fn to_ptr(self) -> *mut Node {
+            let ptr = self.0.get() as *mut Node;
+            debug_assert_eq!(ptr as usize % size_of::<Node>(), 0);
+            ptr
+        }
+
         // /// offsets the node index within the block by `offset`.
         // /// should have that self is the first node in a group of 4,
         // /// ie has greater alignment.
@@ -1532,9 +1538,20 @@ mod alloc3 {
         }
 
         pub(super) fn get(&self, handle: NodeHandle) -> &Node {
-            let block = handle.to_block();
-            let block = unsafe { block.as_ref() };
-            &block.mem[handle.to_index()]
+            let ret = unsafe { handle.to_ptr().as_ref().unwrap() };
+
+            #[cfg(debug_assertions)]
+            {
+                let block = handle.to_block();
+                let block = unsafe { block.as_ref() };
+
+                debug_assert_eq!(
+                    ret as *const Node,
+                    &block.mem[handle.to_index()] as *const Node
+                );
+            }
+
+            ret
         }
 
         // pub(super) fn store(&self, handle: NodeHandle, node: Node, order: Ordering) {
@@ -2198,11 +2215,12 @@ impl Tree {
             //     debug_assert_eq!(leaf_left_child, None);
             // }
 
-            // update leaf_distance_cache
-            {
-                debug_assert_eq!(leaf.leaf_distance_cache.load(Ordering::SeqCst), 0);
-                leaf.leaf_distance_cache.store(1, Ordering::SeqCst);
-            }
+            // // update leaf_distance_cache
+            // {
+            //     // this can fail if another thread updated the cache first
+            //     debug_assert_eq!(leaf.leaf_distance_cache.load(Ordering::SeqCst), 0);
+            //     leaf.leaf_distance_cache.store(1, Ordering::SeqCst);
+            // }
 
             Some(())
         }
