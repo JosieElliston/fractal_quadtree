@@ -24,10 +24,7 @@ pub(crate) static WORKER_HIST: [std::sync::atomic::AtomicU64; 128] =
     [const { std::sync::atomic::AtomicU64::new(0) }; 128];
 
 pub(crate) struct Fractal {
-    // sample: Box<SampleFn>,
     pub(crate) tree: Arc<Tree>,
-    // pub(crate) tree: RefCell<Tree>,
-    // pub(crate) tree: Arc<Tree>,
     /// the `Window` in which we're sampling.
     /// `None` iff sampling is disabled.
     /// note that this is similar to shared_texture.camera_map.window,
@@ -90,20 +87,6 @@ impl Fractal {
     // }
     // fn new_mandelbrot(pool: Pool) -> Self {
     //     Self::new(Box::new(|point| sample::mandelbrot_sample(point).color()), pool)
-    // }
-
-    // pub(crate) fn samples_in_flight(&self) -> usize {
-    //     self.workers
-    //         .iter()
-    //         .map(|worker| worker.samples_in_flight)
-    //         .sum()
-    // }
-
-    // pub(crate) fn render_in_flight(&self) -> usize {
-    //     self.workers
-    //         .iter()
-    //         .map(|worker| worker.render_in_flight)
-    //         .sum()
     // }
 
     pub(crate) fn thread_count(&self) -> usize {
@@ -386,7 +369,6 @@ mod shared_texture {
         /// should be called after resize.
         /// checks that self.camera_map is None
         // /// &mut self isn't really necessary, but it's semantically nice that only the main thread can reset the locks.
-        // pub(super) fn reset_locks(&self) {
         pub(super) fn reset_locks(&mut self, camera_map: CameraMap) {
             assert!(self.camera_map.is_none(), "camera_map wasn't None");
             debug_assert!(
