@@ -27,6 +27,7 @@
 - `mem: Vec<Box<Block>>` for BLOCK_SIZE = my guess at the page size, with `Block([T; BLOCK_SIZE / sizeof::<T>()])` align(BLOCK_SIZE)?
 - probably should just use child pointers
 - allocator is linked list but with big blocks, handles wrap pointers
+- bug report on `compare_exchange` returning `current` not `new`
 
 ## optimization
 

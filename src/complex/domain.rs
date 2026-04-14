@@ -4,7 +4,7 @@ use super::fixed::*;
 /// this is not any square, a `Domain` comes from splitting the default domain into four children
 // TODO: possibly we can have rad >= 0, but whatever
 #[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, bytemuck::NoUninit)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, bytemuck::NoUninit)]
 pub(crate) struct Domain {
     real_mid: Real,
     imag_mid: Imag,

@@ -588,11 +588,7 @@ impl eframe::App for App {
                                 1.0 / average_dt,
                                 self.sample_counts.values().sum::<u64>() as f32
                                     / self.sample_counts.len() as f32,
-                                self.metabrot
-                                    .tree
-                                    .read()
-                                    .expect("tree poisoned")
-                                    .node_count(),
+                                self.metabrot.tree.node_count(),
                             );
                             ui.label(egui::RichText::new(t).background_color(Color32::BLACK));
                         }

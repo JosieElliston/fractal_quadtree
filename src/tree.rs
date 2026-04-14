@@ -1,4 +1,4 @@
-use std::{num::NonZeroU32, sync::atomic::Ordering};
+use std::sync::atomic::Ordering;
 
 use eframe::egui::Color32;
 
@@ -45,7 +45,7 @@ pub(crate) static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::Ato
 /// `None` iff self == 0
 /// `Some` iff alpha == 255
 #[repr(C)]
-#[derive(Debug, Clone, Copy, bytemuck::NoUninit)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, bytemuck::NoUninit)]
 struct OptionColor(Color32);
 // unsafe impl bytemuck::ZeroableInOption for NodeId {}
 // unsafe impl bytemuck::PodInOption for NodeId {}
@@ -81,7 +81,7 @@ impl OptionColor {
 // TODO: Node where each field is atomic? NodeWrapper(Atomic<Node>)?
 // we need atomic load/store
 #[repr(C, align(64))]
-#[derive(Debug, Clone, Copy, bytemuck::NoUninit)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, bytemuck::NoUninit)]
 struct Node {
     // write_lock: bool,
     dom: Domain,
@@ -1464,7 +1464,7 @@ mod alloc3 {
 
         fn realloc(&self, old_last: NonNull<Block>) {
             let new_block = Box::into_raw(Box::new(Block::with_prev(Some(old_last))));
-            match self.last.compare_exchange(
+            match self.last.compare_exchange_weak(
                 old_last.as_ptr(),
                 new_block,
                 Ordering::SeqCst,
@@ -1478,7 +1478,7 @@ mod alloc3 {
                     // another thread already swapped in a new block, so we can just use that one
                     // self.local_cache[thread_i] = new_block;
                     unsafe { drop(Box::from_raw(new_block)) };
-                    debug_assert_ne!(actual, old_last.as_ptr());
+                    // debug_assert_ne!(actual, old_last.as_ptr(), "bc of _weak, can actually sometimes happen");
                 }
             }
         }
@@ -1491,7 +1491,7 @@ mod alloc3 {
                 let last = unsafe { self.last.load(Ordering::SeqCst).as_ref().unwrap() };
                 let len = last.foot.len.fetch_add(N, Ordering::SeqCst);
                 if len + N <= Block::CAPACITY {
-                    return NodeHandle::new(last.into(), len.into());
+                    return NodeHandle::new(last.into(), len);
                 }
                 // we could say that whoever got len == Block::CAPACITY is responsible for reallocating,
                 // but what if that thread went to sleep during reallocation?
@@ -1500,16 +1500,27 @@ mod alloc3 {
             }
         }
 
+        pub(super) fn alloc4(&self) -> NodeHandle {
+            self.alloc::<4>()
+        }
+
+        pub(super) fn store(&self, handle: NodeHandle, node: Node, order: Ordering) {
+            let block = handle.to_block();
+            let block = unsafe { block.as_ref() };
+            block.mem[handle.to_index()].store(node, order);
+        }
+
         fn insert_leaf_uncolored<const N: usize>(&self, doms: [Domain; N]) -> NodeHandle {
             let handle0 = self.alloc::<4>();
             // if N == 1, the last three nodes will be uninit
             for (offset, dom) in doms.into_iter().enumerate() {
                 let handle = handle0.siblings()[offset];
                 self.update_with(handle, |node| {
-                    node.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |node| {
-                        Some(Node::new_leaf_uncolored(dom))
-                    })
-                    .unwrap()
+                    // node.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |node| {
+                    //     Some(Node::new_leaf_uncolored(dom))
+                    // })
+                    // .unwrap()
+                    node.store(Node::new_leaf_uncolored(dom), Ordering::SeqCst);
                 });
             }
             handle0
@@ -1526,8 +1537,11 @@ mod alloc3 {
             // but this is a bit safer.
             let block = handle.to_block();
             let block = unsafe { block.as_ref() };
-            let node = block.mem[handle.to_index()].load(Ordering::SeqCst);
+            let node = block.mem[handle.to_index()].load(Ordering::Relaxed);
             f(node)
+        }
+        pub(super) fn get_node(&self, handle: NodeHandle) -> Node {
+            self.get_with(handle, |node| node)
         }
         pub(super) fn get_dom(&self, handle: NodeHandle) -> Domain {
             self.get_with(handle, |node| node.dom)
@@ -1665,14 +1679,10 @@ pub(crate) struct Tree {
 // }
 
 impl Tree {
-    pub(crate) fn new(dom: Domain) -> Self {
+    pub(crate) fn new() -> Self {
+        let dom = Domain::default();
         let alloc = Alloc::default();
-        // let root = alloc.insert1(Node::new_leaf_colored(
-        //     dom,
-        //     metabrot_sample(dom.mid()).color(),
-        // ));
         let root = alloc.insert_leaf_uncolored1(dom);
-        // let root = alloc.promote(root);
         alloc.update_with(root, |node| {
             node.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |node| {
                 Some(Node {
@@ -1682,7 +1692,6 @@ impl Tree {
             })
             .unwrap();
         });
-        // let root = alloc.demote(root);
         Self { dom, alloc, root }
     }
 
@@ -1707,34 +1716,34 @@ impl Tree {
         self.alloc.get_dom(handle).mid()
     }
 
-    /// must have that leaf_id is a leaf.
-    /// fails if the domain gets too small.
-    /// returns left child.
-    fn try_split(&self, leaf_handle: NodeHandle) -> Option<NodeHandle> {
-        debug_assert!(
-            self.alloc.get_color(leaf_handle).is_some(),
-            "right now we only allow splitting colored leafs"
-        );
+    // /// must have that leaf_id is a leaf.
+    // /// fails if the domain gets too small.
+    // /// returns left child.
+    // fn try_split(&self, leaf_handle: NodeHandle) -> Option<NodeHandle> {
+    //     debug_assert!(
+    //         self.alloc.get_color(leaf_handle).is_some(),
+    //         "right now we only allow splitting colored leafs"
+    //     );
 
-        let doms = {
-            let dom = self.alloc.get_dom(leaf_handle);
-            debug_assert!(self.alloc.get_left_child(leaf_handle).is_none());
-            dom.split()?
-        };
-        let child_handle = self.alloc.insert_leaf_uncolored4(doms);
-        self.alloc.update_with(leaf_handle, |node| {
-            let _ = node.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |node| {
-                assert!(node.left_child.is_none(), "child: {:?}", node.left_child);
-                debug_assert_eq!(node.leaf_distance_cache, 0);
-                Some(Node {
-                    left_child: Some(child_handle),
-                    leaf_distance_cache: 1,
-                    ..node
-                })
-            });
-        });
-        Some(child_handle)
-    }
+    //     let doms = {
+    //         let dom = self.alloc.get_dom(leaf_handle);
+    //         debug_assert!(self.alloc.get_left_child(leaf_handle).is_none());
+    //         dom.split()?
+    //     };
+    //     let child_handle = self.alloc.insert_leaf_uncolored4(doms);
+    //     self.alloc.update_with(leaf_handle, |node| {
+    //         let _ = node.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |node| {
+    //             assert!(node.left_child.is_none(), "child: {:?}", node.left_child);
+    //             debug_assert_eq!(node.leaf_distance_cache, 0);
+    //             Some(Node {
+    //                 left_child: Some(child_handle),
+    //                 leaf_distance_cache: 1,
+    //                 ..node
+    //             })
+    //         });
+    //     });
+    //     Some(child_handle)
+    // }
 
     // /// ensures that we have < n nodes
     // /// or maybe that each pixel contains at most n leaves
@@ -1961,24 +1970,15 @@ impl Tree {
     #[cfg_attr(feature = "profiling", inline(never))]
     // pub(crate) fn refine(slf: Arc<Self>, window: Window) -> Option<[NodeId; 4]> {
     pub(crate) fn refine(&self, window: Window) -> Option<[NodeHandle; 4]> {
-        let start = std::time::Instant::now();
-
-        #[cfg_attr(feature = "profiling", inline(never))]
         /// returns `None` if no leaf intersects the window
+        #[cfg_attr(feature = "profiling", inline(never))]
         fn get_shallowest_leaf(tree: &Tree, window: Window) -> Option<(u32, NodeHandle)> {
             // TODO: avoid this allocation
             let mut stack = Vec::with_capacity(64);
-            // stack.push((&mut *tree.alloc.get1(tree.root), 0));
             stack.push((tree.root, 0));
             let mut shallowest_depth = u32::MAX;
-            // TODO: change this to a Vec and store all the shallowest leafs
-            // let mut shallowest_leaf = None;
-            // let mut shallowest_leaf_mid = None;
             let mut shallowest_leaf_id = None;
-            // while let Some((node, depth)) = queue.pop_front() {
             while let Some((node_id, depth)) = stack.pop() {
-                // let alloc = tree.alloc.read().unwrap();
-                // let node = alloc.get1_cloned(node_id);
                 // TODO: instead of doing this check on pop, do it on push
                 // this also lets us do less work in the case where the domain is contained inside the window
                 if !window.overlaps(tree.alloc.get_dom(node_id)) {
@@ -1988,14 +1988,8 @@ impl Tree {
                     continue;
                 }
                 if let Some(child_id) = tree.alloc.get_left_child(node_id) {
-                    // let children = alloc.get4_cloned(child_id);
-                    // let leaf_distance = internal.compute_leaf_distance();
-                    // let leaf_distance = children
-                    //     .iter()
-                    //     .map(|c| c.leaf_distance_cache)
-                    //     .min()
-                    //     .unwrap()
-                    //     + 1;
+                    // TODO: restore leaf distance cache stuff
+
                     let leaf_distance = child_id
                         .siblings()
                         .map(|child_handle| tree.alloc.get_leaf_distance_cache(child_handle))
@@ -2025,12 +2019,7 @@ impl Tree {
                     if leaf_distance + depth >= shallowest_depth {
                         continue;
                     }
-                    // stack.extend(
-                    //     internal
-                    //         .children
-                    //         .iter_mut()
-                    //         .map(|c| (c.as_mut(), depth + 1)),
-                    // );
+
                     // // TODO: does this sort the nodes in place???
                     // let mut children: [&mut Node; 4] = children.each_mut();
                     // children.sort_by_key(|c| c.leaf_distance_cache());
@@ -2038,14 +2027,15 @@ impl Tree {
                     stack.extend(child_id.siblings().map(|c| (c, depth + 1)).into_iter());
                 } else {
                     let color = tree.alloc.get_color(node_id);
+                    // if color.is_none() {
+                    //     println!("found uncolored leaf {:?} at depth {}", node_id, depth);
+                    // }
                     if color.is_some() && depth < shallowest_depth {
                         shallowest_depth = depth;
                         shallowest_leaf_id = Some(node_id);
                     }
                 }
             }
-            // shallowest_leaf
-            // Some((shallowest_depth, shallowest_leaf?.dom.mid()))
             Some((shallowest_depth, shallowest_leaf_id?))
         }
 
@@ -2097,25 +2087,76 @@ impl Tree {
         //     unreachable!("the node must be a `LeafColor`");
         // };
 
-        // TODO: if this is too small to split,
-        // we should try to split another node,
-        // rather than failing immediately
-
         // self.alloc.debug();
         // dbg!(shallowest_depth);
 
-        for handle in colored_leafs_in_window_at_depth(self, window, shallowest_depth) {
-            // if let Some(handle) = self.alloc.try_promote(handle) {
-            // check that it's still a leaf, someone might have split it before we got the mutable handle
-            let left_child = self
-                .alloc
-                .get_left_child(handle)
-                .or_else(|| self.try_split(handle));
-            // self.alloc.demote(handle);
-            if let Some(left_child) = left_child {
-                return Some(left_child.siblings());
+        // CAS in the new left_child,
+        // and if it fails (bc someone already got there),
+        // reuse the memory we allocated for the children for the next iteration.
+
+        // note that we have an exclusive reference to the new children
+        let left_child = self.alloc.alloc4();
+        for leaf_handle in colored_leafs_in_window_at_depth(self, window, shallowest_depth) {
+            let leaf = self.alloc.get_node(leaf_handle);
+            let doms = leaf.dom.split()?;
+            for (offset, dom) in doms.into_iter().enumerate() {
+                let child_handle = left_child.siblings()[offset];
+                self.alloc.store(
+                    child_handle,
+                    Node::new_leaf_uncolored(dom),
+                    Ordering::SeqCst,
+                );
             }
+            let new = Node {
+                left_child: Some(left_child),
+                leaf_distance_cache: 1,
+                ..leaf
+            };
+
+            match self.alloc.update_with(leaf_handle, |node| {
+                node.compare_exchange(leaf, new, Ordering::SeqCst, Ordering::SeqCst)
+            }) {
+                Ok(old_leaf) => {
+                    debug_assert_eq!(
+                        old_leaf, leaf,
+                        "this is guaranteed by compare_exchange_weak, despite it being documented incorrectly"
+                    );
+                    return Some(left_child.siblings());
+                }
+                Err(_old_leaf) => {}
+            }
+
+            // if let Some(left_child) = self.alloc.update_with(handle, |node| {
+            //     match node.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |node| {
+            //         if node.left_child.is_some() {
+            //             None
+            //         } else {
+            //             debug_assert!(
+            //                 node.color.is_some(),
+            //                 "right now we only allow splitting colored leafs"
+            //             );
+            //             debug_assert_eq!(node.leaf_distance_cache, 0, "leafs are leafs");
+
+            //             let doms = node.dom.split()?;
+            //             let left_child = self.alloc.insert_leaf_uncolored4(doms);
+            //             dbg!("after insert_leaf_uncolored4");
+            //             Some(Node {
+            //                 left_child: Some(left_child),
+            //                 leaf_distance_cache: 1,
+            //                 ..node
+            //             })
+            //         }
+            //     }) {
+            // // problem is that we want the new value for left_child
+            //         Ok(previous_value) => todo!(),
+            //         Err(previous_value) => todo!(),
+            //     }
+            // }) {
+            //     dbg!("before return Some(left_child.siblings());");
+            //     return Some(left_child.siblings());
+            // }
         }
+        // unreachable!("not actually unreachable, but we're leaking memory and i want to know");
         None
 
         // #[cfg(false)]
@@ -2431,10 +2472,19 @@ impl Tree {
 
             let dist = distance(center, self.alloc.get_dom(node_id).mid());
             let color = self.alloc.get_color(node_id);
-            if dist < closest_sample_dist && color.is_some() {
+            // for debugging, draw uncolored leafs
+            if dist < closest_sample_dist {
                 closest_sample_dist = dist;
-                closest_sample_color = color.unwrap();
+                closest_sample_color = if color.is_some() {
+                    color.unwrap()
+                } else {
+                    Color32::from_rgb(255, 255, 0)
+                };
             }
+            // if dist < closest_sample_dist && color.is_some() {
+            //     closest_sample_dist = dist;
+            //     closest_sample_color = color.unwrap();
+            // }
         }
         closest_sample_color
     }
