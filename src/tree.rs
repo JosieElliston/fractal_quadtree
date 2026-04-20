@@ -1,4 +1,5 @@
 use std::{
+    cell::UnsafeCell,
     num::NonZeroU32,
     sync::atomic::{AtomicU32, Ordering},
 };
@@ -14,6 +15,599 @@ use crate::{
 // pub(crate) static ELAPSED_NANOS: std::sync::atomic::AtomicU64 =
 //     std::sync::atomic::AtomicU64::new(0);
 // pub(crate) static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+#[repr(C, align(64))]
+#[derive(Debug)]
+struct Node {
+    /// `dom` doesn't need to be atomic because it's never modified after being shown to the other threads.
+    /// also `Domain` too big to fit in a u64 (or u128),
+    /// so `Atomic` falls back to a global lock array, which is really slow.
+    dom: UnsafeCell<Domain>,
+    /// `parent` doesn't need to be atomic because it's never modified after being shown to the other threads.
+    parent: UnsafeCell<Option<NodeHandle>>,
+    /// leftmost child id
+    left_child: Atomic<Option<NodeHandle>>,
+    // TODO: maybe replace `Atomic` -> `UnsafeCell`
+    // actually i think this has to be atomic bc it's modified when other threads might be looking at it.
+    // we could avoid that by putting a tag on the left_child
+    // which prevents other threads from following it, but whatever.
+    color: Atomic<Option<RGB>>,
+    // TODO: rename to height
+    leaf_distance_cache: AtomicU32,
+    /// timestamp of the last update to this node or any of its descendants.
+    /// "update" in the sense that we need to redraw.
+    /// monotonically increasing.
+    /// parents should have a timestamp of at least their children.
+    /// and maybe internal nodes cannot have a timestamp strictly greater than any child.
+    timestamp: Atomic<Moment>,
+    _pad: [u8; 8],
+}
+const _: () = assert!(size_of::<Node>() == 64);
+const _: () = assert!(align_of::<Node>() == 64);
+const _: () = assert!(Atomic::<Option<RGB>>::is_lock_free());
+const _: () = assert!(Atomic::<Option<NodeHandle>>::is_lock_free());
+impl Node {
+    fn uninit() -> Self {
+        Self {
+            dom: UnsafeCell::new(Domain::uninit()),
+            parent: UnsafeCell::new(None),
+            left_child: Atomic::new(None),
+            color: Atomic::new(None),
+            leaf_distance_cache: AtomicU32::new(0),
+            timestamp: Atomic::new(Moment::default()),
+            _pad: Default::default(),
+        }
+    }
+
+    // fn new_leaf_uncolored(dom: Domain) -> Self {
+    //     Self {
+    //         dom,
+    //         leaf_distance_cache: AtomicU32::new(0),
+    //         color: Atomic::new(None),
+    //         left_child: Atomic::new(None),
+    //         _pad: Default::default(),
+    //     }
+    // }
+
+    // fn new_leaf_colored(dom: Domain, color: Color32) -> Self {
+    //     Self {
+    //         dom,
+    //         leaf_distance_cache: AtomicU32::new(0),
+    //         color: Atomic::new(OptionColor::new_some(color)),
+    //         left_child: Atomic::new(None),
+    //         _pad: Default::default(),
+    //     }
+    // }
+
+    /// SAFETY: the caller probably should ensure that no one is writing to the node.
+    /// i could return a reference, but just reading the pointer is a bit safer.
+    unsafe fn dom(&self) -> Domain {
+        unsafe { self.dom.get().read() }
+    }
+    /// SAFETY: the caller probably should ensure that no one is writing to the node.
+    /// i could return a reference, but just reading the pointer is a bit safer.
+    unsafe fn parent(&self) -> Option<NodeHandle> {
+        unsafe { self.parent.get().read() }
+    }
+
+    /// SAFETY: the caller probably should ensure that we have exclusive access,
+    /// tho maybe it's fine even without (like maybe we can't get partial writes bc it's small enough).
+    unsafe fn write_dom(&self, dom: Domain) {
+        unsafe {
+            self.dom.get().write(dom);
+        }
+    }
+    /// SAFETY: the caller probably should ensure that we have exclusive access,
+    /// tho maybe it's fine even without (like maybe we can't get partial writes bc it's small enough).
+    unsafe fn write_parent(&self, parent: Option<NodeHandle>) {
+        unsafe {
+            self.parent.get().write(parent);
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct Tree {
+    dom: Domain,
+    alloc: Alloc,
+    root: NodeHandle,
+}
+
+impl Tree {
+    pub(crate) fn new() -> Self {
+        let dom = Domain::default();
+        let color = metabrot_sample(dom.mid()).color().try_into().unwrap();
+        let alloc = Alloc::default();
+
+        // we leave 3 nodes uninit
+        let root_handle = alloc.alloc4();
+        let root = alloc.get(root_handle);
+
+        // this is UB because `Node` isn't inside an `UnsafeCell`
+        // so we can't do the nice ~RAII thing
+        // unsafe {
+        //     (&raw const root as *mut Node).write(Node {
+        //         dom,
+        //         parent: None,
+        //         left_child: Atomic::new(None),
+        //         color: Atomic::new(Some(color)),
+        //         leaf_distance_cache: AtomicU32::new(0),
+        //         timestamp: Atomic::new(Moment::default()),
+        //         _pad: Default::default(),
+        //     });
+        // }
+
+        unsafe {
+            root.write_dom(dom);
+            root.write_parent(None);
+        }
+        root.left_child.store(None, Ordering::Relaxed);
+        root.color.store(Some(color), Ordering::Relaxed);
+        root.leaf_distance_cache.store(0, Ordering::Relaxed);
+        root.timestamp.store(Moment::default(), Ordering::Relaxed);
+
+        Self {
+            dom,
+            alloc,
+            root: root_handle,
+        }
+    }
+
+    #[cfg_attr(feature = "profiling", inline(never))]
+    pub(crate) fn node_count(&self) -> usize {
+        let mut count = 0;
+        let mut stack = Vec::with_capacity(64);
+
+        stack.push(self.root);
+
+        while let Some(handle) = stack.pop() {
+            count += 1;
+            if let Some(child_handle) = self.alloc.get(handle).left_child.load(Ordering::SeqCst) {
+                stack.extend(child_handle.siblings());
+            }
+        }
+        count
+    }
+
+    pub(crate) fn mid_of_node_handle(&self, handle: NodeHandle) -> (Real, Imag) {
+        unsafe { self.alloc.get(handle).dom().mid() }
+    }
+
+    /// maxes `handle` and all its ancestors timestamps with `now`.
+    #[cfg_attr(feature = "profiling", inline(never))]
+    fn update_ancestors_timestamp(&self, mut handle: NodeHandle, now: Moment) {
+        loop {
+            let node = self.alloc.get(handle);
+            // TODO: refactor so i can use fetch_max
+            // node.timestamp.fetch_max(timestamp, Ordering::SeqCst);
+            let _old = node
+                .timestamp
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |old| {
+                    if old >= now { None } else { Some(now) }
+                });
+            if let Some(parent) = unsafe { node.parent() } {
+                handle = parent;
+            } else {
+                break;
+            }
+        }
+    }
+
+    /// probably should have that left_child_handle is a leaf.
+    /// you can kinda merge this with `update_ancestors_timestamp`, but it's annoying
+    #[cfg_attr(feature = "profiling", inline(never))]
+    fn update_ancestors_distance(&self, mut left_child: NodeHandle) {
+        loop {
+            let Some(parent_handle) = (unsafe { self.alloc.get(left_child).parent() }) else {
+                break;
+            };
+
+            debug_assert_ne!(left_child, self.root);
+            let leaf_distance = left_child
+                .siblings()
+                .map(|child_handle| {
+                    self.alloc
+                        .get(child_handle)
+                        .leaf_distance_cache
+                        .load(Ordering::SeqCst)
+                })
+                .iter()
+                .min()
+                .unwrap()
+                + 1;
+
+            let parent = self.alloc.get(parent_handle);
+            let old_leaf_distance_cache = parent.leaf_distance_cache.load(Ordering::SeqCst);
+
+            // see comment below for why this is >= and not ==
+            if old_leaf_distance_cache >= leaf_distance {
+                return;
+            }
+
+            // we don't need to max, and can just store
+            // it's possible this lowers it (eg if we sleep between computing leaf_distance and storing),
+            // but we don't actually rely on distance being monotonically increasing,
+            // and it'll get fixed in the future.
+            parent
+                .leaf_distance_cache
+                .store(leaf_distance, Ordering::SeqCst);
+
+            // if i ever move the root from being leftmost in its group,
+            // this will be UB.
+            left_child = parent_handle.left_sibling();
+        }
+    }
+
+    // /// ensures that we have < n nodes
+    // /// or maybe that each pixel contains at most n leaves
+    // /// or maybe if you're in the window, you get at most subsamples leaves,
+    // /// if you're not in the window, you all collectively get m leaves
+    // fn prune(&mut self, window: Window, pixel_width: f32, n: u32, subsamples: u8) {
+    //     todo!()
+    // }
+
+    // /// the average color of leaves inside the pixel weighted by area that's overlapping the pixel
+    // /// or maybe weighted by distance to the center of the pixel
+    // /// the color of the highest node contained in pixel
+    // fn color(&self, pixel: Domain) -> Option<Color32> {
+    //     if !self.window.overlaps(pixel) {
+    //         return None;
+    //     }
+    //     if self.window <= pixel {
+    //         return Some(self.color);
+    //     }
+    //     if self.is_leaf() {
+    //         // we're too zoomed in
+    //         return None;
+    //     }
+    //     // TODO: i think it's actually possible that it's not the child closest to the pixel center that has a child eventually inside pixel
+    //     let closest_child_i = self
+    //         .child_i_closest_to(pixel.real_mid(), pixel.imag_mid())
+    //         .unwrap();
+    //     self.children.as_ref().unwrap()[closest_child_i].color(pixel)
+    // }
+
+    // /// average color of samples inside the pixel
+    // #[inline(never)]
+    // pub(crate) fn color_in_pixel(&self, pixel: Domain) -> ColorBuilder {
+    //     let d = f32::max(
+    //         (self.dom.real_mid() - pixel.real_mid()).abs(),
+    //         (self.dom.imag_mid() - pixel.imag_mid()).abs(),
+    //     );
+    //     // if !self.dom.overlaps(pixel) {
+    //     if d > self.dom.rad() + pixel.rad() {
+    //         return ColorBuilder::default();
+    //     }
+    //     // (if pixel.contains_point(self.dom.real_mid(), self.dom.imag_mid()) {
+    //     (if d <= pixel.rad() {
+    //         self.color.into()
+    //     } else {
+    //         ColorBuilder::default()
+    //     } + match &self.children {
+    //         Some(children) => {
+    //             // if pixel.contains_square(self.dom) {
+    //             if d <= pixel.rad() - self.dom.rad() {
+    //                 children.iter().map(|c| c.color()).sum()
+    //             } else {
+    //                 children.iter().map(|c| c.color_in_pixel(pixel)).sum()
+    //             }
+    //         }
+    //         None => ColorBuilder::default(),
+    //     })
+    // }
+
+    /// returns `None` if we shouldn't/can't refine
+    /// returns the points we need to sample
+    /// we split a `LeafColor` into a `Internal([LeafReserved; 4])`)
+    ///
+    /// to select the node, we require that it
+    /// - intersects the window
+    /// - is among the shallowest leafs
+    // TODO: we don't actually need the leaf to be colored to split it
+    // TODO: better ordering
+    #[cfg_attr(feature = "profiling", inline(never))]
+    // pub(crate) fn refine(slf: Arc<Self>, window: Window) -> Option<[NodeId; 4]> {
+    pub(crate) fn refine(&self, window: Window, now: Moment) -> Option<[NodeHandle; 4]> {
+        /// returns the shallowest leaf with color that intersects the window, and its depth.
+        /// returns `None` if no leaf intersects the window.
+        #[cfg_attr(feature = "profiling", inline(never))]
+        fn get_shallowest_leaf(tree: &Tree, window: Window) -> Option<(u32, NodeHandle)> {
+            // TODO: avoid this allocation, it should be in thread local memory
+            let mut stack = Vec::with_capacity(64);
+            stack.push((tree.root, 0));
+            let mut shallowest_depth = u32::MAX;
+            let mut shallowest_leaf_id = None;
+            while let Some((node_id, depth)) = stack.pop() {
+                let node = tree.alloc.get(node_id);
+                // TODO: instead of doing this check on pop, do it on push
+                // this also lets us do less work in the case where the domain is contained inside the window
+                if !window.overlaps(unsafe { node.dom() }) {
+                    continue;
+                }
+                if depth >= shallowest_depth {
+                    continue;
+                }
+                if let Some(child_id) = node.left_child.load(Ordering::SeqCst) {
+                    let leaf_distance = node.leaf_distance_cache.load(Ordering::SeqCst);
+                    if leaf_distance + depth >= shallowest_depth {
+                        continue;
+                    }
+
+                    // // TODO: does this sort the nodes in place???
+                    // let mut children: [&mut Node; 4] = children.each_mut();
+                    // children.sort_by_key(|c| c.leaf_distance_cache());
+                    // stack.extend(children.into_iter().map(|c| (c, depth + 1)));
+                    stack.extend(child_id.siblings().map(|c| (c, depth + 1)).into_iter());
+                } else {
+                    let color = node.color.load(Ordering::SeqCst);
+                    // if color.is_none() {
+                    //     println!("found uncolored leaf {:?} at depth {}", node_id, depth);
+                    // }
+                    if color.is_some() && depth < shallowest_depth {
+                        shallowest_depth = depth;
+                        shallowest_leaf_id = Some(node_id);
+                    }
+                }
+            }
+            Some((shallowest_depth, shallowest_leaf_id?))
+        }
+
+        fn colored_leafs_in_window_at_depth(
+            tree: &Tree,
+            window: Window,
+            shallowest_depth: u32,
+        ) -> impl Iterator<Item = NodeHandle> {
+            // TODO: avoid this allocation, it should be in thread local memory
+            let mut stack = Vec::with_capacity(64);
+            stack.push((tree.root, 0));
+            std::iter::from_fn(move || {
+                while let Some((node_id, depth)) = stack.pop() {
+                    if !window.overlaps(unsafe { tree.alloc.get(node_id).dom() }) {
+                        continue;
+                    }
+                    if depth > shallowest_depth {
+                        continue;
+                    }
+                    if let Some(child_id) =
+                        tree.alloc.get(node_id).left_child.load(Ordering::SeqCst)
+                    {
+                        // don't bother updating the caches
+                        let leaf_distance = tree
+                            .alloc
+                            .get(node_id)
+                            .leaf_distance_cache
+                            .load(Ordering::SeqCst);
+                        if leaf_distance + depth > shallowest_depth {
+                            continue;
+                        }
+                        stack.extend(child_id.siblings().map(|c| (c, depth + 1)).into_iter());
+                    } else {
+                        let color = tree.alloc.get(node_id).color.load(Ordering::SeqCst);
+                        if color.is_some() && depth == shallowest_depth {
+                            return Some(node_id);
+                        }
+                    }
+                }
+                None
+            })
+        }
+
+        // TODO: is this really correct?
+        let (shallowest_depth, handle) = get_shallowest_leaf(self, window)?;
+
+        // assert!(node.color.is_some());
+        // assert!(node.child_id.is_none());
+
+        // let Node::LeafColor(leaf) = node else {
+        //     // let Some(leaf) = get_leaf_from_mid(self, node_mid) else {
+        //     unreachable!("the node must be a `LeafColor`");
+        // };
+
+        fn try_split(
+            tree: &Tree,
+            leaf_handle: NodeHandle,
+            left_child: NodeHandle,
+            now: Moment,
+        ) -> Option<()> {
+            let leaf = tree.alloc.get(leaf_handle);
+
+            let leaf_dom = unsafe { leaf.dom() };
+            // #[cfg(debug_assertions)]
+            // {
+            //     let leaf_leaf_distance_cache = leaf.leaf_distance_cache.load(Ordering::SeqCst);
+            //     let leaf_color = leaf.color.load(Ordering::SeqCst);
+            //     let leaf_left_child = leaf.left_child.load(Ordering::SeqCst);
+            // }
+
+            // // if we do this, we can skip initializing the children's dom,
+            // // but this requires an additional atomic operation,
+            // // so it's probably not worth it.
+            // if leaf_left_child.is_some() {
+            //     dbg!("leaf_left_child.is_some()");
+            //     continue;
+            // }
+
+            // initialize the children's dom and parent
+            {
+                let Some(doms) = leaf_dom.split() else {
+                    dbg!("leaf_dom.split() is None");
+                    return None;
+                };
+                for (offset, dom) in doms.into_iter().enumerate() {
+                    let child_handle = left_child.siblings_offset(offset);
+                    let child = tree.alloc.get(child_handle);
+                    // SAFETY: we allocated the children and never gave them to anyone,
+                    // so we have exclusive access.
+                    unsafe {
+                        child.write_dom(dom);
+                        child.write_parent(Some(leaf_handle));
+                    }
+                }
+            }
+
+            // this is the linearization point
+            match leaf.left_child.compare_exchange_weak(
+                None,
+                Some(left_child),
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(old_left_child) => {
+                    debug_assert_eq!(
+                        old_left_child, None,
+                        "this is guaranteed by compare_exchange_weak, despite it being documented incorrectly"
+                    );
+                }
+                Err(_old_left_child) => {
+                    return None;
+                }
+            }
+
+            tree.update_ancestors_timestamp(leaf_handle, now);
+            tree.update_ancestors_distance(left_child);
+
+            // // at this point we know that we were the ones who succeeded,
+            // // so we get to do some fun checks
+            // #[cfg(debug_assertions)]
+            // {
+            //     debug_assert_eq!(leaf_leaf_distance_cache, 0);
+            //     debug_assert!(leaf_color.is_some());
+            //     debug_assert_eq!(leaf_left_child, None);
+            // }
+
+            // // update leaf_distance_cache
+            // {
+            //     // this can fail if another thread updated the cache first
+            //     debug_assert_eq!(leaf.leaf_distance_cache.load(Ordering::SeqCst), 0);
+            //     leaf.leaf_distance_cache.store(1, Ordering::SeqCst);
+            // }
+
+            Some(())
+        }
+
+        // note that we have an exclusive reference to the new children
+        let left_child = self.alloc.alloc4();
+
+        // initialize the children except for dom and parent, which we don't know yet
+        for child_handle in left_child.siblings() {
+            let child = self.alloc.get(child_handle);
+            child.left_child.store(None, Ordering::Relaxed);
+            child.color.store(None, Ordering::Relaxed);
+            child.leaf_distance_cache.store(0, Ordering::Relaxed);
+            child.timestamp.store(now, Ordering::Relaxed);
+        }
+
+        // CAS in the new left_child,
+        // and if it fails (bc someone already got there),
+        // reuse the memory we allocated for the children for the next iteration.
+        // if we go through all the leafs at this depth, don't bother retrying, just return `None`.
+        for leaf_handle in colored_leafs_in_window_at_depth(self, window, shallowest_depth) {
+            if let Some(()) = try_split(self, leaf_handle, left_child, now) {
+                return Some(left_child.siblings());
+            }
+        }
+
+        // put the bfs stuff in the thread local memory as well as the split handles
+        dbg!("we're leaking memory and i want to know");
+
+        None
+    }
+
+    /// inserts the previously reserved sample into the node
+    #[cfg_attr(feature = "profiling", inline(never))]
+    pub(crate) fn insert(&self, handle: NodeHandle, color: Color32, now: Moment) {
+        let node = self.alloc.get(handle);
+        debug_assert_eq!(node.color.load(Ordering::SeqCst), None);
+        self.update_ancestors_timestamp(handle, now);
+        node.color
+            .store(Some(color.try_into().unwrap()), Ordering::SeqCst);
+    }
+
+    // TODO: if the pixel doesn't contain any samples,
+    // return the color of the sample closest to the center of the pixel.
+    // TODO: if the pixel contains any samples, do some weighting of the samples
+    // TODO: if the pixel doesn't contain any samples, do some weighting of some nearby samples
+    // TODO: if the pixel contains any samples, returns the average color of the samples inside the pixel
+    //
+    /// follow the path down to the leaf containing the center of the pixel,
+    /// return the color of the sample closest to the center of the pixel.
+    /// returns `None` if we prove that the color hasn't changed from the last frame.
+    /// returns white if not in the trees domain
+    #[inline(never)]
+    pub(crate) fn color_of_pixel(&self, pixel: Pixel, prev_frame_start: Moment) -> Option<Color32> {
+        #[cfg_attr(feature = "profiling", inline(never))]
+        fn distance((real_0, imag_0): (Real, Imag), (real_1, imag_1): (Real, Imag)) -> Fixed {
+            let real_delta = real_0 - real_1;
+            let imag_delta = imag_0 - imag_1;
+            // real_delta * real_delta + imag_delta * imag_delta
+
+            // i think they give the same result
+            // except manhattan maybe gives weird lines
+            // real_delta.abs() + imag_delta.abs()
+            real_delta.abs().max(imag_delta.abs())
+        }
+
+        let center = pixel.mid();
+        // we never touch pixel again
+        #[expect(unused_variables)]
+        let pixel = ();
+
+        if !self.dom.contains_point(center) {
+            const UNCONTAINED_COLOR: Color32 = Color32::WHITE;
+            return Some(UNCONTAINED_COLOR);
+        }
+
+        let mut node_handle = self.root;
+        let mut closest_sample_dist = distance(center, self.dom.mid());
+        let mut closest_sample_color = self
+            .alloc
+            .get(node_handle)
+            .color
+            .load(Ordering::Relaxed)
+            .expect("root must have a color");
+
+        loop {
+            let node = self.alloc.get(node_handle);
+            let dom = unsafe { node.dom() };
+
+            // check whether the node's timestamp proves that the color hasn't changed since the last frame
+            {
+                let timestamp = node.timestamp.load(Ordering::Relaxed);
+                // TODO: <=?
+                if timestamp < prev_frame_start {
+                    return None;
+                }
+            }
+
+            // update color
+            {
+                let dist = distance(center, dom.mid());
+                let color = node.color.load(Ordering::Relaxed);
+                // if `None`, we skip the node, which is good for aesthetics
+                // if `Some`, we color it with a debug color
+                // const UNCOLORED_NODE_COLOR: Option<RGB> = None;
+                const UNCOLORED_NODE_COLOR: Option<RGB> = Some(RGB::new(255, 255, 0));
+                if dist < closest_sample_dist
+                    && let Some(color) = color.or(UNCOLORED_NODE_COLOR)
+                {
+                    closest_sample_dist = dist;
+                    closest_sample_color = color;
+                }
+            }
+
+            // i++
+            {
+                let Some(left_child) = node.left_child.load(Ordering::Relaxed) else {
+                    break;
+                };
+                let child_offset = dom.child_offset_containing(center);
+                node_handle = left_child.siblings_offset(child_offset);
+            }
+        }
+
+        Some(closest_sample_color.into())
+    }
+}
 
 use rbg::*;
 mod rbg {
@@ -52,64 +646,9 @@ mod rbg {
         }
     }
 }
-#[repr(C, align(64))]
-#[derive(Debug)]
-struct Node {
-    dom: Domain,
-    leaf_distance_cache: AtomicU32,
-    // TODO: remove Atomic wrapper around color maybe
-    color: Atomic<Option<RGB>>,
-    /// leftmost child id
-    left_child: Atomic<Option<NodeHandle>>,
-    _pad: [u8; 24],
-}
-const _: () = assert!(size_of::<Node>() == 64);
-const _: () = assert!(align_of::<Node>() == 64);
-const _: () = assert!(Atomic::<Option<RGB>>::is_lock_free());
-const _: () = assert!(Atomic::<Option<NodeHandle>>::is_lock_free());
-impl Node {
-    fn uninit() -> Self {
-        Self {
-            dom: Domain::uninit(),
-            leaf_distance_cache: AtomicU32::new(0),
-            color: Atomic::new(None),
-            left_child: Atomic::new(None),
-            _pad: Default::default(),
-        }
-    }
 
-    // fn new_leaf_uncolored(dom: Domain) -> Self {
-    //     Self {
-    //         dom,
-    //         leaf_distance_cache: AtomicU32::new(0),
-    //         color: Atomic::new(None),
-    //         left_child: Atomic::new(None),
-    //         _pad: Default::default(),
-    //     }
-    // }
-
-    // fn new_leaf_colored(dom: Domain, color: Color32) -> Self {
-    //     Self {
-    //         dom,
-    //         leaf_distance_cache: AtomicU32::new(0),
-    //         color: Atomic::new(OptionColor::new_some(color)),
-    //         left_child: Atomic::new(None),
-    //         _pad: Default::default(),
-    //     }
-    // }
-
-    /// the caller probably should ensure that we have exclusive access to the child,
-    /// tho maybe it's fine even without.
-    unsafe fn dom_write(&self, dom: Domain) {
-        unsafe {
-            (&raw const self.dom as *mut Domain).write(dom);
-            // (child as *const Node as *mut Node).as_mut().unwrap().dom = dom;
-        }
-    }
-}
-
-pub(crate) use alloc3::*;
-mod alloc3 {
+pub(crate) use alloc::*;
+mod alloc {
     use std::{
         num::NonZeroUsize,
         ptr::NonNull,
@@ -197,6 +736,8 @@ mod alloc3 {
             ret
         }
 
+        /// must have that self is the first node in a group of 4, ie has greater alignment.
+        /// also note that it's probably bad to call this on the root.
         #[cfg_attr(feature = "profiling", inline(never))]
         pub(super) fn siblings(self) -> [NodeHandle; 4] {
             let block = self.to_block();
@@ -224,6 +765,15 @@ mod alloc3 {
             };
             debug_assert_eq!(oracle, ret);
             ret
+        }
+
+        /// because the root is leftmost in its group,
+        /// this is actually fine to call on the root.
+        #[cfg_attr(feature = "profiling", inline(never))]
+        pub(super) fn left_sibling(self) -> NodeHandle {
+            let block = self.to_block();
+            let i = self.to_index();
+            NodeHandle::new(block, i - (i % 4))
         }
     }
     impl std::fmt::Debug for NodeHandle {
@@ -256,6 +806,7 @@ mod alloc3 {
     #[repr(C, align(4096))]
     #[derive(Debug)]
     struct Block {
+        /// not wrapped in `UnsafeCell` because we don't actually write to the nodes, only their fields.
         mem: [Node; Self::CAPACITY],
         foot: BlockFooter,
     }
@@ -372,431 +923,43 @@ mod alloc3 {
     }
 }
 
-#[derive(Debug)]
-pub(crate) struct Tree {
-    dom: Domain,
-    alloc: Alloc,
-    root: NodeHandle,
-}
+pub(crate) use moment::*;
+mod moment {
+    use std::ops;
 
-impl Tree {
-    pub(crate) fn new() -> Self {
-        let dom = Domain::default();
-        let color = Some(metabrot_sample(dom.mid()).color().try_into().unwrap());
-        let alloc = Alloc::default();
+    use super::*;
 
-        // we leave 3 nodes uninit
-        let root_handle = alloc.alloc4();
-        let root = alloc.get(root_handle);
-        unsafe { root.dom_write(dom) };
-        root.leaf_distance_cache.store(0, Ordering::Relaxed);
-        root.color.store(color, Ordering::Relaxed);
-        root.left_child.store(None, Ordering::Relaxed);
+    #[repr(transparent)]
+    #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, bytemuck::NoUninit)]
+    /// uses i64 internally but should be nonnegative
+    pub(crate) struct Moment(i64);
+    impl Moment {
+        pub(crate) const MIN: Self = Self(0);
+        // pub(crate) const MAX: Self = Self(i64::MAX);
 
-        Self {
-            dom,
-            alloc,
-            root: root_handle,
+        fn new(value: i64) -> Self {
+            debug_assert!(value >= 0);
+            Self(value)
         }
     }
+    impl ops::Add<i64> for Moment {
+        type Output = Self;
 
-    pub(crate) fn node_count(&self) -> usize {
-        let mut count = 0;
-        let mut stack = Vec::with_capacity(64);
-
-        stack.push(self.root);
-
-        while let Some(handle) = stack.pop() {
-            count += 1;
-            if let Some(child_id) = self.alloc.get(handle).left_child.load(Ordering::SeqCst) {
-                stack.extend(child_id.siblings());
-            }
+        fn add(self, rhs: i64) -> Self {
+            Self::new(self.0 + rhs)
         }
-        count
     }
-
-    pub(crate) fn mid_of_node_id(&self, handle: NodeHandle) -> (Real, Imag) {
-        self.alloc.get(handle).dom.mid()
+    impl ops::AddAssign<i64> for Moment {
+        fn add_assign(&mut self, rhs: i64) {
+            *self = Self::new(self.0 + rhs);
+        }
     }
+    impl ops::Sub<i64> for Moment {
+        type Output = Self;
 
-    // /// ensures that we have < n nodes
-    // /// or maybe that each pixel contains at most n leaves
-    // /// or maybe if you're in the window, you get at most subsamples leaves,
-    // /// if you're not in the window, you all collectively get m leaves
-    // fn prune(&mut self, window: Window, pixel_width: f32, n: u32, subsamples: u8) {
-    //     todo!()
-    // }
-
-    // /// the average color of leaves inside the pixel weighted by area that's overlapping the pixel
-    // /// or maybe weighted by distance to the center of the pixel
-    // /// the color of the highest node contained in pixel
-    // fn color(&self, pixel: Domain) -> Option<Color32> {
-    //     if !self.window.overlaps(pixel) {
-    //         return None;
-    //     }
-    //     if self.window <= pixel {
-    //         return Some(self.color);
-    //     }
-    //     if self.is_leaf() {
-    //         // we're too zoomed in
-    //         return None;
-    //     }
-    //     // TODO: i think it's actually possible that it's not the child closest to the pixel center that has a child eventually inside pixel
-    //     let closest_child_i = self
-    //         .child_i_closest_to(pixel.real_mid(), pixel.imag_mid())
-    //         .unwrap();
-    //     self.children.as_ref().unwrap()[closest_child_i].color(pixel)
-    // }
-
-    // /// average color of samples inside the pixel
-    // #[inline(never)]
-    // pub(crate) fn color_in_pixel(&self, pixel: Domain) -> ColorBuilder {
-    //     let d = f32::max(
-    //         (self.dom.real_mid() - pixel.real_mid()).abs(),
-    //         (self.dom.imag_mid() - pixel.imag_mid()).abs(),
-    //     );
-    //     // if !self.dom.overlaps(pixel) {
-    //     if d > self.dom.rad() + pixel.rad() {
-    //         return ColorBuilder::default();
-    //     }
-    //     // (if pixel.contains_point(self.dom.real_mid(), self.dom.imag_mid()) {
-    //     (if d <= pixel.rad() {
-    //         self.color.into()
-    //     } else {
-    //         ColorBuilder::default()
-    //     } + match &self.children {
-    //         Some(children) => {
-    //             // if pixel.contains_square(self.dom) {
-    //             if d <= pixel.rad() - self.dom.rad() {
-    //                 children.iter().map(|c| c.color()).sum()
-    //             } else {
-    //                 children.iter().map(|c| c.color_in_pixel(pixel)).sum()
-    //             }
-    //         }
-    //         None => ColorBuilder::default(),
-    //     })
-    // }
-
-    /// returns `None` if we shouldn't/can't refine
-    /// returns the points we need to sample
-    /// we split a `LeafColor` into a `Internal([LeafReserved; 4])`)
-    ///
-    /// to select the node, we require that it
-    /// - intersects the window
-    /// - is among the shallowest leafs
-    // TODO: we don't actually need the leaf to be colored to split it
-    // TODO: better ordering
-    #[cfg_attr(feature = "profiling", inline(never))]
-    // pub(crate) fn refine(slf: Arc<Self>, window: Window) -> Option<[NodeId; 4]> {
-    pub(crate) fn refine(&self, window: Window) -> Option<[NodeHandle; 4]> {
-        /// returns the shallowest leaf with color that intersects the window, and its depth.
-        /// returns `None` if no leaf intersects the window.
-        #[cfg_attr(feature = "profiling", inline(never))]
-        fn get_shallowest_leaf(tree: &Tree, window: Window) -> Option<(u32, NodeHandle)> {
-            // TODO: avoid this allocation
-            let mut stack = Vec::with_capacity(64);
-            stack.push((tree.root, 0));
-            let mut shallowest_depth = u32::MAX;
-            let mut shallowest_leaf_id = None;
-            while let Some((node_id, depth)) = stack.pop() {
-                let node = tree.alloc.get(node_id);
-                // TODO: instead of doing this check on pop, do it on push
-                // this also lets us do less work in the case where the domain is contained inside the window
-                if !window.overlaps(node.dom) {
-                    continue;
-                }
-                if depth >= shallowest_depth {
-                    continue;
-                }
-                if let Some(child_id) = node.left_child.load(Ordering::SeqCst) {
-                    // TODO: restore leaf distance cache stuff
-
-                    let leaf_distance = child_id
-                        .siblings()
-                        .map(|child_handle| {
-                            tree.alloc
-                                .get(child_handle)
-                                .leaf_distance_cache
-                                .load(Ordering::SeqCst)
-                        })
-                        .iter()
-                        .min()
-                        .unwrap()
-                        + 1;
-                    // if leaf_distance < tree.alloc.get_leaf_distance_cache(node_id) {
-                    //     // let node_id = tree.alloc.promote(node_id);
-                    //     tree.alloc.update_with(node_id, |node| {
-                    //         let _ = node.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |node| {
-                    //             if leaf_distance < node.leaf_distance_cache {
-                    //                 Some(Node {
-                    //                     leaf_distance_cache: leaf_distance,
-                    //                     ..node
-                    //                 })
-                    //             } else {
-                    //                 None
-                    //             }
-                    //         });
-                    //     });
-                    //     // tree.alloc.demote(node_id);
-                    //     // node.leaf_distance_cache = leaf_distance;
-                    //     // todo!("this is incorrect now");
-                    // }
-
-                    // node.leaf_distance_cache.fetch_min(leaf_distance, Ordering::Relaxed);
-                    // TODO: why was i mining and not maxing?
-                    // TODO: just update the distance on insert and don't do stuff here
-                    node.leaf_distance_cache
-                        .store(leaf_distance, Ordering::SeqCst);
-                    if leaf_distance + depth >= shallowest_depth {
-                        continue;
-                    }
-
-                    // // TODO: does this sort the nodes in place???
-                    // let mut children: [&mut Node; 4] = children.each_mut();
-                    // children.sort_by_key(|c| c.leaf_distance_cache());
-                    // stack.extend(children.into_iter().map(|c| (c, depth + 1)));
-                    stack.extend(child_id.siblings().map(|c| (c, depth + 1)).into_iter());
-                } else {
-                    let color = node.color.load(Ordering::SeqCst);
-                    // if color.is_none() {
-                    //     println!("found uncolored leaf {:?} at depth {}", node_id, depth);
-                    // }
-                    if color.is_some() && depth < shallowest_depth {
-                        shallowest_depth = depth;
-                        shallowest_leaf_id = Some(node_id);
-                    }
-                }
-            }
-            Some((shallowest_depth, shallowest_leaf_id?))
+        fn sub(self, rhs: i64) -> Self {
+            Self::new(self.0 - rhs)
         }
-
-        fn colored_leafs_in_window_at_depth(
-            tree: &Tree,
-            window: Window,
-            shallowest_depth: u32,
-        ) -> impl Iterator<Item = NodeHandle> {
-            // TODO: avoid this allocation
-            let mut stack = Vec::with_capacity(64);
-            stack.push((tree.root, 0));
-            std::iter::from_fn(move || {
-                while let Some((node_id, depth)) = stack.pop() {
-                    if !window.overlaps(tree.alloc.get(node_id).dom) {
-                        continue;
-                    }
-                    if depth > shallowest_depth {
-                        continue;
-                    }
-                    if let Some(child_id) =
-                        tree.alloc.get(node_id).left_child.load(Ordering::SeqCst)
-                    {
-                        // don't bother updating the caches
-                        let leaf_distance = tree
-                            .alloc
-                            .get(node_id)
-                            .leaf_distance_cache
-                            .load(Ordering::SeqCst);
-                        if leaf_distance + depth > shallowest_depth {
-                            continue;
-                        }
-                        stack.extend(child_id.siblings().map(|c| (c, depth + 1)).into_iter());
-                    } else {
-                        let color = tree.alloc.get(node_id).color.load(Ordering::SeqCst);
-                        if color.is_some() && depth == shallowest_depth {
-                            return Some(node_id);
-                        }
-                    }
-                }
-                None
-            })
-        }
-
-        // TODO: is this really correct?
-        let (shallowest_depth, handle) = get_shallowest_leaf(self, window)?;
-
-        // assert!(node.color.is_some());
-        // assert!(node.child_id.is_none());
-
-        // let Node::LeafColor(leaf) = node else {
-        //     // let Some(leaf) = get_leaf_from_mid(self, node_mid) else {
-        //     unreachable!("the node must be a `LeafColor`");
-        // };
-
-        // self.alloc.debug();
-        // dbg!(shallowest_depth);
-
-        fn try_split(tree: &Tree, left_child: NodeHandle, leaf_handle: NodeHandle) -> Option<()> {
-            let leaf = tree.alloc.get(leaf_handle);
-
-            let leaf_dom = leaf.dom;
-            // #[cfg(debug_assertions)]
-            // {
-            //     let leaf_leaf_distance_cache = leaf.leaf_distance_cache.load(Ordering::SeqCst);
-            //     let leaf_color = leaf.color.load(Ordering::SeqCst);
-            //     let leaf_left_child = leaf.left_child.load(Ordering::SeqCst);
-            // }
-
-            // // if we do this, we can skip initializing the children's dom,
-            // // but this requires an additional atomic operation,
-            // // so it's probably not worth it.
-            // if leaf_left_child.is_some() {
-            //     dbg!("leaf_left_child.is_some()");
-            //     continue;
-            // }
-
-            // initialize the children's dom
-            {
-                let Some(doms) = leaf_dom.split() else {
-                    dbg!("leaf_dom.split() is None");
-                    return None;
-                };
-                for (offset, dom) in doms.into_iter().enumerate() {
-                    let child_handle = left_child.siblings_offset(offset);
-                    let child = tree.alloc.get(child_handle);
-                    // SAFETY: we allocated the children and never gave them to anyone,
-                    // so we have exclusive access.
-                    unsafe { child.dom_write(dom) };
-                }
-            }
-
-            // this is the linearization point
-            match leaf.left_child.compare_exchange_weak(
-                None,
-                Some(left_child),
-                Ordering::SeqCst,
-                Ordering::SeqCst,
-            ) {
-                Ok(old_left_child) => {
-                    debug_assert_eq!(
-                        old_left_child, None,
-                        "this is guaranteed by compare_exchange_weak, despite it being documented incorrectly"
-                    );
-                }
-                Err(_old_left_child) => {
-                    return None;
-                }
-            }
-
-            // // at this point we know that we were the ones who succeeded,
-            // // so we get to do some fun checks
-            // #[cfg(debug_assertions)]
-            // {
-            //     debug_assert_eq!(leaf_leaf_distance_cache, 0);
-            //     debug_assert!(leaf_color.is_some());
-            //     debug_assert_eq!(leaf_left_child, None);
-            // }
-
-            // // update leaf_distance_cache
-            // {
-            //     // this can fail if another thread updated the cache first
-            //     debug_assert_eq!(leaf.leaf_distance_cache.load(Ordering::SeqCst), 0);
-            //     leaf.leaf_distance_cache.store(1, Ordering::SeqCst);
-            // }
-
-            Some(())
-        }
-
-        // note that we have an exclusive reference to the new children
-        let left_child = self.alloc.alloc4();
-
-        // initialize the children except for dom
-        for child_handle in left_child.siblings() {
-            let child = self.alloc.get(child_handle);
-            child.leaf_distance_cache.store(0, Ordering::SeqCst);
-            child.color.store(None, Ordering::SeqCst);
-            child.left_child.store(None, Ordering::SeqCst);
-        }
-
-        // CAS in the new left_child,
-        // and if it fails (bc someone already got there),
-        // reuse the memory we allocated for the children for the next iteration.
-        for leaf_handle in colored_leafs_in_window_at_depth(self, window, shallowest_depth) {
-            if let Some(()) = try_split(self, left_child, leaf_handle) {
-                return Some(left_child.siblings());
-            }
-
-            // dbg!("try_split failed for leaf_handle {:?}", leaf_handle);
-        }
-        dbg!("we're leaking memory and i want to know");
-        None
-    }
-
-    /// inserts the previously reserved sample into the the tree,
-    /// promoting a `LeafReserved` to a `LeafColor`
-    // TODO: should the point and color actually be a [_; 4]?
-    #[cfg_attr(feature = "profiling", inline(never))]
-    pub(crate) fn insert(&self, handle: NodeHandle, color: Color32) {
-        let node = self.alloc.get(handle);
-        debug_assert_eq!(node.color.load(Ordering::SeqCst), None);
-        node.color
-            .store(Some(color.try_into().unwrap()), Ordering::SeqCst);
-    }
-
-    // TODO: if the pixel doesn't contain any samples,
-    // return the color of the sample closest to the center of the pixel.
-    // TODO: if the pixel contains any samples, do some weighting of the samples
-    // TODO: if the pixel doesn't contain any samples, do some weighting of some nearby samples
-    // TODO: if the pixel contains any samples, returns the average color of the samples inside the pixel
-    //
-    /// follow the path down to the leaf containing the center of the pixel,
-    /// return the color of the sample closest to the center of the pixel.
-    ///
-    /// returns white if not in the trees domain
-    #[inline(never)]
-    pub(crate) fn color_of_pixel(&self, pixel: Pixel) -> Color32 {
-        #[cfg_attr(feature = "profiling", inline(never))]
-        fn distance((real_0, imag_0): (Real, Imag), (real_1, imag_1): (Real, Imag)) -> Fixed {
-            let real_delta = real_0 - real_1;
-            let imag_delta = imag_0 - imag_1;
-            // real_delta * real_delta + imag_delta * imag_delta
-
-            // i think they give the same result
-            // except manhattan maybe gives weird lines
-            // real_delta.abs() + imag_delta.abs()
-            real_delta.abs().max(imag_delta.abs())
-        }
-
-        let center = pixel.mid();
-        // we never touch pixel again
-        #[expect(unused_variables)]
-        let pixel = ();
-
-        if !self.dom.contains_point(center) {
-            const UNCONTAINED_COLOR: Color32 = Color32::WHITE;
-            return UNCONTAINED_COLOR;
-        }
-
-        let mut node_id = self.root;
-        let mut closest_sample_dist = distance(center, self.dom.mid());
-        let mut closest_sample_color = self
-            .alloc
-            .get(node_id)
-            .color
-            .load(Ordering::Relaxed)
-            .expect("root must have a color");
-
-        loop {
-            let node = self.alloc.get(node_id);
-            let Some(left_child) = node.left_child.load(Ordering::Relaxed) else {
-                break;
-            };
-            let child_offset = node.dom.child_offset_containing(center);
-            node_id = left_child.siblings_offset(child_offset);
-            let node = self.alloc.get(node_id);
-
-            let dist = distance(center, node.dom.mid());
-            let color = node.color.load(Ordering::Relaxed);
-            // if `None`, we skip the node, which is good for aesthetics
-            // if `Some`, we color it with a debug color
-            // const UNCOLORED_NODE_COLOR: Option<RGB> = None;
-            const UNCOLORED_NODE_COLOR: Option<RGB> = Some(RGB::new(255, 255, 0));
-            if dist < closest_sample_dist
-                && let Some(color) = color.or(UNCOLORED_NODE_COLOR)
-            {
-                closest_sample_dist = dist;
-                closest_sample_color = color;
-            }
-        }
-        closest_sample_color.into()
     }
 }
 

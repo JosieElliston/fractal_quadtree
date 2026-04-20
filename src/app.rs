@@ -145,22 +145,27 @@ impl eframe::App for App {
                 // self.tree.validate_leaf_distance();
 
                 // panning stuff
-                // pan other camera when holding backtick
-                if ctx.input(|i| i.key_down(Key::Backtick)) != (self.current_fractal == 0) {
-                    CameraMap::pan_zoom(
-                        ctx,
-                        ui,
-                        &mut self.primary_camera,
-                        &mut self.primary_camera_velocity,
-                    );
-                } else {
-                    CameraMap::pan_zoom(
-                        ctx,
-                        ui,
-                        &mut self.secondary_camera,
-                        &mut self.secondary_camera_velocity,
-                    );
-                }
+                // pan the other camera when holding backtick
+                let needs_redraw = {
+                    let before = (self.primary_camera, self.secondary_camera);
+                    if ctx.input(|i| i.key_down(Key::Backtick)) != (self.current_fractal == 0) {
+                        CameraMap::pan_zoom(
+                            ctx,
+                            ui,
+                            &mut self.primary_camera,
+                            &mut self.primary_camera_velocity,
+                        )
+                    } else {
+                        CameraMap::pan_zoom(
+                            ctx,
+                            ui,
+                            &mut self.secondary_camera,
+                            &mut self.secondary_camera_velocity,
+                        )
+                    };
+                    let after = (self.primary_camera, self.secondary_camera);
+                    before != after
+                };
 
                 let primary_camera_map =
                     CameraMap::new(ui.max_rect(), self.primary_camera, self.stride);
@@ -307,7 +312,8 @@ impl eframe::App for App {
                     // draw the fractal
                     {
                         if self.current_fractal == 0 {
-                            self.metabrot.begin_rendering(primary_camera_map.clone());
+                            self.metabrot
+                                .begin_rendering(primary_camera_map.clone(), needs_redraw);
                             self.metabrot.finish_rendering(&mut self.texture);
                         } else if let Some(z0) = z0 {
                             fractal::render_mandelbrot(
@@ -601,7 +607,7 @@ impl eframe::App for App {
                                 1.0 / average_dt,
                                 self.sample_counts.values().sum::<u64>() as f32
                                     / self.sample_counts.len() as f32,
-                                self.metabrot.tree.node_count(),
+                                self.metabrot.tree().node_count(),
                             );
                             ui.label(egui::RichText::new(t).background_color(Color32::BLACK));
                         }

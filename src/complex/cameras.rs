@@ -7,7 +7,7 @@ use super::{Window, fixed::*};
 // TODO: maybe `Square`?
 pub(crate) type Pixel = Window;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct Camera {
     real_mid: f64,
     imag_mid: f64,

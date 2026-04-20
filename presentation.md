@@ -5,6 +5,7 @@
 - computing each sample itself may seem embarrassingly parallel, but we might want to do things like blob detection for coloring, and we already have parallelism over sampling, so we don't have available threads to do parallelism inside sampling.
 - note that the target hardware is "my m1 mac", not a cluster or smt, tho my solution should be fine for any common consumer hardware. note that i didn't end up using the gpu.
 - maybe the presentation is building the quadtree and arena allocator and dynamic array from primitives
+- epistemic status
 
 ## slides
 
