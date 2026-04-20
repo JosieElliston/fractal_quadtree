@@ -1,98 +1,102 @@
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::{
+    num::NonZeroU32,
+    sync::atomic::{AtomicU32, Ordering},
+};
 
 use atomic::Atomic;
-use eframe::egui::Color32;
+use egui::Color32;
 
 use crate::{
     complex::{Domain, Pixel, Window, fixed::*},
     sample::metabrot_sample,
 };
 
-pub(crate) static ELAPSED_NANOS: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
-pub(crate) static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+// pub(crate) static ELAPSED_NANOS: std::sync::atomic::AtomicU64 =
+//     std::sync::atomic::AtomicU64::new(0);
+// pub(crate) static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// `None` iff self == 0
-/// `Some` iff alpha == 255
-#[repr(C, align(4))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, bytemuck::NoUninit)]
-struct OptionColor(Color32);
-// unsafe impl bytemuck::ZeroableInOption for NodeId {}
-// unsafe impl bytemuck::PodInOption for NodeId {}
-impl OptionColor {
-    const NONE: Self = Self(Color32::TRANSPARENT);
+use rbg::*;
+mod rbg {
+    use super::*;
 
-    fn new_some(color: Color32) -> Self {
-        debug_assert!(color.a() == 255);
-        Self(color)
+    /// basically a [`egui::Color32`] with max alpha.
+    /// layout is 0xFFbbggrr, ie little endian [r, g, b, 255].
+    /// we could allow any nonzero alpha, but i don't use this.
+    #[repr(transparent)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, bytemuck::NoUninit)]
+    pub(super) struct RGB(NonZeroU32);
+    unsafe impl bytemuck::ZeroableInOption for RGB {}
+    unsafe impl bytemuck::PodInOption for RGB {}
+    impl RGB {
+        pub(super) fn new(r: u8, g: u8, b: u8) -> Self {
+            let arr = [r, g, b, 255];
+            let value = u32::from_le_bytes(arr);
+            RGB(NonZeroU32::new(value).unwrap())
+        }
     }
+    impl TryFrom<Color32> for RGB {
+        type Error = &'static str;
 
-    fn is_some(&self) -> bool {
-        debug_assert!(self.0.a() == 0 || self.0.a() == 255);
-        self.0.a() == 255
+        fn try_from(value: Color32) -> Result<Self, Self::Error> {
+            if value.a() != 255 {
+                return Err("alpha is not 255");
+            }
+            Ok(Self::new(value.r(), value.g(), value.b()))
+        }
     }
-
-    fn is_none(&self) -> bool {
-        debug_assert!(self.0.a() == 0 || self.0.a() == 255);
-        self.0.a() == 0
-    }
-
-    fn unwrap(&self) -> Color32 {
-        assert!(self.is_some());
-        self.0
-    }
-
-    fn expect(&self, msg: &str) -> Color32 {
-        assert!(self.is_some(), "{}", msg);
-        self.0
+    impl From<RGB> for Color32 {
+        fn from(value: RGB) -> Self {
+            let [r, g, b, a] = value.0.get().to_le_bytes();
+            debug_assert_eq!(a, 255);
+            Color32::from_rgb(r, g, b)
+        }
     }
 }
-
 #[repr(C, align(64))]
 #[derive(Debug)]
 struct Node {
     dom: Domain,
     leaf_distance_cache: AtomicU32,
     // TODO: remove Atomic wrapper around color maybe
-    color: Atomic<OptionColor>,
+    color: Atomic<Option<RGB>>,
     /// leftmost child id
     left_child: Atomic<Option<NodeHandle>>,
     _pad: [u8; 24],
 }
 const _: () = assert!(size_of::<Node>() == 64);
 const _: () = assert!(align_of::<Node>() == 64);
-const _: () = assert!(Atomic::<OptionColor>::is_lock_free());
+const _: () = assert!(Atomic::<Option<RGB>>::is_lock_free());
 const _: () = assert!(Atomic::<Option<NodeHandle>>::is_lock_free());
 impl Node {
     fn uninit() -> Self {
         Self {
             dom: Domain::uninit(),
             leaf_distance_cache: AtomicU32::new(0),
-            color: Atomic::new(OptionColor::NONE),
+            color: Atomic::new(None),
             left_child: Atomic::new(None),
             _pad: Default::default(),
         }
     }
 
-    fn new_leaf_uncolored(dom: Domain) -> Self {
-        Self {
-            dom,
-            leaf_distance_cache: AtomicU32::new(0),
-            color: Atomic::new(OptionColor::NONE),
-            left_child: Atomic::new(None),
-            _pad: Default::default(),
-        }
-    }
+    // fn new_leaf_uncolored(dom: Domain) -> Self {
+    //     Self {
+    //         dom,
+    //         leaf_distance_cache: AtomicU32::new(0),
+    //         color: Atomic::new(None),
+    //         left_child: Atomic::new(None),
+    //         _pad: Default::default(),
+    //     }
+    // }
 
-    fn new_leaf_colored(dom: Domain, color: Color32) -> Self {
-        Self {
-            dom,
-            leaf_distance_cache: AtomicU32::new(0),
-            color: Atomic::new(OptionColor::new_some(color)),
-            left_child: Atomic::new(None),
-            _pad: Default::default(),
-        }
-    }
+    // fn new_leaf_colored(dom: Domain, color: Color32) -> Self {
+    //     Self {
+    //         dom,
+    //         leaf_distance_cache: AtomicU32::new(0),
+    //         color: Atomic::new(OptionColor::new_some(color)),
+    //         left_child: Atomic::new(None),
+    //         _pad: Default::default(),
+    //     }
+    // }
 
     /// the caller probably should ensure that we have exclusive access to the child,
     /// tho maybe it's fine even without.
@@ -340,7 +344,7 @@ pub(crate) struct Tree {
 impl Tree {
     pub(crate) fn new() -> Self {
         let dom = Domain::default();
-        let color = OptionColor::new_some(metabrot_sample(dom.mid()).color());
+        let color = Some(metabrot_sample(dom.mid()).color().try_into().unwrap());
         let alloc = Alloc::default();
 
         // we leave 3 nodes uninit
@@ -660,7 +664,7 @@ impl Tree {
         for child_handle in left_child.siblings() {
             let child = self.alloc.get(child_handle);
             child.leaf_distance_cache.store(0, Ordering::SeqCst);
-            child.color.store(OptionColor::NONE, Ordering::SeqCst);
+            child.color.store(None, Ordering::SeqCst);
             child.left_child.store(None, Ordering::SeqCst);
         }
 
@@ -684,9 +688,9 @@ impl Tree {
     #[cfg_attr(feature = "profiling", inline(never))]
     pub(crate) fn insert(&self, handle: NodeHandle, color: Color32) {
         let node = self.alloc.get(handle);
-        debug_assert_eq!(node.color.load(Ordering::SeqCst), OptionColor::NONE);
+        debug_assert_eq!(node.color.load(Ordering::SeqCst), None);
         node.color
-            .store(OptionColor::new_some(color), Ordering::SeqCst);
+            .store(Some(color.try_into().unwrap()), Ordering::SeqCst);
     }
 
     // TODO: if the pixel doesn't contain any samples,
@@ -742,18 +746,14 @@ impl Tree {
             // for debugging, draw uncolored leafs
             if dist < closest_sample_dist {
                 closest_sample_dist = dist;
-                closest_sample_color = if color.is_some() {
-                    color.unwrap()
-                } else {
-                    Color32::from_rgb(255, 255, 0)
-                };
+                closest_sample_color = color.unwrap_or(RGB::new(255, 255, 0));
             }
             // if dist < closest_sample_dist && color.is_some() {
             //     closest_sample_dist = dist;
             //     closest_sample_color = color.unwrap();
             // }
         }
-        closest_sample_color
+        closest_sample_color.into()
     }
 }
 
