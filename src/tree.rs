@@ -180,8 +180,24 @@ mod alloc3 {
         //     Self::new(self.to_block(), self.to_index() + offset)
         // }
 
+        /// equivalent to `self.siblings()[offset]`
         #[cfg_attr(feature = "profiling", inline(never))]
-        // TODO: make it fast when someone immediately indexes into ret
+        pub(super) fn siblings_offset(self, offset: usize) -> NodeHandle {
+            debug_assert!(offset < 4);
+            let block = self.to_block();
+            let i = self.to_index();
+            debug_assert_eq!(i % 4, 0, "unaligned handle in siblings");
+            let oracle = NodeHandle::new(block, i + offset);
+            let ret = unsafe {
+                Self(NonZeroUsize::new_unchecked(
+                    self.0.get() + size_of::<Node>() * offset,
+                ))
+            };
+            debug_assert_eq!(oracle, ret);
+            ret
+        }
+
+        #[cfg_attr(feature = "profiling", inline(never))]
         pub(super) fn siblings(self) -> [NodeHandle; 4] {
             let block = self.to_block();
             let i = self.to_index();
@@ -634,7 +650,7 @@ impl Tree {
                     return None;
                 };
                 for (offset, dom) in doms.into_iter().enumerate() {
-                    let child_handle = left_child.siblings()[offset];
+                    let child_handle = left_child.siblings_offset(offset);
                     let child = tree.alloc.get(child_handle);
                     // SAFETY: we allocated the children and never gave them to anyone,
                     // so we have exclusive access.
@@ -764,7 +780,7 @@ impl Tree {
                 break;
             };
             let child_offset = node.dom.child_offset_containing(center);
-            node_id = left_child.siblings()[child_offset];
+            node_id = left_child.siblings_offset(child_offset);
             let node = self.alloc.get(node_id);
 
             let dist = distance(center, node.dom.mid());
