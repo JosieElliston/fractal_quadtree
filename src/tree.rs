@@ -28,7 +28,7 @@ mod rbg {
     unsafe impl bytemuck::ZeroableInOption for RGB {}
     unsafe impl bytemuck::PodInOption for RGB {}
     impl RGB {
-        pub(super) fn new(r: u8, g: u8, b: u8) -> Self {
+        pub(super) const fn new(r: u8, g: u8, b: u8) -> Self {
             let arr = [r, g, b, 255];
             let value = u32::from_le_bytes(arr);
             RGB(NonZeroU32::new(value).unwrap())
@@ -148,7 +148,8 @@ mod alloc3 {
                 "ret: {:?}",
                 NodeHandle(NonZeroUsize::new(ret).unwrap())
             );
-            NodeHandle(NonZeroUsize::new(ret).unwrap())
+            debug_assert_ne!(ret, 0);
+            unsafe { NodeHandle(NonZeroUsize::new_unchecked(ret)) }
         }
 
         fn to_block(self) -> NonNull<Block> {
@@ -185,12 +186,28 @@ mod alloc3 {
             let block = self.to_block();
             let i = self.to_index();
             debug_assert_eq!(i % 4, 0, "unaligned handle in siblings");
-            [
+            let oracle = [
                 NodeHandle::new(block, i),
                 NodeHandle::new(block, i + 1),
                 NodeHandle::new(block, i + 2),
                 NodeHandle::new(block, i + 3),
-            ]
+            ];
+            let ret = unsafe {
+                [
+                    self,
+                    Self(NonZeroUsize::new_unchecked(
+                        self.0.get() + size_of::<Node>(),
+                    )),
+                    Self(NonZeroUsize::new_unchecked(
+                        self.0.get() + size_of::<Node>() * 2,
+                    )),
+                    Self(NonZeroUsize::new_unchecked(
+                        self.0.get() + size_of::<Node>() * 3,
+                    )),
+                ]
+            };
+            debug_assert_eq!(oracle, ret);
+            ret
         }
     }
     impl std::fmt::Debug for NodeHandle {
@@ -265,6 +282,7 @@ mod alloc3 {
     }
     impl Alloc {
         // fn new(thread_count: usize) -> Self {
+        #[cfg_attr(feature = "profiling", inline(never))]
         fn new() -> Self {
             Self {
                 last: AtomicPtr::new(Box::into_raw(Box::new(Block::with_prev(None)))),
@@ -273,6 +291,7 @@ mod alloc3 {
             }
         }
 
+        #[cfg_attr(feature = "profiling", inline(never))]
         fn realloc(&self, old_last: NonNull<Block>) {
             let new_block = Box::into_raw(Box::new(Block::with_prev(Some(old_last))));
             match self.last.compare_exchange_weak(
@@ -294,6 +313,7 @@ mod alloc3 {
             }
         }
 
+        #[cfg_attr(feature = "profiling", inline(never))]
         fn alloc<const N: usize>(&self) -> NodeHandle {
             // loop bc it's technically possible that after reallocating
             // or during waiting for another thread to reallocate,
@@ -311,10 +331,12 @@ mod alloc3 {
             }
         }
 
+        #[cfg_attr(feature = "profiling", inline(never))]
         pub(super) fn alloc4(&self) -> NodeHandle {
             self.alloc::<4>()
         }
 
+        #[cfg_attr(feature = "profiling", inline(never))]
         pub(super) fn get(&self, handle: NodeHandle) -> &Node {
             let ret = unsafe { handle.to_ptr().as_ref().unwrap() };
 
@@ -717,7 +739,11 @@ impl Tree {
             real_delta.abs().max(imag_delta.abs())
         }
 
-        let center = (pixel.real_mid(), pixel.imag_mid());
+        let center = pixel.mid();
+        // we never touch pixel again
+        #[expect(unused_variables)]
+        let pixel = ();
+
         if !self.dom.contains_point(center) {
             const UNCONTAINED_COLOR: Color32 = Color32::WHITE;
             return UNCONTAINED_COLOR;
@@ -743,15 +769,16 @@ impl Tree {
 
             let dist = distance(center, node.dom.mid());
             let color = node.color.load(Ordering::Relaxed);
-            // for debugging, draw uncolored leafs
-            if dist < closest_sample_dist {
+            // if `None`, we skip the node, which is good for aesthetics
+            // if `Some`, we color it with a debug color
+            // const UNCOLORED_NODE_COLOR: Option<RGB> = None;
+            const UNCOLORED_NODE_COLOR: Option<RGB> = Some(RGB::new(255, 255, 0));
+            if dist < closest_sample_dist
+                && let Some(color) = color.or(UNCOLORED_NODE_COLOR)
+            {
                 closest_sample_dist = dist;
-                closest_sample_color = color.unwrap_or(RGB::new(255, 255, 0));
+                closest_sample_color = color;
             }
-            // if dist < closest_sample_dist && color.is_some() {
-            //     closest_sample_dist = dist;
-            //     closest_sample_color = color.unwrap();
-            // }
         }
         closest_sample_color.into()
     }
