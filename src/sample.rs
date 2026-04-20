@@ -284,7 +284,8 @@ pub(crate) fn gradient_step(
     ))
 }
 
-pub(crate) const WIDTH: usize = 64;
+pub(crate) const WIDTH: usize = 32;
+// pub(crate) const WIDTH: usize = 64;
 // pub(crate) const GRADIENT_STEPS: usize = 1;
 pub(crate) const GRADIENT_STEPS: usize = 0;
 #[cfg_attr(feature = "profiling", inline(never))]
