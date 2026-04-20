@@ -129,6 +129,19 @@ impl eframe::App for App {
                     }
                 }
 
+                // sample time counters
+                #[cfg(false)]
+                {
+                    if let Some(nanos) = sample::SAMPLE_ELAPSED_NANOS
+                        .load(std::sync::atomic::Ordering::Relaxed)
+                        .checked_div(
+                            sample::SAMPLE_COUNTER.load(std::sync::atomic::Ordering::Relaxed),
+                        )
+                    {
+                        println!("sample average time: {} us", nanos / 1000);
+                    }
+                }
+
                 // self.tree.validate_leaf_distance();
 
                 // panning stuff

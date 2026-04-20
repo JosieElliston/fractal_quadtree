@@ -1,6 +1,14 @@
+use std::{
+    sync::atomic::{AtomicU64, Ordering},
+    time::Instant,
+};
+
 use eframe::egui::Color32;
 
 use crate::complex::{Window, fixed::*};
+
+pub(crate) static SAMPLE_ELAPSED_NANOS: AtomicU64 = AtomicU64::new(0);
+pub(crate) static SAMPLE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) struct Sample {
     pub(crate) depth: f32,
@@ -277,7 +285,8 @@ pub(crate) fn gradient_step(
 }
 
 pub(crate) const WIDTH: usize = 64;
-pub(crate) const GRADIENT_STEPS: usize = 1;
+// pub(crate) const GRADIENT_STEPS: usize = 1;
+pub(crate) const GRADIENT_STEPS: usize = 0;
 #[cfg_attr(feature = "profiling", inline(never))]
 pub(crate) fn deepest_on_grid(
     (z0_real, z0_imag): (Real, Imag),
@@ -439,12 +448,22 @@ pub(crate) fn metabrot_sample((z0_real, z0_imag): (Real, Imag)) -> Sample {
         };
     };
 
+    let start = Instant::now();
+
     let mut deepest: f32 = 0.0;
     let mut deepest_point = (Fixed::ZERO, Fixed::ZERO);
 
     let (c, sample) = deepest_on_grid((z0_real, z0_imag), window, WIDTH, WIDTH, GRADIENT_STEPS);
     deepest = sample.depth;
     deepest_point = c;
+
+    #[cfg(false)]
+    {
+        let elapsed = start.elapsed();
+        SAMPLE_ELAPSED_NANOS.fetch_add(elapsed.as_nanos() as u64, Ordering::Relaxed);
+        SAMPLE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    }
+
     return sample;
 
     // resample around points with a distance estimate < the diameter of each grid cell.
