@@ -1,3 +1,5 @@
+use std::fmt;
+
 use super::{Domain, fixed::*};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -219,6 +221,15 @@ impl From<Domain> for Window {
             imag_lo: dom.imag_lo(),
             imag_hi: dom.imag_hi(),
         }
+    }
+}
+impl fmt::Display for Window {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "Window(real: [{}, {}], imag: [{}, {}])",
+            self.real_lo, self.real_hi, self.imag_lo, self.imag_hi
+        )
     }
 }
 // impl PartialOrd for Window {

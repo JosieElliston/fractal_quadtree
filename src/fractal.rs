@@ -329,7 +329,7 @@ impl WorkerLocal {
                 // by just trying to lock each line's texture lock
                 // TODO: do this better
                 'outer: {
-                    for (i, lock) in shared_texture.texture_lock_begin().iter().enumerate() {
+                    for (line_i, lock) in shared_texture.texture_lock_begin().iter().enumerate() {
                         // TODO: faster ordering
                         if lock
                             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
@@ -342,30 +342,71 @@ impl WorkerLocal {
                             // let l = &Arc(t).expect("we just locked it");
                             // self.texture[i].get_mut()
                             // let l = Arc::get_mut(&mut self.texture[i]).expect("we just locked it");
-                            let mut l = shared_texture.texture()[i]
+                            let mut l = shared_texture.texture()[line_i]
                                 .try_lock()
                                 .expect("we just locked it");
-                            for ((_rect, pixel), target) in
-                                camera_map.pixels().nth(i).unwrap().zip(l.iter_mut())
+
                             {
-                                *target = if let Some(pixel) = pixel {
-                                    if let Some(color) =
-                                        self.shared.tree.color_of_pixel(pixel, prev_frame_start)
-                                    {
-                                        color
-                                    } else {
-                                        // we proved that the color hasn't changed
-                                        // Color32::from_rgb(50, 50, 255)
-                                        continue;
-                                    }
+                                let line_needs_redraw = prev_frame_start == Moment::MIN
+                                    || 'line_needs_redraw: {
+                                        let Some((_, Some(first_pixel))) =
+                                            camera_map.pixels().nth(line_i).unwrap().next()
+                                        else {
+                                            break 'line_needs_redraw true;
+                                        };
+                                        let Some((_, Some(last_pixel))) =
+                                            camera_map.pixels().nth(line_i).unwrap().last()
+                                        else {
+                                            break 'line_needs_redraw true;
+                                        };
+                                        debug_assert_eq!(
+                                            first_pixel.imag_mid(),
+                                            last_pixel.imag_mid()
+                                        );
+                                        let imag = first_pixel.imag_mid();
+                                        let real_lo = first_pixel.real_mid();
+                                        let real_hi = last_pixel.real_mid();
+                                        self.shared.tree.any_on_line_needs_redraw(
+                                            real_lo,
+                                            real_hi,
+                                            imag,
+                                            prev_frame_start,
+                                        )
+                                    };
+
+                                if !line_needs_redraw {
+                                    // debug draw unchanged lines pink
+                                    // l.iter_mut()
+                                    //     .for_each(|pixel| *pixel = Color32::from_rgb(255, 50, 255));
                                 } else {
-                                    Color32::MAGENTA
-                                };
+                                    for ((_rect, pixel), target) in
+                                        camera_map.pixels().nth(line_i).unwrap().zip(l.iter_mut())
+                                    {
+                                        *target = if let Some(pixel) = pixel {
+                                            if let Some(color) = self
+                                                .shared
+                                                .tree
+                                                .color_of_pixel(pixel, prev_frame_start)
+                                            {
+                                                color
+                                            } else {
+                                                // we proved that the color hasn't changed
+                                                // debug draw unchanged pixels blue
+                                                // Color32::from_rgb(50, 50, 255)
+                                                continue;
+                                            }
+                                        } else {
+                                            Color32::MAGENTA
+                                        };
+                                    }
+                                }
                             }
                             debug_assert!(
-                                !shared_texture.texture_lock_finish()[i].load(Ordering::SeqCst)
+                                !shared_texture.texture_lock_finish()[line_i]
+                                    .load(Ordering::SeqCst)
                             );
-                            shared_texture.texture_lock_finish()[i].store(true, Ordering::SeqCst);
+                            shared_texture.texture_lock_finish()[line_i]
+                                .store(true, Ordering::SeqCst);
                             break 'outer;
                         }
                     }

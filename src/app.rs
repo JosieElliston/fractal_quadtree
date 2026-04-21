@@ -1,9 +1,12 @@
+use std::sync::atomic::Ordering;
+
 use eframe::egui::{self, Color32, Key, Pos2, Rect, Vec2};
 
 use crate::{
     complex::{Camera, CameraMap, Domain, Window, fixed::*},
     fractal::{self, Fractal},
     sample,
+    tree::{PRUNED_COUNTER, PRUNED_ELAPSED, UNPRUNED_COUNTER, UNPRUNED_ELAPSED},
 };
 
 /// fancy dynamic radius based on zoom
@@ -90,14 +93,14 @@ impl eframe::App for App {
                 {
                     // println!();
                     if let Some(nanos) = tree::ELAPSED_NANOS
-                        .load(std::sync::atomic::Ordering::Relaxed)
-                        .checked_div(tree::COUNTER.load(std::sync::atomic::Ordering::Relaxed))
+                        .load(Ordering::Relaxed)
+                        .checked_div(tree::COUNTER.load(Ordering::Relaxed))
                     {
                         println!("tree average time: {} ns", nanos);
                     }
                     if let Some(nanos) = pool::ELAPSED_NANOS
-                        .load(std::sync::atomic::Ordering::Relaxed)
-                        .checked_div(pool::COUNTER.load(std::sync::atomic::Ordering::Relaxed))
+                        .load(Ordering::Relaxed)
+                        .checked_div(pool::COUNTER.load(Ordering::Relaxed))
                     {
                         println!("pool average time: {} ns", nanos);
                         println!(
@@ -111,7 +114,7 @@ impl eframe::App for App {
                             .enumerate()
                             .rev()
                             .find_map(|(i, count)| {
-                                if count.load(std::sync::atomic::Ordering::Relaxed) > 0 {
+                                if count.load(Ordering::Relaxed) > 0 {
                                     Some(i)
                                 } else {
                                     None
@@ -120,11 +123,7 @@ impl eframe::App for App {
                     {
                         println!("worker hist:");
                         for (i, worker) in pool::WORKER_HIST.iter().enumerate().take(max_i + 1) {
-                            println!(
-                                "worker {}: {} samples",
-                                i,
-                                worker.load(std::sync::atomic::Ordering::Relaxed)
-                            );
+                            println!("worker {}: {} samples", i, worker.load(Ordering::Relaxed));
                         }
                     }
                 }
@@ -133,16 +132,44 @@ impl eframe::App for App {
                 #[cfg(false)]
                 {
                     if let Some(nanos) = sample::SAMPLE_ELAPSED_NANOS
-                        .load(std::sync::atomic::Ordering::Relaxed)
-                        .checked_div(
-                            sample::SAMPLE_COUNTER.load(std::sync::atomic::Ordering::Relaxed),
-                        )
+                        .load(Ordering::Relaxed)
+                        .checked_div(sample::SAMPLE_COUNTER.load(Ordering::Relaxed))
                     {
                         println!("sample average time: {} us", nanos / 1000);
                     }
                 }
 
-                // self.tree.validate_leaf_distance();
+                // coloring pruned vs unpruned
+                {
+                    println!();
+                    if let Some(nanos) = PRUNED_ELAPSED
+                        .load(Ordering::Relaxed)
+                        .checked_div(PRUNED_COUNTER.load(Ordering::Relaxed))
+                    {
+                        println!("pruned average time: {} ns", nanos);
+                    }
+                    if let Some(nanos) = UNPRUNED_ELAPSED
+                        .load(Ordering::Relaxed)
+                        .checked_div(UNPRUNED_COUNTER.load(Ordering::Relaxed))
+                    {
+                        println!("unpruned average time: {} ns", nanos);
+                    }
+                    {
+                        let pruned_count = PRUNED_COUNTER.load(Ordering::Relaxed);
+                        let unpruned_count = UNPRUNED_COUNTER.load(Ordering::Relaxed);
+                        println!("pruned count: {}", pruned_count);
+                        println!("unpruned count: {}", unpruned_count);
+                        println!(
+                            "pruned / (pruned + unpruned): {}",
+                            pruned_count as f64 / (pruned_count as f64 + unpruned_count as f64)
+                        );
+                    }
+
+                    PRUNED_ELAPSED.store(0, Ordering::Relaxed);
+                    PRUNED_COUNTER.store(0, Ordering::Relaxed);
+                    UNPRUNED_ELAPSED.store(0, Ordering::Relaxed);
+                    UNPRUNED_COUNTER.store(0, Ordering::Relaxed);
+                }
 
                 // panning stuff
                 // pan the other camera when holding backtick

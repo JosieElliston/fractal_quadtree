@@ -1,20 +1,25 @@
 use std::{
     cell::UnsafeCell,
     num::NonZeroU32,
-    sync::atomic::{AtomicU32, Ordering},
+    sync::atomic::{AtomicU32, AtomicU64, Ordering},
 };
 
 use atomic::Atomic;
 use egui::Color32;
 
 use crate::{
-    complex::{Domain, Pixel, Window, fixed::*},
+    complex::{Domain, Pixel, Window, fixed::*, lerp},
     sample::metabrot_sample,
 };
 
 // pub(crate) static ELAPSED_NANOS: std::sync::atomic::AtomicU64 =
 //     std::sync::atomic::AtomicU64::new(0);
 // pub(crate) static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+pub(crate) static PRUNED_ELAPSED: AtomicU64 = AtomicU64::new(0);
+pub(crate) static PRUNED_COUNTER: AtomicU64 = AtomicU64::new(0);
+pub(crate) static UNPRUNED_ELAPSED: AtomicU64 = AtomicU64::new(0);
+pub(crate) static UNPRUNED_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[repr(C, align(64))]
 #[derive(Debug)]
@@ -432,6 +437,58 @@ impl Tree {
             .store(Some(color.try_into().unwrap()), Ordering::SeqCst);
     }
 
+    #[cfg_attr(feature = "profiling", inline(never))]
+    pub(crate) fn any_on_line_needs_redraw(
+        &self,
+        real_lo: Real,
+        real_hi: Real,
+        imag: Imag,
+        prev_frame_start: Moment,
+    ) -> bool {
+        // TODO: use explicit stack
+
+        /// if we have a segment that's definitely good, we stop exploring.
+        /// if we have a segment that's definitely bad, we fail.
+        /// to know that a segment is definitely bad, it must be a leaf.
+        #[cfg_attr(feature = "profiling", inline(never))]
+        fn is_good(
+            tree: &Tree,
+            real_lo: Real,
+            real_hi: Real,
+            imag: Imag,
+            prev_frame_start: Moment,
+            handle: NodeHandle,
+        ) -> bool {
+            debug_assert!(real_lo <= real_hi);
+            let node = tree.alloc.get(handle);
+            let dom = unsafe { node.dom() };
+
+            if dom.imag_lo() > imag || dom.imag_hi() < imag {
+                return true;
+            }
+            if dom.real_hi() < real_lo || dom.real_lo() > real_hi {
+                return true;
+            }
+
+            let timestamp = node.timestamp.load(Ordering::Relaxed);
+            if timestamp < prev_frame_start {
+                return true;
+            }
+
+            if let Some(child_handle) = node.left_child.load(Ordering::Relaxed) {
+                child_handle.siblings().into_iter().all(|child_handle| {
+                    is_good(tree, real_lo, real_hi, imag, prev_frame_start, child_handle)
+                })
+            } else {
+                timestamp < prev_frame_start
+            }
+        }
+
+        debug_assert!(real_lo <= real_hi);
+
+        !is_good(self, real_lo, real_hi, imag, prev_frame_start, self.root)
+    }
+
     // TODO: if the pixel doesn't contain any samples,
     // return the color of the sample closest to the center of the pixel.
     // TODO: if the pixel contains any samples, do some weighting of the samples
@@ -442,7 +499,7 @@ impl Tree {
     /// return the color of the sample closest to the center of the pixel.
     /// returns `None` if we prove that the color hasn't changed from the last frame.
     /// returns white if not in the trees domain
-    #[inline(never)]
+    #[cfg_attr(feature = "profiling", inline(never))]
     pub(crate) fn color_of_pixel(&self, pixel: Pixel, prev_frame_start: Moment) -> Option<Color32> {
         #[cfg_attr(feature = "profiling", inline(never))]
         fn distance((real_0, imag_0): (Real, Imag), (real_1, imag_1): (Real, Imag)) -> Fixed {
@@ -455,6 +512,8 @@ impl Tree {
             // real_delta.abs() + imag_delta.abs()
             real_delta.abs().max(imag_delta.abs())
         }
+
+        let start = std::time::Instant::now();
 
         let center = pixel.mid();
         // we never touch pixel again
@@ -477,6 +536,44 @@ impl Tree {
         // let mut debug_closest_sample_depth = 0;
         // let mut debug_explored_depth = 0;
 
+        // // this is incorrect btw
+        // fn should_prune(tree: &Tree, center: (Real, Imag), prev_frame_start: Moment) -> bool {
+        //     let mut node_handle = tree.root;
+
+        //     loop {
+        //         let node = tree.alloc.get(node_handle);
+        //         let dom = unsafe { node.dom() };
+
+        //         // check whether the node's timestamp proves that the color hasn't changed since the last frame
+        //         {
+        //             let timestamp = node.timestamp.load(Ordering::Relaxed);
+        //             // TODO: <=?
+        //             if timestamp < prev_frame_start {
+        //                 return true;
+        //             }
+        //         }
+
+        //         // i++
+        //         {
+        //             let Some(left_child) = node.left_child.load(Ordering::Relaxed) else {
+        //                 break;
+        //             };
+        //             let child_offset = dom.child_offset_containing(center);
+        //             node_handle = left_child.siblings_offset(child_offset);
+        //             // debug_explored_depth += 1;
+        //         }
+        //     }
+
+        //     false
+        // }
+
+        // if should_prune(self, center, prev_frame_start) {
+        //     let elapsed = start.elapsed();
+        //     PRUNED_ELAPSED.fetch_add(elapsed.as_nanos() as u64, Ordering::Relaxed);
+        //     PRUNED_COUNTER.fetch_add(1, Ordering::Relaxed);
+        //     return None;
+        // }
+
         loop {
             let node = self.alloc.get(node_handle);
             let dom = unsafe { node.dom() };
@@ -486,6 +583,9 @@ impl Tree {
                 let timestamp = node.timestamp.load(Ordering::Relaxed);
                 // TODO: <=?
                 if timestamp < prev_frame_start {
+                    let elapsed = start.elapsed();
+                    PRUNED_ELAPSED.fetch_add(elapsed.as_nanos() as u64, Ordering::Relaxed);
+                    PRUNED_COUNTER.fetch_add(1, Ordering::Relaxed);
                     return None;
                 }
             }
@@ -518,6 +618,10 @@ impl Tree {
             }
         }
 
+        let elapsed = start.elapsed();
+        UNPRUNED_ELAPSED.fetch_add(elapsed.as_nanos() as u64, Ordering::Relaxed);
+        UNPRUNED_COUNTER.fetch_add(1, Ordering::Relaxed);
+
         Some(closest_sample_color.into())
         // if debug_closest_sample_depth == 32 {
         //     Some(Color32::from_rgb(255, 0, 255))
@@ -535,7 +639,7 @@ mod rbg {
     /// layout is 0xFFbbggrr, ie little endian [r, g, b, 255].
     /// we could allow any nonzero alpha, but i don't use this.
     #[repr(transparent)]
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, bytemuck::NoUninit)]
+    #[derive(Clone, Copy, PartialEq, Eq, bytemuck::NoUninit)]
     pub(super) struct RGB(NonZeroU32);
     unsafe impl bytemuck::ZeroableInOption for RGB {}
     unsafe impl bytemuck::PodInOption for RGB {}
@@ -544,6 +648,17 @@ mod rbg {
             let arr = [r, g, b, 255];
             let value = u32::from_le_bytes(arr);
             RGB(NonZeroU32::new(value).unwrap())
+        }
+    }
+    impl std::fmt::Debug for RGB {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            let [r, g, b, a] = self.0.get().to_le_bytes();
+            debug_assert_eq!(a, 255);
+            f.debug_struct("RGB")
+                .field("r", &r)
+                .field("g", &g)
+                .field("b", &b)
+                .finish()
         }
     }
     impl TryFrom<Color32> for RGB {
@@ -641,15 +756,19 @@ mod alloc {
         #[cfg_attr(feature = "profiling", inline(never))]
         pub(super) fn siblings_offset(self, offset: usize) -> NodeHandle {
             debug_assert!(offset < 4);
-            let block = self.to_block();
-            let i = self.to_index();
-            debug_assert_eq!(i % 4, 0, "unaligned handle in siblings");
-            let oracle = NodeHandle::new(block, i + offset);
+            #[cfg(debug_assertions)]
+            let oracle = {
+                let block = self.to_block();
+                let i = self.to_index();
+                debug_assert_eq!(i % 4, 0, "unaligned handle in siblings");
+                NodeHandle::new(block, i + offset)
+            };
             let ret = unsafe {
                 Self(NonZeroUsize::new_unchecked(
                     self.0.get() + size_of::<Node>() * offset,
                 ))
             };
+            #[cfg(debug_assertions)]
             debug_assert_eq!(oracle, ret);
             ret
         }

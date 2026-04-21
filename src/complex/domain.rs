@@ -1,3 +1,5 @@
+use std::fmt;
+
 use super::fixed::*;
 
 /// must have that rad > 0
@@ -140,5 +142,16 @@ impl Domain {
     pub(crate) fn child_offset_containing(&self, (real, imag): (Real, Imag)) -> usize {
         debug_assert!(self.contains_point((real, imag)));
         (if real < self.real_mid() { 0 } else { 1 }) + (if imag >= self.imag_mid() { 0 } else { 2 })
+    }
+}
+impl fmt::Display for Domain {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "Domain {{ real_mid: {}, imag_mid: {}, rad: {} }}",
+            self.real_mid(),
+            self.imag_mid(),
+            self.rad()
+        )
     }
 }
