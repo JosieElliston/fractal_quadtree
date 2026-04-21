@@ -37,10 +37,11 @@ struct Node {
     // actually i think this has to be atomic bc it's modified when other threads might be looking at it.
     // we could avoid that by putting a tag on the left_child
     // which prevents other threads from following it, but whatever.
-    color: Atomic<Option<RGB>>,
+    color: Atomic<Option<Rgb>>,
     /// distance to the closest leaf.
     /// 0 if we're a leaf, else 1 + max(children.height).
     /// this is used in `refine` to find the shallowest leafs.
+    /// btw, this could be a u16 or maybe even a u8.
     height: AtomicU32,
     /// timestamp of the last update to this node or any of its descendants.
     /// "update" in the sense that we need to redraw.
@@ -52,7 +53,7 @@ struct Node {
 }
 const _: () = assert!(size_of::<Node>() == 64);
 const _: () = assert!(align_of::<Node>() == 64);
-const _: () = assert!(Atomic::<Option<RGB>>::is_lock_free());
+const _: () = assert!(Atomic::<Option<Rgb>>::is_lock_free());
 const _: () = assert!(Atomic::<Option<NodeHandle>>::is_lock_free());
 impl Node {
     fn uninit() -> Self {
@@ -606,7 +607,7 @@ impl Tree {
                 // if `None`, we skip the node, which is good for aesthetics
                 // if `Some`, we color it with a debug color
                 // const UNCOLORED_NODE_COLOR: Option<RGB> = None;
-                const UNCOLORED_NODE_COLOR: Option<RGB> = Some(RGB::new(255, 255, 0));
+                const UNCOLORED_NODE_COLOR: Option<Rgb> = Some(Rgb::new(255, 255, 0));
                 if dist < closest_sample_dist
                     && let Some(color) = color.or(UNCOLORED_NODE_COLOR)
                 {
@@ -672,17 +673,17 @@ mod rbg {
     /// we could allow any nonzero alpha, but i don't use this.
     #[repr(transparent)]
     #[derive(Clone, Copy, PartialEq, Eq, bytemuck::NoUninit)]
-    pub(super) struct RGB(NonZeroU32);
-    unsafe impl bytemuck::ZeroableInOption for RGB {}
-    unsafe impl bytemuck::PodInOption for RGB {}
-    impl RGB {
+    pub(super) struct Rgb(NonZeroU32);
+    unsafe impl bytemuck::ZeroableInOption for Rgb {}
+    unsafe impl bytemuck::PodInOption for Rgb {}
+    impl Rgb {
         pub(super) const fn new(r: u8, g: u8, b: u8) -> Self {
             let arr = [r, g, b, 255];
             let value = u32::from_le_bytes(arr);
-            RGB(NonZeroU32::new(value).unwrap())
+            Rgb(NonZeroU32::new(value).unwrap())
         }
     }
-    impl std::fmt::Debug for RGB {
+    impl std::fmt::Debug for Rgb {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             let [r, g, b, a] = self.0.get().to_le_bytes();
             debug_assert_eq!(a, 255);
@@ -693,7 +694,7 @@ mod rbg {
                 .finish()
         }
     }
-    impl TryFrom<Color32> for RGB {
+    impl TryFrom<Color32> for Rgb {
         type Error = &'static str;
 
         fn try_from(value: Color32) -> Result<Self, Self::Error> {
@@ -703,8 +704,8 @@ mod rbg {
             Ok(Self::new(value.r(), value.g(), value.b()))
         }
     }
-    impl From<RGB> for Color32 {
-        fn from(value: RGB) -> Self {
+    impl From<Rgb> for Color32 {
+        fn from(value: Rgb) -> Self {
             let [r, g, b, a] = value.0.get().to_le_bytes();
             debug_assert_eq!(a, 255);
             Color32::from_rgb(r, g, b)
@@ -996,8 +997,6 @@ mod alloc {
 pub(crate) use moment::*;
 mod moment {
     use std::ops;
-
-    use super::*;
 
     #[repr(transparent)]
     #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, bytemuck::NoUninit)]
