@@ -14,7 +14,7 @@ use eframe::egui::{self, Color32};
 use crate::{
     complex::{CameraMap, Window, fixed::*},
     sample,
-    tree::{Moment, NodeHandle, Tree},
+    tree::{Moment, NodeHandle, ThreadData, Tree},
 };
 
 // type SampleFn = dyn Fn((Real, Imag)) -> Color32;
@@ -86,6 +86,7 @@ impl Fractal {
                         WorkerLocal {
                             shared,
                             thread_i,
+                            thread_data: ThreadData::default(),
                             to_be_colored: Vec::with_capacity(4),
                         }
                         .run()
@@ -291,6 +292,7 @@ mod rayon_fractal {
 struct WorkerLocal {
     shared: Shared,
     thread_i: usize,
+    thread_data: ThreadData,
     /// nodes we split and need to find the color of.
     /// note that the len should be <= 4.
     /// TODO: rename
@@ -363,6 +365,7 @@ impl WorkerLocal {
                                             real_hi,
                                             imag,
                                             prev_frame_start,
+                                            &mut self.thread_data,
                                         )
                                     };
 
@@ -430,7 +433,7 @@ impl WorkerLocal {
                 if let Some(handles) = self
                     .shared
                     .tree
-                    .refine(window, self.shared.now.load(Ordering::SeqCst))
+                    .refine(window, self.shared.now.load(Ordering::SeqCst), &mut self.thread_data)
                 {
                     // dbg!("refined");
                     self.to_be_colored.extend(handles);
@@ -440,7 +443,7 @@ impl WorkerLocal {
                 // thread::yield_now();
                 // weird workaround, but it fixing freezing
                 // for when pausing sampling or the fractal is outside the window.
-                thread::sleep(Duration::from_millis(1));
+                // thread::sleep(Duration::from_millis(1));
             }
         }
     }

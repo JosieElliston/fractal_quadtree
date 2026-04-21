@@ -6,7 +6,7 @@ use crate::{
     complex::{Camera, CameraMap, Domain, Window, fixed::*},
     fractal::{self, Fractal},
     sample,
-    tree::{PRUNED_COUNTER, PRUNED_ELAPSED, UNPRUNED_COUNTER, UNPRUNED_ELAPSED},
+    tree::ThreadData,
 };
 
 /// fancy dynamic radius based on zoom
@@ -140,6 +140,7 @@ impl eframe::App for App {
                 }
 
                 // coloring pruned vs unpruned
+                #[cfg(false)]
                 {
                     println!();
                     if let Some(nanos) = PRUNED_ELAPSED
@@ -634,7 +635,8 @@ impl eframe::App for App {
                                 1.0 / average_dt,
                                 self.sample_counts.values().sum::<u64>() as f32
                                     / self.sample_counts.len() as f32,
-                                self.metabrot.tree().node_count(),
+                                // note that this leaks memory
+                                self.metabrot.tree().node_count(&mut ThreadData::default()),
                             );
                             ui.label(egui::RichText::new(t).background_color(Color32::BLACK));
                         }

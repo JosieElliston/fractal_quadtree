@@ -1,6 +1,7 @@
 use std::{
     cell::UnsafeCell,
     num::NonZeroU32,
+    ptr::NonNull,
     sync::atomic::{AtomicU32, AtomicU64, Ordering},
 };
 
@@ -16,10 +17,10 @@ use crate::{
 //     std::sync::atomic::AtomicU64::new(0);
 // pub(crate) static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-pub(crate) static PRUNED_ELAPSED: AtomicU64 = AtomicU64::new(0);
-pub(crate) static PRUNED_COUNTER: AtomicU64 = AtomicU64::new(0);
-pub(crate) static UNPRUNED_ELAPSED: AtomicU64 = AtomicU64::new(0);
-pub(crate) static UNPRUNED_COUNTER: AtomicU64 = AtomicU64::new(0);
+// pub(crate) static PRUNED_ELAPSED: AtomicU64 = AtomicU64::new(0);
+// pub(crate) static PRUNED_COUNTER: AtomicU64 = AtomicU64::new(0);
+// pub(crate) static UNPRUNED_ELAPSED: AtomicU64 = AtomicU64::new(0);
+// pub(crate) static UNPRUNED_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[repr(C, align(64))]
 #[derive(Debug)]
@@ -106,7 +107,8 @@ impl Tree {
         let alloc = Alloc::default();
 
         // we leave 3 nodes uninit
-        let root_handle = alloc.alloc4();
+        // i don't want to deal with a main thread `TreadData`, so just leak
+        let root_handle = alloc.alloc4(&mut ThreadData::default());
         let root = alloc.get(root_handle);
 
         // this is UB because `Node` isn't inside an `UnsafeCell`
@@ -140,9 +142,10 @@ impl Tree {
     }
 
     #[cfg_attr(feature = "profiling", inline(never))]
-    pub(crate) fn node_count(&self) -> usize {
+    pub(crate) fn node_count(&self, data: &mut ThreadData) -> usize {
         let mut count = 0;
-        let mut stack = Vec::with_capacity(64);
+        let stack = &mut data.vec_handle;
+        stack.clear();
 
         stack.push(self.root);
 
@@ -226,13 +229,22 @@ impl Tree {
     // TODO: we don't actually need the leaf to be colored to split it
     // TODO: better ordering
     #[cfg_attr(feature = "profiling", inline(never))]
-    pub(crate) fn refine(&self, window: Window, now: Moment) -> Option<[NodeHandle; 4]> {
+    pub(crate) fn refine(
+        &self,
+        window: Window,
+        now: Moment,
+        data: &mut ThreadData,
+    ) -> Option<[NodeHandle; 4]> {
         /// returns the depth of the shallowest leaf that intersects the window.
         /// returns `None` if there are no such leafs.
         #[cfg_attr(feature = "profiling", inline(never))]
-        fn depth_of_shallowest_leaf(tree: &Tree, window: Window) -> Option<u32> {
-            // TODO: avoid this allocation, it should be in thread local memory
-            let mut stack = Vec::with_capacity(64);
+        fn depth_of_shallowest_leaf(
+            tree: &Tree,
+            window: Window,
+            data: &mut ThreadData,
+        ) -> Option<u32> {
+            let stack = &mut data.vec_handle_u32;
+            stack.clear();
             stack.push((tree.root, 0));
             let mut shallowest_depth = u32::MAX;
             while let Some((handle, depth)) = stack.pop() {
@@ -285,9 +297,10 @@ impl Tree {
             tree: &Tree,
             window: Window,
             shallowest_depth: u32,
+            data: &mut ThreadData,
         ) -> impl Iterator<Item = NodeHandle> {
-            // TODO: avoid this allocation, it should be in thread local memory
-            let mut stack = Vec::with_capacity(64);
+            let stack = &mut data.vec_handle_u32;
+            stack.clear();
             stack.push((tree.root, 0));
             std::iter::from_fn(move || {
                 while let Some((handle, depth)) = stack.pop() {
@@ -396,10 +409,13 @@ impl Tree {
             Some(())
         }
 
-        let shallowest_depth = depth_of_shallowest_leaf(self, window)?;
+        let shallowest_depth = depth_of_shallowest_leaf(self, window, data)?;
 
         // note that we have an exclusive reference to the new children
-        let left_child = self.alloc.alloc4();
+        let left_child = match data.handle.take() {
+            Some(handle) => handle,
+            None => self.alloc.alloc4(data),
+        };
 
         // initialize the children except for dom and parent, which we don't know yet
         for child_handle in left_child.siblings() {
@@ -414,14 +430,14 @@ impl Tree {
         // and if it fails (bc someone already got there),
         // reuse the memory we allocated for the children for the next iteration.
         // if we go through all the leafs at this depth, don't bother retrying, just return `None`.
-        for leaf_handle in leafs_in_window_at_depth(self, window, shallowest_depth) {
+        for leaf_handle in leafs_in_window_at_depth(self, window, shallowest_depth, data) {
             if let Some(()) = try_split(self, leaf_handle, left_child, now) {
                 return Some(left_child.siblings());
             }
         }
 
-        // put the bfs stuff in the thread local memory as well as the split handles
-        dbg!("we're leaking memory and i want to know");
+        // dbg!("we're leaking memory and i want to know");
+        data.handle = Some(left_child);
 
         None
     }
@@ -443,49 +459,43 @@ impl Tree {
         real_hi: Real,
         imag: Imag,
         prev_frame_start: Moment,
+        data: &mut ThreadData,
     ) -> bool {
-        // TODO: use explicit stack
+        debug_assert!(real_lo <= real_hi);
 
-        /// if we have a segment that's definitely good, we stop exploring.
-        /// if we have a segment that's definitely bad, we fail.
-        /// to know that a segment is definitely bad, it must be a leaf.
-        #[cfg_attr(feature = "profiling", inline(never))]
-        fn is_good(
-            tree: &Tree,
-            real_lo: Real,
-            real_hi: Real,
-            imag: Imag,
-            prev_frame_start: Moment,
-            handle: NodeHandle,
-        ) -> bool {
-            debug_assert!(real_lo <= real_hi);
-            let node = tree.alloc.get(handle);
+        let stack = &mut data.vec_handle;
+        stack.clear();
+        stack.push(self.root);
+
+        // if we have a segment that's definitely good, we stop exploring.
+        // if we have a segment that's definitely bad, we fail.
+        // to know that a segment is definitely bad, it must be a leaf.
+        while let Some(handle) = stack.pop() {
+            let node = self.alloc.get(handle);
             let dom = unsafe { node.dom() };
 
             if dom.imag_lo() > imag || dom.imag_hi() < imag {
-                return true;
+                continue;
             }
             if dom.real_hi() < real_lo || dom.real_lo() > real_hi {
-                return true;
+                continue;
             }
 
             let timestamp = node.timestamp.load(Ordering::Relaxed);
             if timestamp < prev_frame_start {
-                return true;
+                continue;
             }
 
             if let Some(child_handle) = node.left_child.load(Ordering::Relaxed) {
-                child_handle.siblings().into_iter().all(|child_handle| {
-                    is_good(tree, real_lo, real_hi, imag, prev_frame_start, child_handle)
-                })
+                stack.extend(child_handle.siblings().into_iter());
             } else {
-                timestamp < prev_frame_start
+                if timestamp >= prev_frame_start {
+                    return true;
+                }
             }
         }
 
-        debug_assert!(real_lo <= real_hi);
-
-        !is_good(self, real_lo, real_hi, imag, prev_frame_start, self.root)
+        false
     }
 
     // TODO: if the pixel doesn't contain any samples,
@@ -512,7 +522,7 @@ impl Tree {
             real_delta.abs().max(imag_delta.abs())
         }
 
-        let start = std::time::Instant::now();
+        // let start = std::time::Instant::now();
 
         let center = pixel.mid();
         // we never touch pixel again
@@ -582,9 +592,9 @@ impl Tree {
                 let timestamp = node.timestamp.load(Ordering::Relaxed);
                 // TODO: <=?
                 if timestamp < prev_frame_start {
-                    let elapsed = start.elapsed();
-                    PRUNED_ELAPSED.fetch_add(elapsed.as_nanos() as u64, Ordering::Relaxed);
-                    PRUNED_COUNTER.fetch_add(1, Ordering::Relaxed);
+                    // let elapsed = start.elapsed();
+                    // PRUNED_ELAPSED.fetch_add(elapsed.as_nanos() as u64, Ordering::Relaxed);
+                    // PRUNED_COUNTER.fetch_add(1, Ordering::Relaxed);
                     return None;
                 }
             }
@@ -617,9 +627,9 @@ impl Tree {
             }
         }
 
-        let elapsed = start.elapsed();
-        UNPRUNED_ELAPSED.fetch_add(elapsed.as_nanos() as u64, Ordering::Relaxed);
-        UNPRUNED_COUNTER.fetch_add(1, Ordering::Relaxed);
+        // let elapsed = start.elapsed();
+        // UNPRUNED_ELAPSED.fetch_add(elapsed.as_nanos() as u64, Ordering::Relaxed);
+        // UNPRUNED_COUNTER.fetch_add(1, Ordering::Relaxed);
 
         Some(closest_sample_color.into())
         // if debug_closest_sample_depth == 32 {
@@ -627,6 +637,29 @@ impl Tree {
         // } else {
         //     Some(closest_sample_color.into())
         // }
+    }
+}
+
+/// for data that each thread should keep track of for itself.
+/// dropping this will leak memory, but is safe.
+pub(crate) struct ThreadData {
+    /// the owned group of nodes we allocated in `refine`
+    handle: Option<NodeHandle>,
+    /// the block we allocated in `realloc`
+    block: Option<NonNull<Block>>,
+    /// for various stacks (and perhaps queues).
+    /// should be before use, but not when done.
+    vec_handle: Vec<NodeHandle>,
+    vec_handle_u32: Vec<(NodeHandle, u32)>,
+}
+impl Default for ThreadData {
+    fn default() -> Self {
+        Self {
+            handle: None,
+            block: None,
+            vec_handle: Vec::new(),
+            vec_handle_u32: Vec::new(),
+        }
     }
 }
 
@@ -683,7 +716,6 @@ pub(crate) use alloc::*;
 mod alloc {
     use std::{
         num::NonZeroUsize,
-        ptr::NonNull,
         sync::atomic::{AtomicPtr, AtomicUsize},
     };
 
@@ -841,7 +873,7 @@ mod alloc {
     // align requires an integer literal
     #[repr(C, align(4096))]
     #[derive(Debug)]
-    struct Block {
+    pub(super) struct Block {
         /// not wrapped in `UnsafeCell` because we don't actually write to the nodes, only their fields.
         mem: [Node; Self::CAPACITY],
         foot: BlockFooter,
@@ -895,8 +927,11 @@ mod alloc {
         }
 
         #[cfg_attr(feature = "profiling", inline(never))]
-        fn realloc(&self, old_last: NonNull<Block>) {
-            let new_block = Box::into_raw(Box::new(Block::with_prev(Some(old_last))));
+        fn realloc(&self, old_last: NonNull<Block>, data: &mut ThreadData) {
+            let new_block = match data.block.take() {
+                Some(block) => block.as_ptr(),
+                None => Box::into_raw(Box::new(Block::with_prev(Some(old_last)))),
+            };
             match self.last.compare_exchange_weak(
                 old_last.as_ptr(),
                 new_block,
@@ -907,17 +942,16 @@ mod alloc {
                     // successfully swapped in the new block, so we can just use it
                     // self.local_cache[thread_i] = std::ptr::null_mut();
                 }
-                Err(actual) => {
-                    // another thread already swapped in a new block, so we can just use that one
-                    // self.local_cache[thread_i] = new_block;
-                    unsafe { drop(Box::from_raw(new_block)) };
-                    // debug_assert_ne!(actual, old_last.as_ptr(), "bc of _weak, can actually sometimes happen");
+                Err(_actual) => {
+                    // another thread already swapped in a new block.
+                    // reuse the block we allocated for next time.
+                    data.block = Some(NonNull::new(new_block).unwrap());
                 }
             }
         }
 
         #[cfg_attr(feature = "profiling", inline(never))]
-        fn alloc<const N: usize>(&self) -> NodeHandle {
+        fn alloc<const N: usize>(&self, data: &mut ThreadData) -> NodeHandle {
             // loop bc it's technically possible that after reallocating
             // or during waiting for another thread to reallocate,
             // we go to sleep and the new block fills up.
@@ -930,13 +964,13 @@ mod alloc {
                 // we could say that whoever got len == Block::CAPACITY is responsible for reallocating,
                 // but what if that thread went to sleep during reallocation?
                 // so just have all the threads realloc
-                self.realloc(last.into());
+                self.realloc(last.into(), data);
             }
         }
 
         #[cfg_attr(feature = "profiling", inline(never))]
-        pub(super) fn alloc4(&self) -> NodeHandle {
-            self.alloc::<4>()
+        pub(super) fn alloc4(&self, data: &mut ThreadData) -> NodeHandle {
+            self.alloc::<4>(data)
         }
 
         #[cfg_attr(feature = "profiling", inline(never))]
