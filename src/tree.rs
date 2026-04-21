@@ -99,7 +99,6 @@ pub(crate) struct Tree {
     alloc: Alloc,
     root: NodeHandle,
 }
-
 impl Tree {
     pub(crate) fn new() -> Self {
         let dom = Domain::default();

@@ -5,6 +5,7 @@ use std::{
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     thread,
+    time::{Duration, Instant},
 };
 
 use atomic::Atomic;
@@ -95,15 +96,6 @@ impl Fractal {
             .collect();
         Self { shared, workers }
     }
-    // fn new_metabrot(pool: Pool) -> Self {
-    //     Self::new(
-    //         Box::new(|point| sample::metabrot_sample(point).color()),
-    //         pool,
-    //     )
-    // }
-    // fn new_mandelbrot(pool: Pool) -> Self {
-    //     Self::new(Box::new(|point| sample::mandelbrot_sample(point).color()), pool)
-    // }
 
     pub(crate) fn tree(&self) -> &Arc<Tree> {
         &self.shared.tree
@@ -434,6 +426,7 @@ impl WorkerLocal {
             } {
                 // split
                 // dbg!("split");
+                debug_assert!(self.to_be_colored.is_empty());
                 if let Some(handles) = self
                     .shared
                     .tree
@@ -442,6 +435,12 @@ impl WorkerLocal {
                     // dbg!("refined");
                     self.to_be_colored.extend(handles);
                 }
+            } else {
+                // dbg!("idle");
+                // thread::yield_now();
+                // weird workaround, but it fixing freezing
+                // for when pausing sampling or the fractal is outside the window.
+                thread::sleep(Duration::from_millis(1));
             }
         }
     }
