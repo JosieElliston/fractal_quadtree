@@ -28,6 +28,7 @@
 - probably should just use child pointers
 - allocator is linked list but with big blocks, handles wrap pointers
 - bug report on `compare_exchange` returning `current` not `new`
+- pausing sampling is broken, also when the fractal is outside the window
 
 ## optimization
 

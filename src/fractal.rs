@@ -324,10 +324,15 @@ impl WorkerLocal {
                 // TODO: do this better
                 'outer: {
                     for (line_i, lock) in shared_texture.texture_lock_begin().iter().enumerate() {
-                        // TODO: faster ordering
-                        if lock
-                            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-                            .is_ok()
+                        if !lock.load(Ordering::Relaxed)
+                            && lock
+                                .compare_exchange_weak(
+                                    false,
+                                    true,
+                                    Ordering::Acquire,
+                                    Ordering::Relaxed,
+                                )
+                                .is_ok()
                         {
                             // let mut t = self.texture[i].clone();
                             // let mut l = &mut *self.texture[i];
@@ -430,11 +435,11 @@ impl WorkerLocal {
                 // split
                 // dbg!("split");
                 debug_assert!(self.to_be_colored.is_empty());
-                if let Some(handles) = self
-                    .shared
-                    .tree
-                    .refine(window, self.shared.now.load(Ordering::SeqCst), &mut self.thread_data)
-                {
+                if let Some(handles) = self.shared.tree.refine(
+                    window,
+                    self.shared.now.load(Ordering::SeqCst),
+                    &mut self.thread_data,
+                ) {
                     // dbg!("refined");
                     self.to_be_colored.extend(handles);
                 }
