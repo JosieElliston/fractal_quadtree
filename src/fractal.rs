@@ -206,18 +206,19 @@ mod main_thread {
             //     Err(TryLockError::WouldBlock) => panic!("we should have exclusive access"),
             // };
 
+            shared_texture.needs_full_redraw = needs_full_redraw;
+
             // update now and prev_frame_start
             {
-                // i can't just fetch_add(1) because of how the atomic crate works
-                let prev_frame_start = self.shared.now.load(Ordering::SeqCst);
+                // // i can't just fetch_add(1) because of how the atomic crate works
+                // let prev_frame_start = self.shared.now.load(Ordering::SeqCst);
+                // self.shared
+                //     .now
+                //     .store(prev_frame_start + 1, Ordering::SeqCst);
                 self.shared
                     .now
-                    .store(prev_frame_start + 1, Ordering::SeqCst);
-                shared_texture.prev_frame_start = if needs_full_redraw {
-                    Moment::MIN
-                } else {
-                    prev_frame_start
-                };
+                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |now| Some(now + 1))
+                    .expect("we should never fail to update `now`");
             }
 
             // resize self.texture if needed
@@ -387,7 +388,7 @@ mod worker_thread {
             let camera_map = shared_texture.camera_map().as_ref()?;
 
             // let prev_frame_start = self.shared.now.load(Ordering::SeqCst) - 1;
-            let prev_frame_start = shared_texture.prev_frame_start;
+            // let prev_frame_start = shared_texture.prev_frame_start;
 
             // find a line for us to render
             // by just trying to lock each line's texture lock
@@ -409,8 +410,14 @@ mod worker_thread {
                             .try_lock()
                             .expect("we just locked it");
                         {
+                            let prev_frame_start = if shared_texture.needs_full_redraw {
+                                Moment::MIN
+                            } else {
+                                self.shared.now.load(Ordering::SeqCst) - 1
+                            };
+
                             // TODO: do more of this, perhaps bisection bc that's easier than real spacial stuff
-                            let line_needs_redraw = prev_frame_start == Moment::MIN
+                            let line_needs_redraw = shared_texture.needs_full_redraw
                                 || 'line_needs_redraw: {
                                     let Some((_, Some(first_pixel))) =
                                         camera_map.pixels().nth(line_i).unwrap().next()
@@ -426,6 +433,11 @@ mod worker_thread {
                                     let imag = first_pixel.imag_mid();
                                     let real_lo = first_pixel.real_mid();
                                     let real_hi = last_pixel.real_mid();
+                                    debug_assert_ne!(
+                                        prev_frame_start,
+                                        Moment::MIN,
+                                        "we should short circuit earlier"
+                                    );
                                     self.shared.tree.any_on_line_needs_redraw(
                                         real_lo,
                                         real_hi,
@@ -678,8 +690,7 @@ mod shared_texture {
     pub(super) type SharedTexture = Arc<RwLock<SharedTextureInner>>;
 
     pub(super) struct SharedTextureInner {
-        /// Moment::MIN to indicate we need a full redraw.
-        pub(super) prev_frame_start: Moment,
+        pub(super) needs_full_redraw: bool,
         /// the `CameraMap` where we're rendering.
         /// `Some` iff we're between rendering begin and finish.
         ///
@@ -705,7 +716,7 @@ mod shared_texture {
     impl Default for SharedTextureInner {
         fn default() -> Self {
             Self {
-                prev_frame_start: Moment::MIN,
+                needs_full_redraw: false,
                 camera_map: None,
                 texture_lock_begin: Vec::new(),
                 texture_lock_finish: Vec::new(),
@@ -753,7 +764,7 @@ mod shared_texture {
             &self.texture
         }
 
-        /// also sets `prev_frame_start` to `Moment::MIN` to indicate that we need a full redraw.
+        /// also sets `needs_full_redraw` to `true`.
         pub(super) fn resize_if_needed(&mut self, camera_map: &CameraMap) {
             let width = camera_map.pixels_width();
             let height = camera_map.pixels_height();
@@ -761,7 +772,7 @@ mod shared_texture {
             if self.width() == width && self.height() == height {
                 return;
             }
-            self.prev_frame_start = Moment::MIN;
+            self.needs_full_redraw = true;
             self.texture_lock_begin.clear();
             self.texture_lock_finish.clear();
             // TODO: is this correct with regard to the mutexes?

@@ -48,3 +48,8 @@
     - this is incredibly slow, i can get a decent image in about a minute
     - but it would be nice to be able to pan/zoom in real time
     - the rest of this talk is on various speedups / the current architecture
+
+## slides for datastructure
+
+- proved that the color hasn't changed
+- prove a line hasn't changed
