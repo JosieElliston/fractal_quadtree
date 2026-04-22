@@ -393,99 +393,89 @@ mod worker_thread {
             // find a line for us to render
             // by just trying to lock each line's texture lock
             // TODO: do this better
-            'outer: {
-                for (line_i, lock) in shared_texture.texture_lock_begin().iter().enumerate() {
-                    if !lock.load(Ordering::Relaxed)
-                        && lock
-                            .compare_exchange_weak(
-                                false,
-                                true,
-                                Ordering::Acquire,
-                                Ordering::Relaxed,
-                            )
-                            .is_ok()
-                    {
-                        // TODO: we don't need this mutex, replace with `UnsafeCell`
-                        let mut l = shared_texture.texture()[line_i]
-                            .try_lock()
-                            .expect("we just locked it");
-                        {
-                            let prev_frame_start = if shared_texture.needs_full_redraw {
-                                Moment::MIN
-                            } else {
-                                self.shared.now.load(Ordering::SeqCst) - 1
+            for (line_i, lock) in shared_texture.texture_lock_begin().iter().enumerate() {
+                if lock.load(Ordering::Relaxed) {
+                    continue;
+                }
+                if lock
+                    .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+                    .is_err()
+                {
+                    continue;
+                }
+                // TODO: we don't need this mutex, replace with `UnsafeCell`
+                let mut l = shared_texture.texture()[line_i]
+                    .try_lock()
+                    .expect("we just locked it");
+                {
+                    let prev_frame_start = if shared_texture.needs_full_redraw {
+                        Moment::MIN
+                    } else {
+                        self.shared.now.load(Ordering::SeqCst) - 1
+                    };
+
+                    // TODO: do more of this, perhaps bisection bc that's easier than real spacial stuff
+                    let line_needs_redraw = shared_texture.needs_full_redraw
+                        || 'line_needs_redraw: {
+                            let Some((_, Some(first_pixel))) =
+                                camera_map.pixels().nth(line_i).unwrap().next()
+                            else {
+                                break 'line_needs_redraw true;
                             };
+                            let Some((_, Some(last_pixel))) =
+                                camera_map.pixels().nth(line_i).unwrap().last()
+                            else {
+                                break 'line_needs_redraw true;
+                            };
+                            debug_assert_eq!(first_pixel.imag_mid(), last_pixel.imag_mid());
+                            let imag = first_pixel.imag_mid();
+                            let real_lo = first_pixel.real_mid();
+                            let real_hi = last_pixel.real_mid();
+                            debug_assert_ne!(
+                                prev_frame_start,
+                                Moment::MIN,
+                                "we should short circuit earlier"
+                            );
+                            self.shared.tree.any_on_line_needs_redraw(
+                                real_lo,
+                                real_hi,
+                                imag,
+                                prev_frame_start,
+                                &mut self.thread_data,
+                            )
+                        };
 
-                            // TODO: do more of this, perhaps bisection bc that's easier than real spacial stuff
-                            let line_needs_redraw = shared_texture.needs_full_redraw
-                                || 'line_needs_redraw: {
-                                    let Some((_, Some(first_pixel))) =
-                                        camera_map.pixels().nth(line_i).unwrap().next()
-                                    else {
-                                        break 'line_needs_redraw true;
-                                    };
-                                    let Some((_, Some(last_pixel))) =
-                                        camera_map.pixels().nth(line_i).unwrap().last()
-                                    else {
-                                        break 'line_needs_redraw true;
-                                    };
-                                    debug_assert_eq!(first_pixel.imag_mid(), last_pixel.imag_mid());
-                                    let imag = first_pixel.imag_mid();
-                                    let real_lo = first_pixel.real_mid();
-                                    let real_hi = last_pixel.real_mid();
-                                    debug_assert_ne!(
-                                        prev_frame_start,
-                                        Moment::MIN,
-                                        "we should short circuit earlier"
-                                    );
-                                    self.shared.tree.any_on_line_needs_redraw(
-                                        real_lo,
-                                        real_hi,
-                                        imag,
-                                        prev_frame_start,
-                                        &mut self.thread_data,
-                                    )
-                                };
-
-                            if !line_needs_redraw {
-                                // debug draw unchanged lines pink
-                                // l.iter_mut()
-                                //     .for_each(|pixel| *pixel = Color32::from_rgb(255, 50, 255));
-                            } else {
-                                for ((_rect, pixel), target) in
-                                    camera_map.pixels().nth(line_i).unwrap().zip(l.iter_mut())
+                    if !line_needs_redraw {
+                        // debug draw unchanged lines pink
+                        // l.iter_mut()
+                        //     .for_each(|pixel| *pixel = Color32::from_rgb(255, 50, 255));
+                    } else {
+                        for ((_rect, pixel), target) in
+                            camera_map.pixels().nth(line_i).unwrap().zip(l.iter_mut())
+                        {
+                            *target = if let Some(pixel) = pixel {
+                                if let Some(color) =
+                                    self.shared.tree.color_of_pixel(pixel, prev_frame_start)
                                 {
-                                    *target = if let Some(pixel) = pixel {
-                                        if let Some(color) =
-                                            self.shared.tree.color_of_pixel(pixel, prev_frame_start)
-                                        {
-                                            color
-                                        } else {
-                                            // we proved that the color hasn't changed
-                                            // debug draw unchanged pixels blue
-                                            // Color32::from_rgb(50, 50, 255)
-                                            continue;
-                                        }
-                                    } else {
-                                        Color32::MAGENTA
-                                    };
+                                    color
+                                } else {
+                                    // we proved that the color hasn't changed
+                                    // debug draw unchanged pixels blue
+                                    // Color32::from_rgb(50, 50, 255)
+                                    continue;
                                 }
-                            }
+                            } else {
+                                Color32::MAGENTA
+                            };
                         }
-                        debug_assert!(
-                            !shared_texture.texture_lock_finish()[line_i].load(Ordering::SeqCst)
-                        );
-                        shared_texture.texture_lock_finish()[line_i].store(true, Ordering::SeqCst);
-                        break 'outer;
                     }
                 }
-                // no break
-                // all locks have been set
-                // shared_texture.reset_camera_map();
-                // self.camera_map = None;
+                debug_assert!(!shared_texture.texture_lock_finish()[line_i].load(Ordering::SeqCst));
+                shared_texture.texture_lock_finish()[line_i].store(true, Ordering::SeqCst);
+                return Some(());
             }
-
-            Some(())
+            // all locks have been set
+            None
         }
 
         fn try_sample(&mut self) -> Option<()> {

@@ -124,12 +124,12 @@ impl App {
         let z0 = primary_camera_map.pos_to_complex(screen_center);
         let painter = ui.painter_at(ui.max_rect());
 
-        // // we need to do this on the first frame
-        // if !self.has_begun_rendering {
-        //     self.metabrot
-        //         .begin_rendering(primary_camera_map, self.needs_full_redraw);
-        //     self.has_begun_rendering = true;
-        // }
+        // we need to do this on the first frame
+        if !self.has_begun_rendering {
+            self.metabrot
+                .begin_rendering(primary_camera_map, self.needs_full_redraw);
+            self.has_begun_rendering = true;
+        }
 
         let now = Instant::now();
         let should_rerender = {
@@ -156,12 +156,11 @@ impl App {
 
             match self.current_fractal {
                 CurrentFractal::Metabrot => {
-                    // TODO: it would be nice if we could start this earlier in the frame
-                    // lmao maybe we can just switch the order of these two calls?
+                    // lmao we can just switch the order of these two calls
                     // note that this adds a frame of latency
+                    self.metabrot.finish_rendering(&mut self.texture);
                     self.metabrot
                         .begin_rendering(primary_camera_map, self.needs_full_redraw);
-                    self.metabrot.finish_rendering(&mut self.texture);
                     self.needs_full_redraw = false;
                 }
                 CurrentFractal::Mandelbrot => {
