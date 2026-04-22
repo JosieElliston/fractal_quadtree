@@ -1,0 +1,7 @@
+# this helps
+# default is 100
+# max_width = 130
+
+# these don't
+# format_strings = true
+# use_small_heuristics = "Max"

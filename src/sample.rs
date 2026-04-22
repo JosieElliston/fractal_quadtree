@@ -7,8 +7,8 @@ use eframe::egui::Color32;
 
 use crate::complex::{Window, fixed::*};
 
-pub(crate) static SAMPLE_ELAPSED_NANOS: AtomicU64 = AtomicU64::new(0);
-pub(crate) static SAMPLE_COUNTER: AtomicU64 = AtomicU64::new(0);
+// pub(crate) static SAMPLE_ELAPSED_NANOS: AtomicU64 = AtomicU64::new(0);
+// pub(crate) static SAMPLE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) struct Sample {
     pub(crate) depth: f32,
@@ -84,16 +84,25 @@ pub(crate) fn quadratic_map(
     for depth in 0..Sample::MAX_DEPTH {
         if z_real2 + z_imag2 > Z_ESCAPE_RAD2 {
             return Sample {
+                // TODO: defer computing log unless we actually need it
                 // depth
                 // depth: depth as f32 + 2.0 - (z_real2 + z_imag2).sqrt().ln().ln() / 2.0f32.ln(),
                 depth: depth as f32 + 2.0 - (z_real2 + z_imag2).sqrt().ln().log2(),
             };
         }
 
-        z_imag = (z_real + z_real) * z_imag + c_imag;
+        z_imag = (z_real + z_real).mul_add(z_imag, c_imag);
         z_real = z_real2 - z_imag2 + c_real;
         z_real2 = z_real * z_real;
         z_imag2 = z_imag * z_imag;
+
+        // unsafe {
+        //     use std::intrinsics::{fadd_fast, fmul_fast, fsub_fast};
+        //     z_imag = fadd_fast(fmul_fast(fadd_fast(z_real, z_real), z_imag), c_imag);
+        //     z_real = fadd_fast(fsub_fast(z_real2, z_imag2), c_real);
+        //     z_real2 = fmul_fast(z_real, z_real);
+        //     z_imag2 = fmul_fast(z_imag, z_imag);
+        // }
 
         if (old_real == z_real) && (old_imag == z_imag) {
             return Sample {

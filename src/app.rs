@@ -17,6 +17,12 @@ fn dynamic_draw_size(camera_map: &CameraMap, max_rad: f32) -> f32 {
     (camera_map.delta_real_to_vec1(rad)).min(max_rad)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CurrentFractal {
+    Metabrot,
+    Mandelbrot,
+}
+
 pub(crate) struct App {
     metabrot: Fractal,
 
@@ -31,9 +37,14 @@ pub(crate) struct App {
     sample_counts: egui::util::History<u64>,
     texture: egui::TextureHandle,
     sampling: bool,
-    current_fractal: usize,
-    // pool: Pool,
-    // in_flight_target: usize,
+    draw_crosshair: bool,
+    // current_fractal: usize,
+    current_fractal: CurrentFractal,
+    control_other_camera: bool,
+    draw_gradient_steps: bool,
+    draw_sample_grid: bool,
+    draw_sample_subgrid: bool,
+    draw_sample_grid_gradient_steps: i32,
 }
 impl App {
     pub(crate) fn new(cc: &eframe::CreationContext<'_>) -> Self {
@@ -53,8 +64,414 @@ impl App {
                 egui::TextureOptions::NEAREST,
             ),
             sampling: true,
-            current_fractal: 0,
+            draw_crosshair: false,
+            current_fractal: CurrentFractal::Metabrot,
+            control_other_camera: false,
+            draw_gradient_steps: true,
+            draw_sample_grid: true,
+            draw_sample_subgrid: false,
+            draw_sample_grid_gradient_steps: -1,
         }
+    }
+
+    /// draw the fractal and debug stuff
+    fn show_fractal(
+        &mut self,
+        ctx: &eframe::egui::Context,
+        ui: &mut egui::Ui,
+        primary_camera_map: &CameraMap,
+        secondary_camera_map: &CameraMap,
+        needs_full_redraw: bool,
+    ) {
+        let screen_center = ui.max_rect().center();
+        let z0 = primary_camera_map.pos_to_complex(screen_center);
+        let painter = ui.painter_at(ui.max_rect());
+
+        // draw the fractal
+        {
+            match self.current_fractal {
+                CurrentFractal::Metabrot => {
+                    self.metabrot
+                        .begin_rendering(primary_camera_map.clone(), needs_full_redraw);
+                    self.metabrot.finish_rendering(&mut self.texture);
+                }
+                CurrentFractal::Mandelbrot => {
+                    if let Some(z0) = z0 {
+                        fractal::render_mandelbrot(&mut self.texture, secondary_camera_map, z0);
+                    } else {
+                        fractal::render_color(&mut self.texture, secondary_camera_map);
+                    }
+                }
+            }
+            assert_eq!(primary_camera_map.rect(), secondary_camera_map.rect());
+            painter.image(
+                self.texture.id(),
+                primary_camera_map.rect(),
+                Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0)),
+                Color32::WHITE,
+            );
+        }
+
+        let draw_complex_circle_stroke =
+            |(c_real, c_imag): (Real, Imag), rad: Fixed, stroke: egui::Stroke| {
+                painter.circle_stroke(
+                    secondary_camera_map.complex_to_pos((c_real, c_imag)),
+                    secondary_camera_map.delta_real_to_vec1(rad),
+                    stroke,
+                );
+            };
+        let draw_complex_segment = |(c1_real, c1_imag): (Real, Imag),
+                                    (c2_real, c2_imag): (Real, Imag),
+                                    stroke: egui::Stroke| {
+            painter.line_segment(
+                [
+                    secondary_camera_map.complex_to_pos((c1_real, c1_imag)),
+                    secondary_camera_map.complex_to_pos((c2_real, c2_imag)),
+                ],
+                stroke,
+            );
+        };
+
+        // draw stuff that uses the window we're sampling the mandelbrot in
+        'mandelbrot_window: {
+            if self.current_fractal != CurrentFractal::Mandelbrot {
+                break 'mandelbrot_window;
+            }
+            let Some((z0_real, z0_imag)) = z0 else {
+                break 'mandelbrot_window;
+            };
+            // let window = Window::from_center_size(Fixed::ZERO, Fixed::ZERO, 4.0.into(), 4.0.into());
+            let Some(window) = (|| {
+                Window::from_mid_rad(
+                    (f64::from(z0_imag) * f64::from(z0_imag)
+                        - f64::from(z0_real) * f64::from(z0_real))
+                    .try_into()
+                    .ok()?,
+                    (-2.0 * f64::from(z0_real) * f64::from(z0_imag))
+                        .try_into()
+                        .ok()?,
+                    2.0.try_into().unwrap(),
+                    2.0.try_into().unwrap(),
+                )
+            })() else {
+                break 'mandelbrot_window;
+            };
+
+            // draw the outline of the window
+            painter.rect_stroke(
+                secondary_camera_map.window_to_rect(window),
+                0.0,
+                egui::Stroke::new(2.0, Color32::WHITE),
+                egui::StrokeKind::Middle,
+            );
+
+            // debug for gradient descent steps
+            // draw dots where we took samples, to debug aliasing
+            // #[cfg(false)]
+            'gradient_descent_steps: {
+                if self.draw_sample_grid_gradient_steps < 0 {
+                    break 'gradient_descent_steps;
+                }
+                let Some(z0) = z0 else {
+                    break 'gradient_descent_steps;
+                };
+                for line in window.grid_centers(sample::WIDTH0, sample::WIDTH0) {
+                    for (c_real, c_imag) in line {
+                        // the image of the sample under a few gradient descent steps
+                        if let Some(stepped_c) = (|| {
+                            let (mut c_real, mut c_imag) = (c_real, c_imag);
+                            for _ in 0..self.draw_sample_grid_gradient_steps {
+                                (c_real, c_imag) = sample::gradient_step(z0, (c_real, c_imag))?;
+                            }
+                            Some((c_real, c_imag))
+                        })() {
+                            painter.circle_filled(
+                                secondary_camera_map.complex_to_pos(stepped_c),
+                                dynamic_draw_size(secondary_camera_map, 3.0),
+                                Color32::WHITE,
+                            );
+                        }
+                    }
+                }
+            }
+
+            // debug hierarchical windows
+            // draw points that got resampled in a small window around them
+            // TODO: less code reuse
+            if self.draw_sample_grid {
+                let mut deepest: f32 = 0.0;
+                let mut deepest_point = (Fixed::ZERO, Fixed::ZERO);
+                // we want to look through all the points at a coarse grain before resampling
+                let mut to_resample = Vec::with_capacity(sample::WIDTH0 * sample::WIDTH0);
+                let cell_rad = {
+                    (window.real_rad().div_f64(sample::WIDTH0 as f64))
+                        .max(window.imag_rad().div_f64(sample::WIDTH0 as f64))
+                };
+                // draw initial points
+                for (c_real, c_imag) in window
+                    .grid_centers(sample::WIDTH0, sample::WIDTH0)
+                    .flatten()
+                {
+                    let (sample, distance) =
+                        sample::distance_estimator((z0_real, z0_imag), (c_real, c_imag));
+                    if sample.depth > deepest {
+                        deepest = sample.depth;
+                        deepest_point = (c_real, c_imag);
+                    }
+                    if let Some(distance) = distance
+                        && distance < cell_rad.mul2()
+                    {
+                        to_resample.push((c_real, c_imag));
+                    }
+                    painter.circle_filled(
+                        secondary_camera_map.complex_to_pos((c_real, c_imag)),
+                        dynamic_draw_size(secondary_camera_map, 5.0),
+                        Color32::DARK_RED,
+                    );
+                }
+
+                if self.draw_sample_subgrid {
+                    // TODO: try sorting the vec by distance estimate
+                    // draw points that got resampled
+                    for (c0_real, c0_imag) in to_resample {
+                        let resample_window =
+                            Window::from_mid_rad(c0_real, c0_imag, cell_rad, cell_rad).unwrap();
+                        for (c_real, c_imag) in resample_window
+                            .grid_centers(sample::WIDTH1, sample::WIDTH1)
+                            .flatten()
+                        {
+                            if (c0_real, c0_imag) == (c_real, c_imag) {
+                                continue;
+                            }
+                            let sample =
+                                sample::quadratic_map((z0_real, z0_imag), (c_real, c_imag));
+                            if sample.depth > deepest {
+                                deepest = sample.depth;
+                                deepest_point = (c_real, c_imag);
+                            }
+                            painter.circle_filled(
+                                secondary_camera_map.complex_to_pos((c_real, c_imag)),
+                                dynamic_draw_size(secondary_camera_map, 3.0),
+                                Color32::ORANGE,
+                            );
+                        }
+                    }
+                }
+
+                // draw the deepest point
+                painter.circle_filled(
+                    secondary_camera_map.complex_to_pos(deepest_point),
+                    // don't use dynamic size for this
+                    5.0,
+                    Color32::RED,
+                );
+            }
+
+            // draw deepest_on_grid
+            {
+                let (deepest_c, _sample) = sample::deepest_on_grid(
+                    (z0_real, z0_imag),
+                    window,
+                    sample::WIDTH,
+                    sample::WIDTH,
+                    sample::GRADIENT_STEPS,
+                );
+                painter.circle_filled(
+                    secondary_camera_map.complex_to_pos(deepest_c),
+                    // don't use dynamic size for this
+                    5.0,
+                    Color32::WHITE,
+                );
+            }
+        }
+
+        // draw distance estimator with gradient descent steps
+        if self.draw_gradient_steps {
+            (|| {
+                if self.current_fractal != CurrentFractal::Mandelbrot {
+                    return Some(());
+                }
+                let Some(z0) = z0 else {
+                    return Some(());
+                };
+                let Some(mut c) = secondary_camera_map
+                    .pos_to_complex(ctx.input(|i| i.pointer.latest_pos().unwrap_or_default()))
+                else {
+                    return Some(());
+                };
+
+                const MAX_STEPS: usize = 8;
+                for _ in 0..MAX_STEPS {
+                    let (distance, (_grad_real, _grad_imag)) =
+                        sample::distance_estimator_gradient(z0, c)?;
+                    draw_complex_circle_stroke(c, distance, egui::Stroke::new(1.0, Color32::WHITE));
+                    // let scale = distance / ((grad_real * grad_real + grad_imag * grad_imag).into_f32()).sqrt();
+                    // draw_complex_segment(
+                    //     c,
+                    //     (c_real - grad_real * scale, c_imag - grad_imag * scale),
+                    //     egui::Stroke::new(1.0, Color32::RED),
+                    // );
+                    let next_c = sample::gradient_step(z0, c)?;
+                    draw_complex_segment(c, next_c, egui::Stroke::new(1.0, Color32::WHITE));
+                    painter.circle_filled(
+                        secondary_camera_map.complex_to_pos(next_c),
+                        // don't use dynamic size for this
+                        3.0,
+                        Color32::WHITE,
+                    );
+                    c = next_c;
+                }
+
+                Some(())
+            })();
+        }
+
+        // draw a dot at the center of the screen or at z0
+        'draw_z0: {
+            if !self.draw_crosshair {
+                break 'draw_z0;
+            }
+            painter.circle_filled(
+                match self.current_fractal {
+                    CurrentFractal::Metabrot => screen_center,
+                    CurrentFractal::Mandelbrot => {
+                        if let Some(z0) = z0 {
+                            secondary_camera_map.complex_to_pos(z0)
+                        } else {
+                            break 'draw_z0;
+                        }
+                    }
+                },
+                3.0,
+                Color32::BLUE,
+            );
+        }
+    }
+
+    /// factor this out,
+    /// bc rustfmt dies on deeply nested code with string literals.
+    /// it's fixed by increasing max_width, but that's really coarse.
+    fn show_ui(&mut self, ctx: &eframe::egui::Context, ui: &mut egui::Ui) {
+        egui::CollapsingHeader::new("info")
+            .default_open(true)
+            .show_unindented(ui, |ui| {
+                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+
+                egui::CollapsingHeader::new("stats").default_open(true).show(ui, |ui| {
+                    // frame rate
+                    {
+                        let average_dt = self.dts.average().expect("we added one this frame so dts must be non-empty");
+                        ui.label(format!("fps: {:.01}", 1.0 / average_dt));
+                        ui.label(format!("spf: {:.05}", average_dt));
+                    }
+
+                    // sample count
+                    {
+                        ui.label(format!(
+                            "samples/sec: {:.01}",
+                            self.sample_counts.values().sum::<u64>() as f32 / self.sample_counts.len() as f32
+                        ));
+                    }
+
+                    // node count
+                    {
+                        // note that this leaks memory
+                        ui.label(format!(
+                            "node count: {}",
+                            self.metabrot.tree().node_count(&mut ThreadData::default())
+                        ));
+                    }
+
+                    egui::CollapsingHeader::new("camera").show(ui, |ui| {
+                        ui.label(format!("metabrot real mid: {:12.09}", self.primary_camera.real_mid()));
+                        ui.label(format!("metabrot imag mid: {:12.09}", self.primary_camera.imag_mid()));
+                        ui.label(format!("metabrot real rad: {:12.09}", self.primary_camera.real_rad()));
+                        ui.label(format!("mandelbrot real mid: {:12.09}", self.secondary_camera.real_mid()));
+                        ui.label(format!("mandelbrot imag mid: {:12.09}", self.secondary_camera.imag_mid()));
+                        ui.label(format!("mandelbrot real rad: {:12.09}", self.secondary_camera.real_rad()));
+                    });
+                });
+
+                egui::CollapsingHeader::new("toggles").default_open(true).show(ui, |ui| {
+                    // sampling
+                    {
+                        ui.checkbox(&mut self.sampling, "metabrot sampling").on_hover_text(
+                            "keybinding: ".to_owned()
+                                + &ctx.format_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::NONE, egui::Key::X)),
+                        );
+                        self.sampling ^= ctx.input(|i| i.key_pressed(Key::X));
+                    }
+
+                    // crosshair
+                    {
+                        ui.checkbox(&mut self.draw_crosshair, "draw crosshair")
+                            .on_hover_text("for metabrot, draw a dot at the screen center. for mandelbrot, draw a dot at z0.");
+                    }
+
+                    // current fractal
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add(egui::Button::new("metabrot").selected(self.current_fractal == CurrentFractal::Metabrot))
+                            .on_hover_text(
+                                "whether to render the metabrot (rather than the mandelbrot). keybinding: ".to_owned()
+                                    + &ctx.format_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::NONE, Key::N)),
+                            )
+                            .clicked()
+                        {
+                            self.current_fractal = CurrentFractal::Metabrot;
+                        }
+                        if ctx.input(|i| i.key_pressed(Key::N)) {
+                            self.current_fractal = CurrentFractal::Metabrot;
+                        }
+
+                        if ui
+                            .add(egui::Button::new("mandelbrot").selected(self.current_fractal == CurrentFractal::Mandelbrot))
+                            .on_hover_text(
+                                "whether to render the mandelbrot (rather than the metabrot). keybinding: ".to_owned()
+                                    + &ctx.format_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::NONE, Key::M)),
+                            )
+                            .clicked()
+                        {
+                            self.current_fractal = CurrentFractal::Mandelbrot;
+                        };
+                        if ctx.input(|i| i.key_pressed(Key::M)) {
+                            self.current_fractal = CurrentFractal::Mandelbrot;
+                        }
+                    });
+
+                    // control other camera
+                    {
+                        ui.checkbox(&mut self.control_other_camera, "control other fractal")
+                            .on_hover_text(
+                                "pan/zoom will affect the other fractal's camera. keybinding: ".to_owned()
+                                    + &ctx.format_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::NONE, Key::C)),
+                            );
+                        self.control_other_camera ^= ctx.input(|i| i.key_pressed(Key::C));
+                    }
+
+                    egui::CollapsingHeader::new("mandelbrot").show(ui, |ui| {
+                        ui.checkbox(&mut self.draw_gradient_steps, "draw gradient steps")
+                            .on_hover_text("draw the gradient steps starting from the mouse position");
+                        ui.checkbox(&mut self.draw_sample_grid, "draw sample grid");
+                        ui.checkbox(&mut self.draw_sample_subgrid, "draw sample subgrid")
+                            .on_hover_text("requires draw sample grid to have an effect.");
+                        ui.label("draw sample grid gradient steps:")
+                            .on_hover_text("-1 to disable, 0 is the same as draw_sample_grid. keybinding: left and right arrows");
+                        ui.add(
+                            egui::Slider::new(&mut self.draw_sample_grid_gradient_steps, -1..=8)
+                                .clamping(egui::SliderClamping::Never),
+                        );
+                        self.draw_sample_grid_gradient_steps +=
+                            ctx.input(|i| i.key_pressed(Key::ArrowRight) as i32 - i.key_pressed(Key::ArrowLeft) as i32);
+                        self.draw_sample_grid_gradient_steps = self.draw_sample_grid_gradient_steps.max(-1);
+                    });
+                });
+
+                // give some margin on the bottom and right,
+                // but only when uncollapsed,
+                // so we can't use frame inner margin.
+                ui.allocate_space(Vec2::new(ui.min_size().x + 3.0, 3.0));
+            });
     }
 }
 impl eframe::App for App {
@@ -65,28 +482,6 @@ impl eframe::App for App {
             .show(ctx, |ui| {
                 self.dts
                     .add(ctx.input(|i| i.time), ctx.input(|i| i.stable_dt));
-
-                // toggle sampling with space
-                self.sampling ^= ctx.input(|i| i.key_pressed(Key::Space));
-
-                // switch the current fractal with number keys
-                if let Some(key) = [
-                    Key::Num1,
-                    Key::Num2,
-                    Key::Num3,
-                    Key::Num4,
-                    Key::Num5,
-                    Key::Num6,
-                    Key::Num7,
-                    Key::Num8,
-                    Key::Num9,
-                    Key::Num0,
-                ]
-                .into_iter()
-                .position(|k| ctx.input(|i| i.key_pressed(k)))
-                {
-                    self.current_fractal = key;
-                }
 
                 // debug static counters
                 #[cfg(false)]
@@ -174,9 +569,11 @@ impl eframe::App for App {
 
                 // panning stuff
                 // pan the other camera when holding backtick
-                let needs_redraw = {
+                let needs_full_redraw = {
                     let before = (self.primary_camera, self.secondary_camera);
-                    if ctx.input(|i| i.key_down(Key::Backtick)) != (self.current_fractal == 0) {
+                    if self.control_other_camera
+                        != (self.current_fractal == CurrentFractal::Metabrot)
+                    {
                         CameraMap::pan_zoom(
                             ctx,
                             ui,
@@ -199,10 +596,6 @@ impl eframe::App for App {
                     CameraMap::new(ui.max_rect(), self.primary_camera, self.stride);
                 let secondary_camera_map =
                     CameraMap::new(ui.max_rect(), self.secondary_camera, self.stride);
-
-                // if self.current_fractal == 0 {
-                //     self.metabrot.begin_rendering(&primary_camera_map);
-                // }
 
                 // sampling
                 if self.sampling {
@@ -330,331 +723,31 @@ impl eframe::App for App {
                 //     }
                 // }
 
-                // draw the fractal and debug stuff
-                // #[cfg(false)]
-                {
-                    let screen_center = ui.max_rect().center();
-                    let z0 = primary_camera_map.pos_to_complex(screen_center);
-                    let painter = ui.painter_at(ui.max_rect());
-
-                    // draw the fractal
-                    {
-                        if self.current_fractal == 0 {
-                            self.metabrot
-                                .begin_rendering(primary_camera_map.clone(), needs_redraw);
-                            self.metabrot.finish_rendering(&mut self.texture);
-                        } else if let Some(z0) = z0 {
-                            fractal::render_mandelbrot(
-                                &mut self.texture,
-                                &secondary_camera_map,
-                                z0,
-                            );
-                        } else {
-                            fractal::render_color(&mut self.texture, &secondary_camera_map);
-                        }
-                        assert_eq!(primary_camera_map.rect(), secondary_camera_map.rect());
-                        painter.image(
-                            self.texture.id(),
-                            primary_camera_map.rect(),
-                            Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0)),
-                            Color32::WHITE,
-                        );
-                    }
-
-                    let draw_complex_circle_stroke =
-                        |(c_real, c_imag): (Real, Imag), rad: Fixed, stroke: egui::Stroke| {
-                            painter.circle_stroke(
-                                secondary_camera_map.complex_to_pos((c_real, c_imag)),
-                                secondary_camera_map.delta_real_to_vec1(rad),
-                                stroke,
-                            );
-                        };
-                    let draw_complex_segment =
-                        |(c1_real, c1_imag): (Real, Imag),
-                         (c2_real, c2_imag): (Real, Imag),
-                         stroke: egui::Stroke| {
-                            painter.line_segment(
-                                [
-                                    secondary_camera_map.complex_to_pos((c1_real, c1_imag)),
-                                    secondary_camera_map.complex_to_pos((c2_real, c2_imag)),
-                                ],
-                                stroke,
-                            );
-                        };
-
-                    // draw stuff that uses the window we're sampling the mandelbrot in
-                    'mandelbrot_window: {
-                        if self.current_fractal == 0 {
-                            break 'mandelbrot_window;
-                        }
-                        let Some((z0_real, z0_imag)) = z0 else {
-                            break 'mandelbrot_window;
-                        };
-                        // let window = Window::from_center_size(Fixed::ZERO, Fixed::ZERO, 4.0.into(), 4.0.into());
-                        let Some(window) = (|| {
-                            Window::from_mid_rad(
-                                (f64::from(z0_imag) * f64::from(z0_imag)
-                                    - f64::from(z0_real) * f64::from(z0_real))
-                                .try_into()
-                                .ok()?,
-                                (-2.0 * f64::from(z0_real) * f64::from(z0_imag))
-                                    .try_into()
-                                    .ok()?,
-                                2.0.try_into().unwrap(),
-                                2.0.try_into().unwrap(),
-                            )
-                        })() else {
-                            break 'mandelbrot_window;
-                        };
-
-                        // draw the outline of the window
-                        painter.rect_stroke(
-                            secondary_camera_map.window_to_rect(window),
-                            0.0,
-                            egui::Stroke::new(2.0, Color32::WHITE),
-                            egui::StrokeKind::Middle,
-                        );
-
-                        // debug for gradient descent steps
-                        // draw dots where we took samples, to debug aliasing
-                        // #[cfg(false)]
-                        'gradient_descent_steps: {
-                            let Some(z0) = z0 else {
-                                break 'gradient_descent_steps;
-                            };
-                            // how many times should we iterate?
-                            // control with arrow keys
-                            let gradient_steps = {
-                                let delta: isize = ctx.input(|i| i.key_pressed(Key::ArrowRight))
-                                    as isize
-                                    - ctx.input(|i| i.key_pressed(Key::ArrowLeft)) as isize;
-                                ctx.data_mut(|map| {
-                                    let id = egui::Id::new("gradient_steps");
-                                    let gradient_steps = map.get_temp_mut_or::<usize>(id, 0);
-                                    *gradient_steps = gradient_steps.saturating_add_signed(delta);
-                                    *gradient_steps
-                                })
-                            };
-                            for line in window.grid_centers(sample::WIDTH0, sample::WIDTH0) {
-                                for (c_real, c_imag) in line {
-                                    // painter.circle_filled(
-                                    //     secondary_camera_map.complex_to_pos((c_real, c_imag)),
-                                    //     1.0,
-                                    //     Color32::WHITE,
-                                    // );
-                                    // the image of the sample under a few gradient descent steps
-                                    if let Some(stepped_c) = (|| {
-                                        let (mut c_real, mut c_imag) = (c_real, c_imag);
-                                        for _ in 0..gradient_steps {
-                                            (c_real, c_imag) =
-                                                sample::gradient_step(z0, (c_real, c_imag))?;
-                                        }
-                                        Some((c_real, c_imag))
-                                    })(
-                                    ) {
-                                        painter.circle_filled(
-                                            secondary_camera_map.complex_to_pos(stepped_c),
-                                            dynamic_draw_size(&secondary_camera_map, 3.0),
-                                            Color32::WHITE,
-                                        );
-                                    }
-                                    // draw_distance_estimator((c_real, c_imag));
-                                }
-                            }
-                        }
-
-                        // debug hierarchical windows
-                        // draw points that got resampled in a small window around them
-                        // TODO: less code reuse
-                        {
-                            let mut deepest: f32 = 0.0;
-                            let mut deepest_point = (Fixed::ZERO, Fixed::ZERO);
-                            // we want to look through all the points at a coarse grain before resampling
-                            let mut to_resample =
-                                Vec::with_capacity(sample::WIDTH0 * sample::WIDTH0);
-                            let cell_rad = {
-                                (window.real_rad().div_f64(sample::WIDTH0 as f64))
-                                    .max(window.imag_rad().div_f64(sample::WIDTH0 as f64))
-                            };
-                            // draw initial points
-                            for (c_real, c_imag) in window
-                                .grid_centers(sample::WIDTH0, sample::WIDTH0)
-                                .flatten()
-                            {
-                                let (sample, distance) = sample::distance_estimator(
-                                    (z0_real, z0_imag),
-                                    (c_real, c_imag),
-                                );
-                                if sample.depth > deepest {
-                                    deepest = sample.depth;
-                                    deepest_point = (c_real, c_imag);
-                                }
-                                if let Some(distance) = distance
-                                    && distance < cell_rad.mul2()
-                                {
-                                    to_resample.push((c_real, c_imag));
-                                }
-                                painter.circle_filled(
-                                    secondary_camera_map.complex_to_pos((c_real, c_imag)),
-                                    dynamic_draw_size(&secondary_camera_map, 5.0),
-                                    Color32::DARK_RED,
-                                );
-                            }
-                            // TODO: try sorting the vec by distance estimate
-                            // draw points that got resampled
-                            for (c0_real, c0_imag) in to_resample {
-                                let resample_window =
-                                    Window::from_mid_rad(c0_real, c0_imag, cell_rad, cell_rad)
-                                        .unwrap();
-                                for (c_real, c_imag) in resample_window
-                                    .grid_centers(sample::WIDTH1, sample::WIDTH1)
-                                    .flatten()
-                                {
-                                    if (c0_real, c0_imag) == (c_real, c_imag) {
-                                        continue;
-                                    }
-                                    let sample =
-                                        sample::quadratic_map((z0_real, z0_imag), (c_real, c_imag));
-                                    if sample.depth > deepest {
-                                        deepest = sample.depth;
-                                        deepest_point = (c_real, c_imag);
-                                    }
-                                    painter.circle_filled(
-                                        secondary_camera_map.complex_to_pos((c_real, c_imag)),
-                                        dynamic_draw_size(&secondary_camera_map, 3.0),
-                                        Color32::ORANGE,
-                                    );
-                                }
-                            }
-
-                            // draw the deepest point
-                            painter.circle_filled(
-                                secondary_camera_map.complex_to_pos(deepest_point),
-                                // don't use dynamic size for this
-                                5.0,
-                                Color32::RED,
-                            );
-                        }
-
-                        // draw deepest_on_grid
-                        {
-                            let (deepest_c, _sample) = sample::deepest_on_grid(
-                                (z0_real, z0_imag),
-                                window,
-                                sample::WIDTH,
-                                sample::WIDTH,
-                                sample::GRADIENT_STEPS,
-                            );
-                            painter.circle_filled(
-                                secondary_camera_map.complex_to_pos(deepest_c),
-                                // don't use dynamic size for this
-                                5.0,
-                                Color32::WHITE,
-                            );
-                        }
-                    }
-
-                    // draw distance estimator with gradient descent steps
-                    (|| {
-                        if self.current_fractal == 0 {
-                            return Some(());
-                        }
-                        let Some(z0) = z0 else {
-                            return Some(());
-                        };
-                        let Some(mut c) = secondary_camera_map.pos_to_complex(
-                            ctx.input(|i| i.pointer.latest_pos().unwrap_or_default()),
-                        ) else {
-                            return Some(());
-                        };
-
-                        const MAX_STEPS: usize = 8;
-                        for _ in 0..MAX_STEPS {
-                            let (distance, (_grad_real, _grad_imag)) =
-                                sample::distance_estimator_gradient(z0, c)?;
-                            draw_complex_circle_stroke(
-                                c,
-                                distance,
-                                egui::Stroke::new(1.0, Color32::WHITE),
-                            );
-                            // let scale = distance / ((grad_real * grad_real + grad_imag * grad_imag).into_f32()).sqrt();
-                            // draw_complex_segment(
-                            //     c,
-                            //     (c_real - grad_real * scale, c_imag - grad_imag * scale),
-                            //     egui::Stroke::new(1.0, Color32::RED),
-                            // );
-                            let next_c = sample::gradient_step(z0, c)?;
-                            draw_complex_segment(c, next_c, egui::Stroke::new(1.0, Color32::WHITE));
-                            painter.circle_filled(
-                                secondary_camera_map.complex_to_pos(next_c),
-                                // don't use dynamic size for this
-                                3.0,
-                                Color32::WHITE,
-                            );
-                            c = next_c;
-                        }
-
-                        Some(())
-                    })();
-
-                    // draw a dot at the center of the screen or at z0
-                    'draw_z0: {
-                        painter.circle_filled(
-                            if self.current_fractal == 0 {
-                                screen_center
-                            } else if let Some(z0) = z0 {
-                                secondary_camera_map.complex_to_pos(z0)
-                            } else {
-                                break 'draw_z0;
-                            },
-                            3.0,
-                            Color32::BLUE,
-                        );
-                    }
-                }
+                self.show_fractal(
+                    ctx,
+                    ui,
+                    &primary_camera_map,
+                    &secondary_camera_map,
+                    needs_full_redraw,
+                );
 
                 // area is to allow the frame to be drawn on top of the fractal
                 egui::Area::new(egui::Id::new("area"))
                     .constrain_to(ctx.screen_rect())
                     .anchor(egui::Align2::LEFT_TOP, egui::Vec2::ZERO)
                     .show(ui.ctx(), |ui| {
-                        // frame rate
-                        {
-                            let average_dt = self
-                                .dts
-                                .average()
-                                .expect("we added one this frame so dts must be non-empty");
-                            // ui.label(format!(
-                            //     "    dt: {:08.04}\n1/dt: {:08.04}",
-                            //     average_dt,
-                            //     1.0 / average_dt,
-                            // ));
-                            let t = format!(
-                                "    dt: {:08.04}\n1/dt: {:08.04}\nsamples/s: {:08.04}\nnodes: {}",
-                                average_dt,
-                                1.0 / average_dt,
-                                self.sample_counts.values().sum::<u64>() as f32
-                                    / self.sample_counts.len() as f32,
-                                // note that this leaks memory
-                                self.metabrot.tree().node_count(&mut ThreadData::default()),
-                            );
-                            ui.label(egui::RichText::new(t).background_color(Color32::BLACK));
-                        }
-
-                        // // view stuff
-                        // {
-                        //     ui.label(format!(
-                        //         "center: {:12.09} + {:12.09}i\nreal_radius: {:12.09}",
-                        //         self.camera.real_mid,
-                        //         self.camera.imag_mid,
-                        //         self.camera.real_rad,
-                        //     ));
-                        // }
+                        // frame is for background
+                        egui::Frame::new()
+                            .fill(Color32::from_gray(20))
+                            .inner_margin(3)
+                            .show(ui, |ui| {
+                                self.show_ui(ctx, ui);
+                            });
                     });
             });
     }
 
-    // fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-    //     self.metabrot.join();
-    // }
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.metabrot.join();
+    }
 }

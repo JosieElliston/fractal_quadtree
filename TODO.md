@@ -117,6 +117,7 @@
 - make sure i'm not using `lock`, i should probably only every be using `try_lock`
 - rename node/leaf_id -> node_handle / handle
 - rename child_id -> left_child / child_handle
+- if let guards on match arms were recently stabilized
 
 ## bugs
 

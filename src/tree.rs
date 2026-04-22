@@ -642,7 +642,9 @@ impl Tree {
 }
 
 /// for data that each thread should keep track of for itself.
-/// dropping this will leak memory, but is safe.
+/// basically just for allocations.
+/// dropping this may leak memory, but is safe.
+#[derive(Debug, Default)]
 pub(crate) struct ThreadData {
     /// the owned group of nodes we allocated in `refine`
     handle: Option<NodeHandle>,
@@ -652,16 +654,6 @@ pub(crate) struct ThreadData {
     /// should be before use, but not when done.
     vec_handle: Vec<NodeHandle>,
     vec_handle_u32: Vec<(NodeHandle, u32)>,
-}
-impl Default for ThreadData {
-    fn default() -> Self {
-        Self {
-            handle: None,
-            block: None,
-            vec_handle: Vec::new(),
-            vec_handle_u32: Vec::new(),
-        }
-    }
 }
 
 use rbg::*;

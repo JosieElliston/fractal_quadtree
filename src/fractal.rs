@@ -1,8 +1,8 @@
-use core::panic;
 use std::{
     sync::{
         Arc, Mutex, RwLock, TryLockError,
         atomic::{AtomicBool, AtomicU64, Ordering},
+        mpsc::{self, Receiver, SendError, Sender},
     },
     thread,
     time::{Duration, Instant},
@@ -14,16 +14,8 @@ use eframe::egui::{self, Color32};
 use crate::{
     complex::{CameraMap, Window, fixed::*},
     sample,
-    tree::{Moment, NodeHandle, ThreadData, Tree},
+    tree::{Moment, NodeHandle, Tree},
 };
-
-// type SampleFn = dyn Fn((Real, Imag)) -> Color32;
-
-pub(crate) static ELAPSED_NANOS: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
-pub(crate) static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-pub(crate) static WORKER_HIST: [std::sync::atomic::AtomicU64; 128] =
-    [const { std::sync::atomic::AtomicU64::new(0) }; 128];
 
 /// this mostly exists so i don't duplicate doc comments
 struct Shared {
@@ -46,410 +38,558 @@ struct Shared {
     /// how many samples were taken since we last cleared this?
     sample_counter: Arc<AtomicU64>,
     shared_texture: SharedTexture,
+    /// set by the main thread to ask worker threads to exit.
+    kill: Arc<AtomicBool>,
 }
 
-/// owned by the pool/main thread
-struct WorkerHandle {
-    handle: thread::JoinHandle<()>,
-}
+pub(crate) use main_thread::*;
+mod main_thread {
+    use super::*;
 
-pub(crate) struct Fractal {
-    shared: Shared,
-    workers: Vec<WorkerHandle>,
-}
-impl Fractal {
-    pub(crate) fn new_metabrot() -> Self {
-        let thread_count = (thread::available_parallelism()
-            .map(|thread_count| thread_count.get())
-            .unwrap_or(1)
-            - 1)
-        .max(1);
-        let shared = Shared {
-            tree: Arc::new(Tree::new()),
-            now: Arc::new(Atomic::new(Moment::default())),
-            window: Arc::new(RwLock::new(None)),
-            sample_counter: Arc::new(AtomicU64::new(0)),
-            shared_texture: SharedTexture::default(),
-        };
-        let workers = (0..thread_count)
-            .map(|thread_i| {
-                let shared = Shared {
-                    tree: Arc::clone(&shared.tree),
-                    now: Arc::clone(&shared.now),
-                    window: Arc::clone(&shared.window),
-                    sample_counter: Arc::clone(&shared.sample_counter),
-                    shared_texture: Arc::clone(&shared.shared_texture),
-                };
-                let handle = thread::Builder::new()
-                    .name(format!("pool {}", thread_i))
-                    .spawn(move || {
-                        WorkerLocal {
-                            shared,
-                            thread_i,
-                            thread_data: ThreadData::default(),
-                            to_be_colored: Vec::with_capacity(4),
-                        }
-                        .run()
-                    })
-                    .unwrap();
-                WorkerHandle { handle }
-            })
-            .collect();
-        Self { shared, workers }
+    /// owned by the pool/main thread
+    struct WorkerHandle {
+        handle: thread::JoinHandle<()>,
+        timer: MultiTimer,
+        timer_receiver: Receiver<MultiTimer>,
     }
 
-    pub(crate) fn tree(&self) -> &Arc<Tree> {
-        &self.shared.tree
+    pub(crate) struct Fractal {
+        shared: Shared,
+        workers: Vec<WorkerHandle>,
     }
-
-    pub(crate) fn thread_count(&self) -> usize {
-        self.workers.len()
-    }
-
-    // pub(crate) fn join(&mut self) {
-    //     self.pool.join();
-    // }
-
-    /// updates the window we're sampling in.
-    /// should be called every frame.
-    /// returns how many samples were taken since the last time this was called.
-    /// TODO: rename.
-    #[cfg_attr(feature = "profiling", inline(never))]
-    pub(crate) fn enable_sampling(&mut self, window: Window) -> u64 {
-        // update the shared window
-        {
-            let mut shared_window = self.shared.window.write().expect("window poisoned");
-            *shared_window = Some(window);
-        }
-
-        self.shared.sample_counter.swap(0, Ordering::SeqCst)
-    }
-
-    /// sets the shared window to `None`
-    #[cfg_attr(feature = "profiling", inline(never))]
-    pub(crate) fn disable_sampling(&mut self) {
-        let mut shared_window = self.shared.window.write().expect("window poisoned");
-        *shared_window = None;
-    }
-
-    /// it's optional to call this every frame
-    #[cfg_attr(feature = "profiling", inline(never))]
-    pub(crate) fn begin_rendering(&mut self, camera_map: CameraMap, needs_full_redraw: bool) {
-        // acquire exclusive access to shared_texture
-        // do it now instead of at each access
-        // TODO: we shouldn't need to block here once i've gotten rid of `RwLock`
-        let mut shared_texture = self
-            .shared
-            .shared_texture
-            .write()
-            .expect("shared_texture poisoned");
-        // let mut shared_texture = match self.shared_texture.try_write() {
-        //     Ok(shared_texture) => shared_texture,
-        //     Err(TryLockError::Poisoned(_)) => panic!("shared_texture poisoned"),
-        //     Err(TryLockError::WouldBlock) => panic!("we should have exclusive access"),
-        // };
-
-        // update now and prev_frame_start
-        {
-            // i can't just fetch_add(1) because of how the atomic crate works
-            let prev_frame_start = self.shared.now.load(Ordering::SeqCst);
-            self.shared
-                .now
-                .store(prev_frame_start + 1, Ordering::SeqCst);
-            shared_texture.prev_frame_start = if needs_full_redraw {
-                Moment::MIN
-            } else {
-                prev_frame_start
+    impl Fractal {
+        pub(crate) fn new_metabrot() -> Self {
+            let thread_count = (thread::available_parallelism()
+                .map(|thread_count| thread_count.get())
+                .unwrap_or(1)
+                - 1)
+            .max(1);
+            let shared = Shared {
+                tree: Arc::new(Tree::new()),
+                now: Arc::new(Atomic::new(Moment::default())),
+                window: Arc::new(RwLock::new(None)),
+                sample_counter: Arc::new(AtomicU64::new(0)),
+                shared_texture: SharedTexture::default(),
+                kill: Arc::new(AtomicBool::new(false)),
             };
+            let workers = (0..thread_count)
+                .map(|thread_i| {
+                    let shared = Shared {
+                        tree: Arc::clone(&shared.tree),
+                        now: Arc::clone(&shared.now),
+                        window: Arc::clone(&shared.window),
+                        sample_counter: Arc::clone(&shared.sample_counter),
+                        shared_texture: Arc::clone(&shared.shared_texture),
+                        kill: Arc::clone(&shared.kill),
+                    };
+                    let (timer_sender, timer_receiver) = mpsc::channel();
+                    let handle = thread::Builder::new()
+                        .name(format!("pool {}", thread_i))
+                        .spawn(move || WorkerLocal::new(shared, thread_i, timer_sender).run())
+                        .unwrap();
+                    WorkerHandle {
+                        handle,
+                        timer: MultiTimer::default(),
+                        timer_receiver,
+                    }
+                })
+                .collect();
+            Self { shared, workers }
         }
 
-        // resize self.texture if needed
-        {
-            let (width, height) = (
-                camera_map.rect().width() as usize,
-                camera_map.rect().height() as usize,
-            );
-            if shared_texture.needs_resize(width, height) {
-                shared_texture.resize(width, height);
+        pub(crate) fn tree(&self) -> &Arc<Tree> {
+            &self.shared.tree
+        }
+
+        pub(crate) fn thread_count(&self) -> usize {
+            self.workers.len()
+        }
+
+        /// `&mut self` bc we need to receive updates.
+        pub(crate) fn timers(&mut self) -> Vec<MultiTimer> {
+            for worker in &mut self.workers {
+                while let Ok(timer) = worker.timer_receiver.try_recv() {
+                    worker.timer += timer;
+                }
+            }
+            self.workers
+                .iter()
+                .map(|worker| worker.timer.clone())
+                .collect()
+        }
+        pub(crate) fn reset_timers(&mut self) {
+            for worker in &mut self.workers {
+                worker.timer.reset();
             }
         }
 
-        // reset the texture locks
-        {
-            shared_texture.reset_locks(camera_map);
+        pub(crate) fn join(&mut self) {
+            self.shared.kill.store(true, Ordering::Relaxed);
+            for worker in self.workers.drain(..) {
+                worker.handle.join().expect("worker thread panicked");
+            }
         }
-    }
 
-    /// writes to the texture handle
-    #[cfg_attr(feature = "profiling", inline(never))]
-    pub(crate) fn finish_rendering(&mut self, handle: &mut egui::TextureHandle) {
-        // wait for all lines to finish
-        {
-            self.shared
+        /// updates the window we're sampling in.
+        /// should be called every frame.
+        /// returns how many samples were taken since the last time this was called.
+        /// TODO: rename.
+        #[cfg_attr(feature = "profiling", inline(never))]
+        pub(crate) fn enable_sampling(&mut self, window: Window) -> u64 {
+            // update the shared window
+            {
+                let mut shared_window = self.shared.window.write().expect("window poisoned");
+                *shared_window = Some(window);
+            }
+
+            self.shared.sample_counter.swap(0, Ordering::SeqCst)
+        }
+
+        /// sets the shared window to `None`
+        #[cfg_attr(feature = "profiling", inline(never))]
+        pub(crate) fn disable_sampling(&mut self) {
+            let mut shared_window = self.shared.window.write().expect("window poisoned");
+            *shared_window = None;
+        }
+
+        /// it's optional to call this every frame
+        #[cfg_attr(feature = "profiling", inline(never))]
+        pub(crate) fn begin_rendering(&mut self, camera_map: CameraMap, needs_full_redraw: bool) {
+            // acquire exclusive access to shared_texture
+            // do it now instead of at each access
+            // TODO: we shouldn't need to block here once i've gotten rid of `RwLock`
+            let mut shared_texture = self
+                .shared
                 .shared_texture
-                .try_read()
-                .expect("no one should be writing")
-                .block_until_finished();
+                .write()
+                .expect("shared_texture poisoned");
+            // let mut shared_texture = match self.shared_texture.try_write() {
+            //     Ok(shared_texture) => shared_texture,
+            //     Err(TryLockError::Poisoned(_)) => panic!("shared_texture poisoned"),
+            //     Err(TryLockError::WouldBlock) => panic!("we should have exclusive access"),
+            // };
+
+            // update now and prev_frame_start
+            {
+                // i can't just fetch_add(1) because of how the atomic crate works
+                let prev_frame_start = self.shared.now.load(Ordering::SeqCst);
+                self.shared
+                    .now
+                    .store(prev_frame_start + 1, Ordering::SeqCst);
+                shared_texture.prev_frame_start = if needs_full_redraw {
+                    Moment::MIN
+                } else {
+                    prev_frame_start
+                };
+            }
+
+            // resize self.texture if needed
+            {
+                let (width, height) = (
+                    camera_map.rect().width() as usize,
+                    camera_map.rect().height() as usize,
+                );
+                if shared_texture.needs_resize(width, height) {
+                    shared_texture.resize(width, height);
+                }
+            }
+
+            // reset the texture locks
+            {
+                shared_texture.reset_locks(camera_map);
+            }
         }
-        // {
-        //     // TODO: do this better
-        //     while self
-        //         .texture_lock_finish
-        //         .iter()
-        //         .find(|lock| !lock.load(Ordering::Relaxed))
-        //         .is_some()
-        //     {
-        //         std::thread::yield_now();
-        //     }
-        // }
 
-        // write to assert that we have exclusive access
-        // TODO: we shouldn't need to block here once i've gotten rid of `RwLock`
-        let mut shared_texture = self
-            .shared
-            .shared_texture
-            .write()
-            .expect("shared_texture poisoned");
-        // let mut shared_texture = match self.shared_texture.try_write() {
-        //     Ok(shared_texture) => shared_texture,
-        //     Err(TryLockError::Poisoned(_)) => panic!("shared_texture poisoned"),
-        //     Err(TryLockError::WouldBlock) => panic!("we should have exclusive access"),
-        // };
+        /// writes to the texture handle
+        #[cfg_attr(feature = "profiling", inline(never))]
+        pub(crate) fn finish_rendering(&mut self, handle: &mut egui::TextureHandle) {
+            // wait for all lines to finish
+            {
+                self.shared
+                    .shared_texture
+                    .try_read()
+                    .expect("no one should be writing")
+                    .block_until_finished();
+            }
+            // {
+            //     // TODO: do this better
+            //     while self
+            //         .texture_lock_finish
+            //         .iter()
+            //         .find(|lock| !lock.load(Ordering::Relaxed))
+            //         .is_some()
+            //     {
+            //         std::thread::yield_now();
+            //     }
+            // }
 
-        assert!(
-            shared_texture.camera_map().is_some(),
-            "i should change this in the future so that a worker resets the camera, but right now that's the main thread's job"
-        );
-        *shared_texture.camera_map_mut() = None;
+            // write to assert that we have exclusive access
+            // TODO: we shouldn't need to block here once i've gotten rid of `RwLock`
+            let mut shared_texture = self
+                .shared
+                .shared_texture
+                .write()
+                .expect("shared_texture poisoned");
+            // let mut shared_texture = match self.shared_texture.try_write() {
+            //     Ok(shared_texture) => shared_texture,
+            //     Err(TryLockError::Poisoned(_)) => panic!("shared_texture poisoned"),
+            //     Err(TryLockError::WouldBlock) => panic!("we should have exclusive access"),
+            // };
 
-        // write to the texture handle
-        shared_texture.set_texture(handle);
+            assert!(
+                shared_texture.camera_map().is_some(),
+                "i should change this in the future so that a worker resets the camera, but right now that's the main thread's job"
+            );
+            *shared_texture.camera_map_mut() = None;
+
+            // write to the texture handle
+            shared_texture.set_texture(handle);
+        }
+    }
+
+    pub(crate) use rayon_fractal::*;
+    mod rayon_fractal {
+        use rayon::prelude::*;
+
+        use super::*;
+
+        pub(crate) fn render_mandelbrot(
+            handle: &mut egui::TextureHandle,
+            camera_map: &CameraMap,
+            (z0_real, z0_imag): (Real, Imag),
+        ) {
+            let colors = camera_map
+                .pixels()
+                .flatten()
+                .collect::<Vec<_>>()
+                .into_par_iter()
+                .map(|(_rect, pixel)| {
+                    if let Some(pixel) = pixel {
+                        let c = pixel.mid();
+                        sample::quadratic_map((z0_real, z0_imag), c).color()
+                    } else {
+                        Color32::MAGENTA
+                    }
+                })
+                .collect::<Vec<_>>();
+            set_texture(
+                handle,
+                [camera_map.pixels_width(), camera_map.pixels_height()],
+                colors,
+            );
+        }
+
+        pub(crate) fn render_color(handle: &mut egui::TextureHandle, camera_map: &CameraMap) {
+            let colors = camera_map
+                .pixels()
+                .flatten()
+                .collect::<Vec<_>>()
+                .into_par_iter()
+                .map(|(_rect, pixel)| {
+                    if pixel.is_some() {
+                        Color32::BLACK
+                    } else {
+                        Color32::MAGENTA
+                    }
+                })
+                .collect::<Vec<_>>();
+            set_texture(
+                handle,
+                [camera_map.pixels_width(), camera_map.pixels_height()],
+                colors,
+            );
+        }
     }
 }
 
-fn set_texture(handle: &mut egui::TextureHandle, size: [usize; 2], colors: Vec<Color32>) {
-    handle.set(
-        egui::ColorImage::new(size, colors),
-        egui::TextureOptions::NEAREST,
-    );
-}
-
-pub(crate) use rayon_fractal::*;
-mod rayon_fractal {
-    use rayon::prelude::*;
+use worker_thread::*;
+mod worker_thread {
+    use crate::tree::ThreadData;
 
     use super::*;
 
-    pub(crate) fn render_mandelbrot(
-        handle: &mut egui::TextureHandle,
-        camera_map: &CameraMap,
-        (z0_real, z0_imag): (Real, Imag),
-    ) {
-        let colors = camera_map
-            .pixels()
-            .flatten()
-            .collect::<Vec<_>>()
-            .into_par_iter()
-            .map(|(_rect, pixel)| {
-                if let Some(pixel) = pixel {
-                    let c = pixel.mid();
-                    sample::quadratic_map((z0_real, z0_imag), c).color()
-                } else {
-                    Color32::MAGENTA
-                }
-            })
-            .collect::<Vec<_>>();
-        set_texture(
-            handle,
-            [camera_map.pixels_width(), camera_map.pixels_height()],
-            colors,
-        );
+    /// owned by the worker thread
+    pub(super) struct WorkerLocal {
+        shared: Shared,
+        /// `usize` bc [`thread::available_parallelism`] returns a `usize`.
+        thread_i: usize,
+        thread_data: ThreadData,
+        /// nodes we split and need to find the color of.
+        /// note that the len should be <= 4.
+        /// TODO: rename
+        to_be_colored: Vec<NodeHandle>,
+        timer: MultiTimer,
+        timer_sender: Sender<MultiTimer>,
+        last_sent: Instant,
     }
+    impl WorkerLocal {
+        // make sure it's ever full
+        const TIMER_SEND_INTERVAL: Duration = Duration::from_millis(1);
+        // const TIMER_SEND_INTERVAL: Duration = Duration::from_millis(100);
 
-    pub(crate) fn render_color(handle: &mut egui::TextureHandle, camera_map: &CameraMap) {
-        let colors = camera_map
-            .pixels()
-            .flatten()
-            .collect::<Vec<_>>()
-            .into_par_iter()
-            .map(|(_rect, pixel)| {
-                if pixel.is_some() {
-                    Color32::BLACK
-                } else {
-                    Color32::MAGENTA
-                }
-            })
-            .collect::<Vec<_>>();
-        set_texture(
-            handle,
-            [camera_map.pixels_width(), camera_map.pixels_height()],
-            colors,
-        );
-    }
-}
+        pub(super) fn new(
+            shared: Shared,
+            thread_i: usize,
+            timer_sender: Sender<MultiTimer>,
+        ) -> Self {
+            Self {
+                shared,
+                thread_i,
+                thread_data: ThreadData::default(),
+                to_be_colored: Vec::with_capacity(4),
+                timer: MultiTimer::default(),
+                timer_sender,
+                last_sent: Instant::now(),
+            }
+        }
 
-/// owned by the worker thread
-struct WorkerLocal {
-    shared: Shared,
-    thread_i: usize,
-    thread_data: ThreadData,
-    /// nodes we split and need to find the color of.
-    /// note that the len should be <= 4.
-    /// TODO: rename
-    to_be_colored: Vec<NodeHandle>,
-}
-impl WorkerLocal {
-    fn run(mut self) {
-        loop {
-            // rendering is highest priority
-            // followed by sampling
-            // followed by splitting
-
-            if let Some(shared_texture) = match &self.shared.shared_texture.try_read() {
-                Ok(shared_texture) => Some(shared_texture),
+        fn try_draw(&mut self) -> Option<()> {
+            let shared_texture = match self.shared.shared_texture.try_read() {
+                Ok(shared_texture) => shared_texture,
                 Err(TryLockError::Poisoned(_)) => panic!("shared_texture poisoned"),
                 Err(TryLockError::WouldBlock) => {
                     // the main thread is rendering
-                    None
+                    return None;
                 }
-            } && let Some(camera_map) = shared_texture.camera_map()
-            {
-                // shared_texture.camera_map() is `None` if the main thread has started but not finished rendering
+            };
+            // shared_texture.camera_map() is `None` if the main thread has started but not finished rendering
+            let camera_map = shared_texture.camera_map().as_ref()?;
 
-                // let prev_frame_start = self.shared.now.load(Ordering::SeqCst) - 1;
-                let prev_frame_start = shared_texture.prev_frame_start;
+            // let prev_frame_start = self.shared.now.load(Ordering::SeqCst) - 1;
+            let prev_frame_start = shared_texture.prev_frame_start;
 
-                // find a line for us to render
-                // by just trying to lock each line's texture lock
-                // TODO: do this better
-                'outer: {
-                    for (line_i, lock) in shared_texture.texture_lock_begin().iter().enumerate() {
-                        if !lock.load(Ordering::Relaxed)
-                            && lock
-                                .compare_exchange_weak(
-                                    false,
-                                    true,
-                                    Ordering::Acquire,
-                                    Ordering::Relaxed,
-                                )
-                                .is_ok()
+            // find a line for us to render
+            // by just trying to lock each line's texture lock
+            // TODO: do this better
+            'outer: {
+                for (line_i, lock) in shared_texture.texture_lock_begin().iter().enumerate() {
+                    if !lock.load(Ordering::Relaxed)
+                        && lock
+                            .compare_exchange_weak(
+                                false,
+                                true,
+                                Ordering::Acquire,
+                                Ordering::Relaxed,
+                            )
+                            .is_ok()
+                    {
+                        let mut l = shared_texture.texture()[line_i]
+                            .try_lock()
+                            .expect("we just locked it");
+
                         {
-                            // let mut t = self.texture[i].clone();
-                            // let mut l = &mut *self.texture[i];
-                            // let l = Arc::get_mut(&mut t).expect("we just locked it");
-                            // let t = self.texture[i].as_ref();
-                            // let l = &Arc(t).expect("we just locked it");
-                            // self.texture[i].get_mut()
-                            // let l = Arc::get_mut(&mut self.texture[i]).expect("we just locked it");
-                            let mut l = shared_texture.texture()[line_i]
-                                .try_lock()
-                                .expect("we just locked it");
-
-                            {
-                                let line_needs_redraw = prev_frame_start == Moment::MIN
-                                    || 'line_needs_redraw: {
-                                        let Some((_, Some(first_pixel))) =
-                                            camera_map.pixels().nth(line_i).unwrap().next()
-                                        else {
-                                            break 'line_needs_redraw true;
-                                        };
-                                        let Some((_, Some(last_pixel))) =
-                                            camera_map.pixels().nth(line_i).unwrap().last()
-                                        else {
-                                            break 'line_needs_redraw true;
-                                        };
-                                        debug_assert_eq!(
-                                            first_pixel.imag_mid(),
-                                            last_pixel.imag_mid()
-                                        );
-                                        let imag = first_pixel.imag_mid();
-                                        let real_lo = first_pixel.real_mid();
-                                        let real_hi = last_pixel.real_mid();
-                                        self.shared.tree.any_on_line_needs_redraw(
-                                            real_lo,
-                                            real_hi,
-                                            imag,
-                                            prev_frame_start,
-                                            &mut self.thread_data,
-                                        )
+                            // TODO: do more of this, perhaps bisection bc that's easier than real spacial stuff
+                            let line_needs_redraw = prev_frame_start == Moment::MIN
+                                || 'line_needs_redraw: {
+                                    let Some((_, Some(first_pixel))) =
+                                        camera_map.pixels().nth(line_i).unwrap().next()
+                                    else {
+                                        break 'line_needs_redraw true;
                                     };
+                                    let Some((_, Some(last_pixel))) =
+                                        camera_map.pixels().nth(line_i).unwrap().last()
+                                    else {
+                                        break 'line_needs_redraw true;
+                                    };
+                                    debug_assert_eq!(first_pixel.imag_mid(), last_pixel.imag_mid());
+                                    let imag = first_pixel.imag_mid();
+                                    let real_lo = first_pixel.real_mid();
+                                    let real_hi = last_pixel.real_mid();
+                                    self.shared.tree.any_on_line_needs_redraw(
+                                        real_lo,
+                                        real_hi,
+                                        imag,
+                                        prev_frame_start,
+                                        &mut self.thread_data,
+                                    )
+                                };
 
-                                if !line_needs_redraw {
-                                    // debug draw unchanged lines pink
-                                    // l.iter_mut()
-                                    //     .for_each(|pixel| *pixel = Color32::from_rgb(255, 50, 255));
-                                } else {
-                                    for ((_rect, pixel), target) in
-                                        camera_map.pixels().nth(line_i).unwrap().zip(l.iter_mut())
-                                    {
-                                        *target = if let Some(pixel) = pixel {
-                                            if let Some(color) = self
-                                                .shared
-                                                .tree
-                                                .color_of_pixel(pixel, prev_frame_start)
-                                            {
-                                                color
-                                            } else {
-                                                // we proved that the color hasn't changed
-                                                // debug draw unchanged pixels blue
-                                                // Color32::from_rgb(50, 50, 255)
-                                                continue;
-                                            }
+                            if !line_needs_redraw {
+                                // debug draw unchanged lines pink
+                                // l.iter_mut()
+                                //     .for_each(|pixel| *pixel = Color32::from_rgb(255, 50, 255));
+                            } else {
+                                for ((_rect, pixel), target) in
+                                    camera_map.pixels().nth(line_i).unwrap().zip(l.iter_mut())
+                                {
+                                    *target = if let Some(pixel) = pixel {
+                                        if let Some(color) =
+                                            self.shared.tree.color_of_pixel(pixel, prev_frame_start)
+                                        {
+                                            color
                                         } else {
-                                            Color32::MAGENTA
-                                        };
-                                    }
+                                            // we proved that the color hasn't changed
+                                            // debug draw unchanged pixels blue
+                                            // Color32::from_rgb(50, 50, 255)
+                                            continue;
+                                        }
+                                    } else {
+                                        Color32::MAGENTA
+                                    };
                                 }
                             }
-                            debug_assert!(
-                                !shared_texture.texture_lock_finish()[line_i]
-                                    .load(Ordering::SeqCst)
-                            );
-                            shared_texture.texture_lock_finish()[line_i]
-                                .store(true, Ordering::SeqCst);
-                            break 'outer;
                         }
+                        debug_assert!(
+                            !shared_texture.texture_lock_finish()[line_i].load(Ordering::SeqCst)
+                        );
+                        shared_texture.texture_lock_finish()[line_i].store(true, Ordering::SeqCst);
+                        break 'outer;
                     }
-                    // no break
-                    // all locks have been set
-                    // shared_texture.reset_camera_map();
-                    // self.camera_map = None;
                 }
-            } else if let Some(handle) = self.to_be_colored.pop() {
-                // sample
-                // dbg!("sample");
-                let (real, imag) = self.shared.tree.mid_of_node_handle(handle);
-                let color = sample::metabrot_sample((real, imag)).color();
-                self.shared
-                    .tree
-                    .insert(handle, color, self.shared.now.load(Ordering::SeqCst));
-                self.shared.sample_counter.fetch_add(1, Ordering::Relaxed);
-            } else if let Some(window) = match self.shared.window.try_read() {
-                Ok(window) => *window,
+                // no break
+                // all locks have been set
+                // shared_texture.reset_camera_map();
+                // self.camera_map = None;
+            }
+
+            Some(())
+        }
+
+        fn try_sample(&mut self) -> Option<()> {
+            let handle = self.to_be_colored.pop()?;
+
+            // dbg!("sample");
+            let (real, imag) = self.shared.tree.mid_of_node_handle(handle);
+            let color = sample::metabrot_sample((real, imag)).color();
+            self.shared
+                .tree
+                .insert(handle, color, self.shared.now.load(Ordering::SeqCst));
+            self.shared.sample_counter.fetch_add(1, Ordering::Relaxed);
+
+            Some(())
+        }
+
+        fn try_split(&mut self) -> Option<()> {
+            let window = match self.shared.window.try_read() {
+                Ok(window) => *window.as_ref()?,
                 Err(TryLockError::Poisoned(_)) => panic!("window poisoned"),
                 Err(TryLockError::WouldBlock) => {
                     // the main thread is updating the window
-                    None
+                    return None;
                 }
-            } {
-                // split
-                // dbg!("split");
-                debug_assert!(self.to_be_colored.is_empty());
-                if let Some(handles) = self.shared.tree.refine(
-                    window,
-                    self.shared.now.load(Ordering::SeqCst),
-                    &mut self.thread_data,
-                ) {
-                    // dbg!("refined");
-                    self.to_be_colored.extend(handles);
-                }
-            } else {
-                // dbg!("idle");
-                // thread::yield_now();
-                // weird workaround, but it fixing freezing
-                // for when pausing sampling or the fractal is outside the window.
-                // thread::sleep(Duration::from_millis(1));
+            };
+
+            // dbg!("split");
+            debug_assert!(self.to_be_colored.is_empty());
+            if let Some(handles) = self.shared.tree.refine(
+                window,
+                self.shared.now.load(Ordering::SeqCst),
+                &mut self.thread_data,
+            ) {
+                // dbg!("refined");
+                self.to_be_colored.extend(handles);
             }
+            Some(())
+        }
+
+        pub(super) fn run(mut self) {
+            loop {
+                if self.shared.kill.load(Ordering::Relaxed) {
+                    break;
+                }
+
+                // rendering is highest priority
+                // followed by sampling
+                // followed by splitting
+
+                let start = Instant::now();
+
+                if self.try_draw().is_some() {
+                    self.timer.draw.add(start.elapsed());
+                } else if self.try_sample().is_some() {
+                    self.timer.sample.add(start.elapsed());
+                } else if self.try_split().is_some() {
+                    self.timer.split.add(start.elapsed());
+                } else {
+                    // dbg!("idle");
+                    // thread::yield_now();
+                    // weird workaround, but it fixing freezing
+                    // for when pausing sampling or the fractal is outside the window.
+                    // except it doesn't work in release mode.
+                    thread::sleep(Duration::from_millis(10));
+
+                    self.timer.idle.add(start.elapsed());
+                }
+
+                // update the shared timer rarely for performance
+                if self.last_sent.elapsed() >= Self::TIMER_SEND_INTERVAL {
+                    match self.timer_sender.send(self.timer.clone()) {
+                        Ok(()) => {
+                            self.timer.reset();
+                            self.last_sent = Instant::now();
+                        }
+                        Err(SendError(_timer)) => {
+                            eprintln!(
+                                "timer_receiver disconnected, last sent {:?} ago",
+                                self.last_sent.elapsed()
+                            );
+                        }
+                    }
+                    self.last_sent = Instant::now();
+                }
+            }
+        }
+    }
+}
+
+pub(crate) use timer::*;
+mod timer {
+    use std::ops;
+
+    use super::*;
+
+    #[derive(Debug, Clone, Default)]
+    pub(crate) struct Timer {
+        elapsed: Duration,
+        count: u64,
+    }
+    impl Timer {
+        pub(super) fn add(&mut self, elapsed: Duration) {
+            self.elapsed += elapsed;
+            self.count += 1;
+        }
+
+        pub(crate) fn reset(&mut self) {
+            self.elapsed = Duration::ZERO;
+            self.count = 0;
+        }
+
+        pub(crate) fn average(&self) -> Option<Duration> {
+            (self.elapsed.as_nanos() as u64)
+                .checked_div(self.count)
+                .map(Duration::from_nanos)
+        }
+    }
+    impl ops::AddAssign for Timer {
+        fn add_assign(&mut self, rhs: Self) {
+            self.elapsed += rhs.elapsed;
+            self.count += rhs.count;
+        }
+    }
+
+    /// this exists for debugging / UX,
+    /// and is not needed for the main algorithm.
+    #[derive(Debug, Clone, Default)]
+    pub(crate) struct MultiTimer {
+        pub(crate) draw: Timer,
+        pub(crate) sample: Timer,
+        pub(crate) split: Timer,
+        pub(crate) idle: Timer,
+    }
+    impl MultiTimer {
+        pub(crate) fn reset(&mut self) {
+            self.draw.reset();
+            self.sample.reset();
+            self.split.reset();
+            self.idle.reset();
+        }
+    }
+    impl ops::AddAssign for MultiTimer {
+        fn add_assign(&mut self, rhs: Self) {
+            self.draw += rhs.draw;
+            self.sample += rhs.sample;
+            self.split += rhs.split;
+            self.idle += rhs.idle;
         }
     }
 }
@@ -629,4 +769,11 @@ mod shared_texture {
             set_texture(handle, size, colors);
         }
     }
+}
+
+fn set_texture(handle: &mut egui::TextureHandle, size: [usize; 2], colors: Vec<Color32>) {
+    handle.set(
+        egui::ColorImage::new(size, colors),
+        egui::TextureOptions::NEAREST,
+    );
 }
