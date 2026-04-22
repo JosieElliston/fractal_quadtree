@@ -60,9 +60,11 @@ impl App {
             dts: egui::util::History::new(10..1000, 1.0),
             sample_counts: egui::util::History::new(10..1000, 5.0),
             timers: egui::util::History::new(10..1000, 5.0),
-            texture: cc
-                .egui_ctx
-                .load_texture("fractal", egui::ColorImage::example(), egui::TextureOptions::NEAREST),
+            texture: cc.egui_ctx.load_texture(
+                "fractal",
+                egui::ColorImage::example(),
+                egui::TextureOptions::NEAREST,
+            ),
             sampling: true,
             draw_crosshair: false,
             current_fractal: CurrentFractal::Metabrot,
@@ -91,7 +93,8 @@ impl App {
         {
             match self.current_fractal {
                 CurrentFractal::Metabrot => {
-                    self.metabrot.begin_rendering(primary_camera_map.clone(), needs_full_redraw);
+                    self.metabrot
+                        .begin_rendering(primary_camera_map.clone(), needs_full_redraw);
                     self.metabrot.finish_rendering(&mut self.texture);
                 }
                 CurrentFractal::Mandelbrot => {
@@ -111,14 +114,17 @@ impl App {
             );
         }
 
-        let draw_complex_circle_stroke = |(c_real, c_imag): (Real, Imag), rad: Fixed, stroke: egui::Stroke| {
-            painter.circle_stroke(
-                secondary_camera_map.complex_to_pos((c_real, c_imag)),
-                secondary_camera_map.delta_real_to_vec1(rad),
-                stroke,
-            );
-        };
-        let draw_complex_segment = |(c1_real, c1_imag): (Real, Imag), (c2_real, c2_imag): (Real, Imag), stroke: egui::Stroke| {
+        let draw_complex_circle_stroke =
+            |(c_real, c_imag): (Real, Imag), rad: Fixed, stroke: egui::Stroke| {
+                painter.circle_stroke(
+                    secondary_camera_map.complex_to_pos((c_real, c_imag)),
+                    secondary_camera_map.delta_real_to_vec1(rad),
+                    stroke,
+                );
+            };
+        let draw_complex_segment = |(c1_real, c1_imag): (Real, Imag),
+                                    (c2_real, c2_imag): (Real, Imag),
+                                    stroke: egui::Stroke| {
             painter.line_segment(
                 [
                     secondary_camera_map.complex_to_pos((c1_real, c1_imag)),
@@ -139,10 +145,13 @@ impl App {
             // let window = Window::from_center_size(Fixed::ZERO, Fixed::ZERO, 4.0.into(), 4.0.into());
             let Some(window) = (|| {
                 Window::from_mid_rad(
-                    (f64::from(z0_imag) * f64::from(z0_imag) - f64::from(z0_real) * f64::from(z0_real))
+                    (f64::from(z0_imag) * f64::from(z0_imag)
+                        - f64::from(z0_real) * f64::from(z0_real))
+                    .try_into()
+                    .ok()?,
+                    (-2.0 * f64::from(z0_real) * f64::from(z0_imag))
                         .try_into()
                         .ok()?,
-                    (-2.0 * f64::from(z0_real) * f64::from(z0_imag)).try_into().ok()?,
                     2.0.try_into().unwrap(),
                     2.0.try_into().unwrap(),
                 )
@@ -196,11 +205,17 @@ impl App {
                 let mut deepest_point = (Fixed::ZERO, Fixed::ZERO);
                 // we want to look through all the points at a coarse grain before resampling
                 let mut to_resample = Vec::with_capacity(sample::WIDTH0 * sample::WIDTH0);
-                let cell_rad =
-                    { (window.real_rad().div_f64(sample::WIDTH0 as f64)).max(window.imag_rad().div_f64(sample::WIDTH0 as f64)) };
+                let cell_rad = {
+                    (window.real_rad().div_f64(sample::WIDTH0 as f64))
+                        .max(window.imag_rad().div_f64(sample::WIDTH0 as f64))
+                };
                 // draw initial points
-                for (c_real, c_imag) in window.grid_centers(sample::WIDTH0, sample::WIDTH0).flatten() {
-                    let (sample, distance) = sample::distance_estimator((z0_real, z0_imag), (c_real, c_imag));
+                for (c_real, c_imag) in window
+                    .grid_centers(sample::WIDTH0, sample::WIDTH0)
+                    .flatten()
+                {
+                    let (sample, distance) =
+                        sample::distance_estimator((z0_real, z0_imag), (c_real, c_imag));
                     if sample.depth > deepest {
                         deepest = sample.depth;
                         deepest_point = (c_real, c_imag);
@@ -221,12 +236,17 @@ impl App {
                     // TODO: try sorting the vec by distance estimate
                     // draw points that got resampled
                     for (c0_real, c0_imag) in to_resample {
-                        let resample_window = Window::from_mid_rad(c0_real, c0_imag, cell_rad, cell_rad).unwrap();
-                        for (c_real, c_imag) in resample_window.grid_centers(sample::WIDTH1, sample::WIDTH1).flatten() {
+                        let resample_window =
+                            Window::from_mid_rad(c0_real, c0_imag, cell_rad, cell_rad).unwrap();
+                        for (c_real, c_imag) in resample_window
+                            .grid_centers(sample::WIDTH1, sample::WIDTH1)
+                            .flatten()
+                        {
                             if (c0_real, c0_imag) == (c_real, c_imag) {
                                 continue;
                             }
-                            let sample = sample::quadratic_map((z0_real, z0_imag), (c_real, c_imag));
+                            let sample =
+                                sample::quadratic_map((z0_real, z0_imag), (c_real, c_imag));
                             if sample.depth > deepest {
                                 deepest = sample.depth;
                                 deepest_point = (c_real, c_imag);
@@ -276,14 +296,16 @@ impl App {
                 let Some(z0) = z0 else {
                     return Some(());
                 };
-                let Some(mut c) = secondary_camera_map.pos_to_complex(ctx.input(|i| i.pointer.latest_pos().unwrap_or_default()))
+                let Some(mut c) = secondary_camera_map
+                    .pos_to_complex(ctx.input(|i| i.pointer.latest_pos().unwrap_or_default()))
                 else {
                     return Some(());
                 };
 
                 const MAX_STEPS: usize = 8;
                 for _ in 0..MAX_STEPS {
-                    let (distance, (_grad_real, _grad_imag)) = sample::distance_estimator_gradient(z0, c)?;
+                    let (distance, (_grad_real, _grad_imag)) =
+                        sample::distance_estimator_gradient(z0, c)?;
                     draw_complex_circle_stroke(c, distance, egui::Stroke::new(1.0, Color32::WHITE));
                     // let scale = distance / ((grad_real * grad_real + grad_imag * grad_imag).into_f32()).sqrt();
                     // draw_complex_segment(
@@ -513,239 +535,274 @@ impl App {
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         ctx.request_repaint();
-        egui::CentralPanel::default().frame(egui::Frame::new()).show(ctx, |ui| {
-            self.dts.add(ctx.input(|i| i.time), ctx.input(|i| i.stable_dt));
+        egui::CentralPanel::default()
+            .frame(egui::Frame::new())
+            .show(ctx, |ui| {
+                self.dts
+                    .add(ctx.input(|i| i.time), ctx.input(|i| i.stable_dt));
 
-            // debug static counters
-            #[cfg(false)]
-            {
-                // println!();
-                if let Some(nanos) = tree::ELAPSED_NANOS
-                    .load(Ordering::Relaxed)
-                    .checked_div(tree::COUNTER.load(Ordering::Relaxed))
+                // debug static counters
+                #[cfg(false)]
                 {
-                    println!("tree average time: {} ns", nanos);
-                }
-                if let Some(nanos) = pool::ELAPSED_NANOS
-                    .load(Ordering::Relaxed)
-                    .checked_div(pool::COUNTER.load(Ordering::Relaxed))
-                {
-                    println!("pool average time: {} ns", nanos);
-                    println!("pool average / tc: {} ns", nanos / self.pool.thread_count() as u64);
-                }
-                if let Some(max_i) = pool::WORKER_HIST
-                    .iter()
-                    .enumerate()
-                    .rev()
-                    .find_map(|(i, count)| if count.load(Ordering::Relaxed) > 0 { Some(i) } else { None })
-                {
-                    println!("worker hist:");
-                    for (i, worker) in pool::WORKER_HIST.iter().enumerate().take(max_i + 1) {
-                        println!("worker {}: {} samples", i, worker.load(Ordering::Relaxed));
+                    // println!();
+                    if let Some(nanos) = tree::ELAPSED_NANOS
+                        .load(Ordering::Relaxed)
+                        .checked_div(tree::COUNTER.load(Ordering::Relaxed))
+                    {
+                        println!("tree average time: {} ns", nanos);
+                    }
+                    if let Some(nanos) = pool::ELAPSED_NANOS
+                        .load(Ordering::Relaxed)
+                        .checked_div(pool::COUNTER.load(Ordering::Relaxed))
+                    {
+                        println!("pool average time: {} ns", nanos);
+                        println!(
+                            "pool average / tc: {} ns",
+                            nanos / self.pool.thread_count() as u64
+                        );
+                    }
+                    if let Some(max_i) =
+                        pool::WORKER_HIST
+                            .iter()
+                            .enumerate()
+                            .rev()
+                            .find_map(|(i, count)| {
+                                if count.load(Ordering::Relaxed) > 0 {
+                                    Some(i)
+                                } else {
+                                    None
+                                }
+                            })
+                    {
+                        println!("worker hist:");
+                        for (i, worker) in pool::WORKER_HIST.iter().enumerate().take(max_i + 1) {
+                            println!("worker {}: {} samples", i, worker.load(Ordering::Relaxed));
+                        }
                     }
                 }
-            }
 
-            // sample time counters
-            #[cfg(false)]
-            {
-                if let Some(nanos) = sample::SAMPLE_ELAPSED_NANOS
-                    .load(Ordering::Relaxed)
-                    .checked_div(sample::SAMPLE_COUNTER.load(Ordering::Relaxed))
+                // sample time counters
+                #[cfg(false)]
                 {
-                    println!("sample average time: {} us", nanos / 1000);
-                }
-            }
-
-            // coloring pruned vs unpruned
-            #[cfg(false)]
-            {
-                println!();
-                if let Some(nanos) = PRUNED_ELAPSED
-                    .load(Ordering::Relaxed)
-                    .checked_div(PRUNED_COUNTER.load(Ordering::Relaxed))
-                {
-                    println!("pruned average time: {} ns", nanos);
-                }
-                if let Some(nanos) = UNPRUNED_ELAPSED
-                    .load(Ordering::Relaxed)
-                    .checked_div(UNPRUNED_COUNTER.load(Ordering::Relaxed))
-                {
-                    println!("unpruned average time: {} ns", nanos);
-                }
-                {
-                    let pruned_count = PRUNED_COUNTER.load(Ordering::Relaxed);
-                    let unpruned_count = UNPRUNED_COUNTER.load(Ordering::Relaxed);
-                    println!("pruned count: {}", pruned_count);
-                    println!("unpruned count: {}", unpruned_count);
-                    println!(
-                        "pruned / (pruned + unpruned): {}",
-                        pruned_count as f64 / (pruned_count as f64 + unpruned_count as f64)
-                    );
+                    if let Some(nanos) = sample::SAMPLE_ELAPSED_NANOS
+                        .load(Ordering::Relaxed)
+                        .checked_div(sample::SAMPLE_COUNTER.load(Ordering::Relaxed))
+                    {
+                        println!("sample average time: {} us", nanos / 1000);
+                    }
                 }
 
-                PRUNED_ELAPSED.store(0, Ordering::Relaxed);
-                PRUNED_COUNTER.store(0, Ordering::Relaxed);
-                UNPRUNED_ELAPSED.store(0, Ordering::Relaxed);
-                UNPRUNED_COUNTER.store(0, Ordering::Relaxed);
-            }
+                // coloring pruned vs unpruned
+                #[cfg(false)]
+                {
+                    println!();
+                    if let Some(nanos) = PRUNED_ELAPSED
+                        .load(Ordering::Relaxed)
+                        .checked_div(PRUNED_COUNTER.load(Ordering::Relaxed))
+                    {
+                        println!("pruned average time: {} ns", nanos);
+                    }
+                    if let Some(nanos) = UNPRUNED_ELAPSED
+                        .load(Ordering::Relaxed)
+                        .checked_div(UNPRUNED_COUNTER.load(Ordering::Relaxed))
+                    {
+                        println!("unpruned average time: {} ns", nanos);
+                    }
+                    {
+                        let pruned_count = PRUNED_COUNTER.load(Ordering::Relaxed);
+                        let unpruned_count = UNPRUNED_COUNTER.load(Ordering::Relaxed);
+                        println!("pruned count: {}", pruned_count);
+                        println!("unpruned count: {}", unpruned_count);
+                        println!(
+                            "pruned / (pruned + unpruned): {}",
+                            pruned_count as f64 / (pruned_count as f64 + unpruned_count as f64)
+                        );
+                    }
 
-            // panning stuff
-            // pan the other camera when holding backtick
-            let needs_full_redraw = {
-                let before = (self.primary_camera, self.secondary_camera);
-                if self.control_other_camera != (self.current_fractal == CurrentFractal::Metabrot) {
-                    CameraMap::pan_zoom(ctx, ui, &mut self.primary_camera, &mut self.primary_camera_velocity)
-                } else {
-                    CameraMap::pan_zoom(ctx, ui, &mut self.secondary_camera, &mut self.secondary_camera_velocity)
+                    PRUNED_ELAPSED.store(0, Ordering::Relaxed);
+                    PRUNED_COUNTER.store(0, Ordering::Relaxed);
+                    UNPRUNED_ELAPSED.store(0, Ordering::Relaxed);
+                    UNPRUNED_COUNTER.store(0, Ordering::Relaxed);
+                }
+
+                // panning stuff
+                // pan the other camera when holding backtick
+                let needs_full_redraw = {
+                    let before = (self.primary_camera, self.secondary_camera);
+                    if self.control_other_camera
+                        != (self.current_fractal == CurrentFractal::Metabrot)
+                    {
+                        CameraMap::pan_zoom(
+                            ctx,
+                            ui,
+                            &mut self.primary_camera,
+                            &mut self.primary_camera_velocity,
+                        )
+                    } else {
+                        CameraMap::pan_zoom(
+                            ctx,
+                            ui,
+                            &mut self.secondary_camera,
+                            &mut self.secondary_camera_velocity,
+                        )
+                    };
+                    let after = (self.primary_camera, self.secondary_camera);
+                    before != after
                 };
-                let after = (self.primary_camera, self.secondary_camera);
-                before != after
-            };
 
-            let primary_camera_map = CameraMap::new(ui.max_rect(), self.primary_camera, self.stride);
-            let secondary_camera_map = CameraMap::new(ui.max_rect(), self.secondary_camera, self.stride);
+                let primary_camera_map =
+                    CameraMap::new(ui.max_rect(), self.primary_camera, self.stride);
+                let secondary_camera_map =
+                    CameraMap::new(ui.max_rect(), self.secondary_camera, self.stride);
 
-            // sampling
-            if self.sampling {
-                let samples_taken = self
-                    .metabrot
-                    .enable_sampling(primary_camera_map.window().unwrap_or(Domain::default().into()));
-                self.sample_counts.add(ctx.input(|i| i.time), samples_taken);
-            } else {
-                self.metabrot.disable_sampling();
-            }
+                // sampling
+                if self.sampling {
+                    let samples_taken = self.metabrot.enable_sampling(
+                        primary_camera_map
+                            .window()
+                            .unwrap_or(Domain::default().into()),
+                    );
+                    self.sample_counts.add(ctx.input(|i| i.time), samples_taken);
+                } else {
+                    self.metabrot.disable_sampling();
+                }
 
-            // // draw sequence of nodes that contain the mouse
-            // {
-            //     if let Some(mouse_pos) = ctx.input(|i| i.pointer.latest_pos()) {
-            //         fn draw_node(
-            //             node: &Tree,
-            //             depth: u32,
-            //             painter: &egui::Painter,
-            //             camera_map: &CameraMap,
-            //             real: f32,
-            //             imag: f32,
-            //         ) {
-            //             // println!("here");
-            //             painter.rect_stroke(
-            //                 camera_map.window_to_rect(node.window),
-            //                 0.0,
-            //                 egui::Stroke::new(
-            //                     3.0,
-            //                     // Color32::from_rgb(100, 100, 255u32.saturating_sub(5*depth) as u8),
-            //                     // Color32::from_rgb(100, 100, {
-            //                     //     let mut h = DefaultHasher::new();
-            //                     //     depth.hash(&mut h);
-            //                     //     h.finish() as u8
-            //                     // }),
-            //                     {
-            //                         let mut h = DefaultHasher::new();
-            //                         depth.hash(&mut h);
-            //                         let hash = h.finish();
-            //                         Color32::from_rgb(
-            //                             (hash >> 24) as u8,
-            //                             (hash >> 16) as u8,
-            //                             (hash >> 8) as u8,
-            //                         )
-            //                     },
-            //                 ),
-            //                 egui::StrokeKind::Inside,
-            //             );
-            //             let Some(children) = &node.children else {
-            //                 return;
-            //             };
-            //             for child in children {
-            //                 if child.window.contains(real, imag) {
-            //                     draw_node(child, depth + 1, painter, camera_map, real, imag);
-            //                 }
-            //             }
-            //         }
-            //         let (real, imag) = camera_map.pos_to_complex(mouse_pos);
+                // // draw sequence of nodes that contain the mouse
+                // {
+                //     if let Some(mouse_pos) = ctx.input(|i| i.pointer.latest_pos()) {
+                //         fn draw_node(
+                //             node: &Tree,
+                //             depth: u32,
+                //             painter: &egui::Painter,
+                //             camera_map: &CameraMap,
+                //             real: f32,
+                //             imag: f32,
+                //         ) {
+                //             // println!("here");
+                //             painter.rect_stroke(
+                //                 camera_map.window_to_rect(node.window),
+                //                 0.0,
+                //                 egui::Stroke::new(
+                //                     3.0,
+                //                     // Color32::from_rgb(100, 100, 255u32.saturating_sub(5*depth) as u8),
+                //                     // Color32::from_rgb(100, 100, {
+                //                     //     let mut h = DefaultHasher::new();
+                //                     //     depth.hash(&mut h);
+                //                     //     h.finish() as u8
+                //                     // }),
+                //                     {
+                //                         let mut h = DefaultHasher::new();
+                //                         depth.hash(&mut h);
+                //                         let hash = h.finish();
+                //                         Color32::from_rgb(
+                //                             (hash >> 24) as u8,
+                //                             (hash >> 16) as u8,
+                //                             (hash >> 8) as u8,
+                //                         )
+                //                     },
+                //                 ),
+                //                 egui::StrokeKind::Inside,
+                //             );
+                //             let Some(children) = &node.children else {
+                //                 return;
+                //             };
+                //             for child in children {
+                //                 if child.window.contains(real, imag) {
+                //                     draw_node(child, depth + 1, painter, camera_map, real, imag);
+                //                 }
+                //             }
+                //         }
+                //         let (real, imag) = camera_map.pos_to_complex(mouse_pos);
 
-            //         draw_node(
-            //             &self.tree,
-            //             0,
-            //             &ui.painter_at(ui.max_rect()),
-            //             &camera_map,
-            //             real,
-            //             imag,
-            //         );
-            //         // panic!();
-            //     }
-            // }
+                //         draw_node(
+                //             &self.tree,
+                //             0,
+                //             &ui.painter_at(ui.max_rect()),
+                //             &camera_map,
+                //             real,
+                //             imag,
+                //         );
+                //         // panic!();
+                //     }
+                // }
 
-            // TODO: debug draw sequence of nodes that eventually have a child who's sample is inside the pixel the mouse is in
+                // TODO: debug draw sequence of nodes that eventually have a child who's sample is inside the pixel the mouse is in
 
-            // // debug coloring of how many samples are inside each pixel
-            // {
-            //     let painter = ui.painter_at(ui.max_rect());
-            //     for (rect, pixel) in camera_map.pixels(self.stride) {
-            //         // let color = self.tree.color(pixel).unwrap_or(Color32::MAGENTA);
-            //         let count = self.tree.count_samples_strong(pixel);
-            //         painter.rect_filled(
-            //             rect,
-            //             0.0,
-            //             if count == 0 {
-            //                 Color32::MAGENTA
-            //             } else {
-            //                 Color32::from_gray((count * 50).min(255) as u8)
-            //             },
-            //         );
-            //     }
-            // }
+                // // debug coloring of how many samples are inside each pixel
+                // {
+                //     let painter = ui.painter_at(ui.max_rect());
+                //     for (rect, pixel) in camera_map.pixels(self.stride) {
+                //         // let color = self.tree.color(pixel).unwrap_or(Color32::MAGENTA);
+                //         let count = self.tree.count_samples_strong(pixel);
+                //         painter.rect_filled(
+                //             rect,
+                //             0.0,
+                //             if count == 0 {
+                //                 Color32::MAGENTA
+                //             } else {
+                //                 Color32::from_gray((count * 50).min(255) as u8)
+                //             },
+                //         );
+                //     }
+                // }
 
-            // // camera_map.pixels small square debugging
-            // #[cfg(false)]
-            // {
-            //     let pixels = camera_map.pixels(self.stride).collect::<Vec<_>>();
-            //     let expected_len = camera_map.rect().size().x as usize
-            //         * camera_map.rect().size().y as usize
-            //         / (self.stride * self.stride);
-            //     assert!(pixels.len() <= expected_len);
-            //     if pixels.len() < expected_len {
-            //         let painter = ui.painter_at(ui.max_rect());
-            //         for ((row, col), rect, pixel) in &pixels {
-            //             painter.rect_filled(
-            //                 *rect,
-            //                 0.0,
-            //                 if (row + col) % 2 == 0 {
-            //                     Color32::MAGENTA
-            //                 } else {
-            //                     Color32::LIGHT_GREEN
-            //                 },
-            //             );
-            //         }
-            //         for ((row, col), rect, pixel) in &pixels {
-            //             if rect
-            //                 .contains(ui.input(|i| i.pointer.latest_pos().unwrap_or_default()))
-            //             {
-            //                 ui.label(format!(
-            //                     "real_mid: {:?}\nimag_mid: {:?}\nrad: {:?}\nreal_lo: {:?}\nreal_hi: {:?}\nimag_lo: {:?}\nimag_hi: {:?}",
-            //                     pixel.real_mid(), pixel.imag_mid(), pixel.rad(), pixel.real_lo(), pixel.real_hi(), pixel.imag_lo(), pixel.imag_hi())
-            //                 );
-            //             }
-            //         }
-            //         return;
-            //     }
-            // }
+                // // camera_map.pixels small square debugging
+                // #[cfg(false)]
+                // {
+                //     let pixels = camera_map.pixels(self.stride).collect::<Vec<_>>();
+                //     let expected_len = camera_map.rect().size().x as usize
+                //         * camera_map.rect().size().y as usize
+                //         / (self.stride * self.stride);
+                //     assert!(pixels.len() <= expected_len);
+                //     if pixels.len() < expected_len {
+                //         let painter = ui.painter_at(ui.max_rect());
+                //         for ((row, col), rect, pixel) in &pixels {
+                //             painter.rect_filled(
+                //                 *rect,
+                //                 0.0,
+                //                 if (row + col) % 2 == 0 {
+                //                     Color32::MAGENTA
+                //                 } else {
+                //                     Color32::LIGHT_GREEN
+                //                 },
+                //             );
+                //         }
+                //         for ((row, col), rect, pixel) in &pixels {
+                //             if rect
+                //                 .contains(ui.input(|i| i.pointer.latest_pos().unwrap_or_default()))
+                //             {
+                //                 ui.label(format!(
+                //                     "real_mid: {:?}\nimag_mid: {:?}\nrad: {:?}\nreal_lo: {:?}\nreal_hi: {:?}\nimag_lo: {:?}\nimag_hi: {:?}",
+                //                     pixel.real_mid(), pixel.imag_mid(), pixel.rad(), pixel.real_lo(), pixel.real_hi(), pixel.imag_lo(), pixel.imag_hi())
+                //                 );
+                //             }
+                //         }
+                //         return;
+                //     }
+                // }
 
-            self.show_fractal(ctx, ui, &primary_camera_map, &secondary_camera_map, needs_full_redraw);
+                self.show_fractal(
+                    ctx,
+                    ui,
+                    &primary_camera_map,
+                    &secondary_camera_map,
+                    needs_full_redraw,
+                );
 
-            // area is to allow the frame to be drawn on top of the fractal
-            egui::Area::new(egui::Id::new("area"))
-                .constrain_to(ctx.screen_rect())
-                .anchor(egui::Align2::LEFT_TOP, egui::Vec2::ZERO)
-                .show(ui.ctx(), |ui| {
-                    // frame is for background
-                    egui::Frame::new()
-                        .fill(Color32::from_gray(20))
-                        .inner_margin(3)
-                        .show(ui, |ui| {
-                            self.show_ui(ctx, ui);
-                        });
-                });
-        });
+                // area is to allow the frame to be drawn on top of the fractal
+                egui::Area::new(egui::Id::new("area"))
+                    .constrain_to(ctx.screen_rect())
+                    .anchor(egui::Align2::LEFT_TOP, egui::Vec2::ZERO)
+                    .show(ui.ctx(), |ui| {
+                        // frame is for background
+                        egui::Frame::new()
+                            .fill(Color32::from_gray(20))
+                            .inner_margin(3)
+                            .show(ui, |ui| {
+                                self.show_ui(ctx, ui);
+                            });
+                    });
+            });
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
