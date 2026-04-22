@@ -513,7 +513,7 @@ mod worker_thread {
 
                 // update the shared timer rarely for performance
                 if self.last_sent.elapsed() >= Self::TIMER_SEND_INTERVAL {
-                    match self.timer_sender.send(self.timer.clone()) {
+                    match self.timer_sender.send(self.timer) {
                         Ok(()) => {
                             self.timer.reset();
                             self.last_sent = Instant::now();
@@ -538,10 +538,10 @@ mod timer {
 
     use super::*;
 
-    #[derive(Debug, Clone, Default)]
+    #[derive(Debug, Clone, Copy, Default)]
     pub(crate) struct Timer {
-        elapsed: Duration,
-        count: u64,
+        pub(crate) elapsed: Duration,
+        pub(crate) count: u64,
     }
     impl Timer {
         pub(super) fn add(&mut self, elapsed: Duration) {
@@ -566,10 +566,21 @@ mod timer {
             self.count += rhs.count;
         }
     }
+    impl ops::Add for Timer {
+        type Output = Self;
+
+        fn add(self, rhs: Self) -> Self::Output {
+            Self {
+                elapsed: self.elapsed + rhs.elapsed,
+                count: self.count + rhs.count,
+            }
+        }
+    }
 
     /// this exists for debugging / UX,
     /// and is not needed for the main algorithm.
-    #[derive(Debug, Clone, Default)]
+    /// it needs to be `Copy` for [`egui::util::History`].
+    #[derive(Debug, Clone, Copy, Default)]
     pub(crate) struct MultiTimer {
         pub(crate) draw: Timer,
         pub(crate) sample: Timer,
@@ -590,6 +601,18 @@ mod timer {
             self.sample += rhs.sample;
             self.split += rhs.split;
             self.idle += rhs.idle;
+        }
+    }
+    impl ops::Add for MultiTimer {
+        type Output = Self;
+
+        fn add(self, rhs: Self) -> Self::Output {
+            Self {
+                draw: self.draw + rhs.draw,
+                sample: self.sample + rhs.sample,
+                split: self.split + rhs.split,
+                idle: self.idle + rhs.idle,
+            }
         }
     }
 }
