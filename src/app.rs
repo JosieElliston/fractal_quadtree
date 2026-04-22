@@ -1,4 +1,7 @@
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use egui::{self, Color32, Key, Pos2, Rect, Vec2};
 
@@ -26,16 +29,22 @@ enum CurrentFractal {
 pub(crate) struct App {
     metabrot: Fractal,
     stride: usize,
-    target_spf: Duration,
-    frame_time_accumulator: Duration,
+    target_fractal_spf: Duration,
+    fractal_try_render_time: Instant,
+    fractal_successful_render_time: Instant,
+    fractal_accumulator_ns: i128,
     primary_camera: Camera,
     primary_camera_velocity: Vec2,
     secondary_camera: Camera,
     secondary_camera_velocity: Vec2,
-    dts: egui::util::History<f32>,
+    global_dts: egui::util::History<f32>,
+    fractal_dts: egui::util::History<f32>,
     /// how many samples we received on each frame
     sample_counts: egui::util::History<u64>,
     timers: egui::util::History<fractal::MultiTimer>,
+    /// this allows us to prevent the main thread from needing to wait for the fractal to finish rendering.
+    /// this is only false for the first frame.
+    has_begun_rendering: bool,
     texture: egui::TextureHandle,
     needs_full_redraw: bool,
     sampling: bool,
@@ -54,15 +63,19 @@ impl App {
         Self {
             metabrot: Fractal::new(),
             stride: 1,
-            target_spf: Duration::from_secs_f64(1.0 / 60.0),
-            frame_time_accumulator: Duration::ZERO,
+            target_fractal_spf: Duration::from_secs_f64(1.0 / 30.0),
+            fractal_try_render_time: Instant::now(),
+            fractal_successful_render_time: Instant::now(),
+            fractal_accumulator_ns: 0,
             primary_camera: Camera::default(),
             primary_camera_velocity: Vec2::ZERO,
             secondary_camera: Camera::default(),
             secondary_camera_velocity: Vec2::ZERO,
-            dts: egui::util::History::new(10..1000, 1.0),
+            global_dts: egui::util::History::new(2..1000, 0.2),
+            fractal_dts: egui::util::History::new(2..1000, 0.2),
             sample_counts: egui::util::History::new(10..1000, 5.0),
             timers: egui::util::History::new(10..1000, 5.0),
+            has_begun_rendering: false,
             texture: cc.egui_ctx.load_texture(
                 "fractal",
                 egui::ColorImage::example(),
@@ -100,7 +113,6 @@ impl App {
         self.draw_sample_grid_gradient_steps = self.draw_sample_grid_gradient_steps.max(-1);
     }
 
-    /// draw the fractal and debug stuff
     fn show_fractal(
         &mut self,
         ctx: &egui::Context,
@@ -112,16 +124,45 @@ impl App {
         let z0 = primary_camera_map.pos_to_complex(screen_center);
         let painter = ui.painter_at(ui.max_rect());
 
-        // draw the fractal
-        {
+        // // we need to do this on the first frame
+        // if !self.has_begun_rendering {
+        //     self.metabrot
+        //         .begin_rendering(primary_camera_map, self.needs_full_redraw);
+        //     self.has_begun_rendering = true;
+        // }
+
+        let now = Instant::now();
+        let should_rerender = {
+            let dt = (now - self.fractal_try_render_time).as_nanos();
+            self.fractal_try_render_time = now;
+            self.fractal_accumulator_ns += dt as i128;
+            self.fractal_accumulator_ns > self.target_fractal_spf.as_nanos() as i128
+        };
+        // don't wait if we need a full redraw, bc then panning looks bad.
+        if should_rerender || self.needs_full_redraw {
+            self.fractal_dts.add(
+                ctx.input(|i| i.time),
+                (now - self.fractal_successful_render_time).as_secs_f32(),
+            );
+            self.fractal_successful_render_time = now;
+
+            self.fractal_accumulator_ns -= self.target_fractal_spf.as_nanos() as i128;
+            // because we sometimes are forced to redraw.
+            // don't allow the accumulator to get too negative,
+            // or else we get a big lag spike when we finally do redraw.
+            self.fractal_accumulator_ns = self
+                .fractal_accumulator_ns
+                .max(-(self.target_fractal_spf.as_nanos() as i128));
+
             match self.current_fractal {
                 CurrentFractal::Metabrot => {
                     // TODO: it would be nice if we could start this earlier in the frame
                     // lmao maybe we can just switch the order of these two calls?
+                    // note that this adds a frame of latency
                     self.metabrot
                         .begin_rendering(primary_camera_map, self.needs_full_redraw);
-                    self.needs_full_redraw = false;
                     self.metabrot.finish_rendering(&mut self.texture);
+                    self.needs_full_redraw = false;
                 }
                 CurrentFractal::Mandelbrot => {
                     if let Some(z0) = z0 {
@@ -132,13 +173,25 @@ impl App {
                 }
             }
             assert_eq!(primary_camera_map.rect(), secondary_camera_map.rect());
-            painter.image(
-                self.texture.id(),
-                primary_camera_map.rect(),
-                Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0)),
-                Color32::WHITE,
-            );
         }
+        painter.image(
+            self.texture.id(),
+            primary_camera_map.rect(),
+            Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0)),
+            Color32::WHITE,
+        );
+    }
+
+    fn show_fractal_debug(
+        &mut self,
+        ctx: &egui::Context,
+        ui: &mut egui::Ui,
+        primary_camera_map: &CameraMap,
+        secondary_camera_map: &CameraMap,
+    ) {
+        let screen_center = ui.max_rect().center();
+        let z0 = primary_camera_map.pos_to_complex(screen_center);
+        let painter = ui.painter_at(ui.max_rect());
 
         let draw_complex_circle_stroke =
             |(c_real, c_imag): (Real, Imag), rad: Fixed, stroke: egui::Stroke| {
@@ -385,14 +438,28 @@ impl App {
         egui::CollapsingHeader::new("stats")
             .default_open(true)
             .show(ui, |ui| {
-                // frame rate
+                // global frame rate
                 {
                     let average_dt = self
-                        .dts
+                        .global_dts
                         .average()
                         .expect("we added one this frame so dts must be non-empty");
-                    ui.label(format!("fps: {:.01}", 1.0 / average_dt));
-                    ui.label(format!("spf: {:.05}", average_dt));
+                    ui.label(format!("global fps: {:.01}", 1.0 / average_dt))
+                        .on_hover_text("the global / app / ui frames per second");
+                    // ui.label(format!("global spf: {:.05}", average_dt))
+                    //     .on_hover_text("the global / app / ui seconds per frame");
+                }
+
+                // fractal frame rate
+                {
+                    let average_dt = self
+                        .fractal_dts
+                        .average()
+                        .expect("we added one this frame so dts must be non-empty");
+                    ui.label(format!("fractal fps: {:.01}", 1.0 / average_dt))
+                        .on_hover_text("the fractal only frames per second");
+                    // ui.label(format!("fractal spf: {:.05}", average_dt))
+                    //     .on_hover_text("the fractal only seconds per frame");
                 }
 
                 // sample count
@@ -529,17 +596,17 @@ impl App {
         egui::CollapsingHeader::new("settings").default_open(true).show(ui, |ui| {
             // max fps
             {
-                let mut target_fps = 1.0 / self.target_spf.as_secs_f64();
+                let mut target_fps = 1.0 / self.target_fractal_spf.as_secs_f64();
                 let r = ui.add(MyDragValue::new(
                     egui::Label::new("max fps:"),
                     egui::DragValue::new(&mut target_fps),
-                ));
-                target_fps = target_fps.max(0.01);
+                )).on_hover_text("the max fps at which we render the fractal. the ui is always rendered at max speed. this is overwritten when eg panning.");
+                target_fps = target_fps.max(1.0);
                 if r.dragged() {
                     target_fps = target_fps.min(240.0);
                 }
                 if r.changed() {
-                    self.target_spf = Duration::from_secs_f64(1.0 / target_fps);
+                    self.target_fractal_spf = Duration::from_secs_f64(1.0 / target_fps);
                 }
             }
 
@@ -650,7 +717,7 @@ impl eframe::App for App {
         egui::CentralPanel::default()
             .frame(egui::Frame::new())
             .show(ctx, |ui| {
-                self.dts
+                self.global_dts
                     .add(ctx.input(|i| i.time), ctx.input(|i| i.stable_dt));
 
                 self.keybinds(ctx);
@@ -903,6 +970,7 @@ impl eframe::App for App {
                 // }
 
                 self.show_fractal(ctx, ui, &primary_camera_map, &secondary_camera_map);
+                self.show_fractal_debug(ctx, ui, &primary_camera_map, &secondary_camera_map);
 
                 // area is to allow the frame to be drawn on top of the fractal
                 egui::Area::new(egui::Id::new("area"))
@@ -942,8 +1010,6 @@ impl eframe::App for App {
 
 use my_drag_value::*;
 mod my_drag_value {
-    use std::ops::RangeInclusive;
-
     use egui::{DragValue, Label, Response, Ui, Widget};
 
     use super::*;

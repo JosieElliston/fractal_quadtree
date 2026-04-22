@@ -610,10 +610,9 @@ impl Tree {
             {
                 let dist = distance(center, dom.mid());
                 let color = node.color.load(Ordering::Relaxed);
-                // if `None`, we skip the node, which is good for aesthetics
-                // if `Some`, we color it with a debug color
-                // const UNCOLORED_NODE_COLOR: Option<RGB> = None;
+                // debug color the uncolored nodes
                 const UNCOLORED_NODE_COLOR: Option<Rgb> = Some(Rgb::new(255, 255, 0));
+                // const UNCOLORED_NODE_COLOR: Option<RGB> = None;
                 if dist < closest_sample_dist
                     && let Some(color) = color.or(UNCOLORED_NODE_COLOR)
                 {
