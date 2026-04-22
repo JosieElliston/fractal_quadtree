@@ -1,6 +1,6 @@
-use std::sync::atomic::Ordering;
+use std::{sync::Arc, time::Duration};
 
-use eframe::egui::{self, Color32, Key, Pos2, Rect, Vec2};
+use egui::{self, Color32, Key, Pos2, Rect, Vec2};
 
 use crate::{
     complex::{Camera, CameraMap, Domain, Window, fixed::*},
@@ -25,9 +25,9 @@ enum CurrentFractal {
 
 pub(crate) struct App {
     metabrot: Fractal,
-
-    // tree: Tree,
     stride: usize,
+    target_spf: Duration,
+    frame_time_accumulator: Duration,
     primary_camera: Camera,
     primary_camera_velocity: Vec2,
     secondary_camera: Camera,
@@ -37,7 +37,9 @@ pub(crate) struct App {
     sample_counts: egui::util::History<u64>,
     timers: egui::util::History<fractal::MultiTimer>,
     texture: egui::TextureHandle,
+    needs_full_redraw: bool,
     sampling: bool,
+    reclaiming: bool,
     draw_crosshair: bool,
     // current_fractal: usize,
     current_fractal: CurrentFractal,
@@ -50,9 +52,10 @@ pub(crate) struct App {
 impl App {
     pub(crate) fn new(cc: &eframe::CreationContext<'_>) -> Self {
         Self {
-            metabrot: Fractal::new_metabrot(),
+            metabrot: Fractal::new(),
             stride: 1,
-            // stride: 8,
+            target_spf: Duration::from_secs_f64(1.0 / 60.0),
+            frame_time_accumulator: Duration::ZERO,
             primary_camera: Camera::default(),
             primary_camera_velocity: Vec2::ZERO,
             secondary_camera: Camera::default(),
@@ -65,7 +68,9 @@ impl App {
                 egui::ColorImage::example(),
                 egui::TextureOptions::NEAREST,
             ),
+            needs_full_redraw: true,
             sampling: true,
+            reclaiming: true,
             draw_crosshair: false,
             current_fractal: CurrentFractal::Metabrot,
             control_other_camera: false,
@@ -76,14 +81,32 @@ impl App {
         }
     }
 
+    /// this can't be in `show_ui` bc it needs to run even when the stats/settings panels are collapsed
+    fn keybinds(&mut self, ctx: &egui::Context) {
+        self.sampling ^= ctx.input(|i| i.key_pressed(Key::X));
+        self.reclaiming ^= ctx.input(|i| i.key_pressed(Key::R));
+        if ctx.input(|i| i.key_pressed(Key::N)) {
+            self.current_fractal = CurrentFractal::Metabrot;
+            self.needs_full_redraw = true;
+        }
+        if ctx.input(|i| i.key_pressed(Key::M)) {
+            self.current_fractal = CurrentFractal::Mandelbrot;
+        }
+        self.control_other_camera ^= ctx.input(|i| i.key_pressed(Key::C));
+
+        self.draw_sample_grid_gradient_steps += ctx.input(|i| {
+            i.key_pressed(Key::ArrowRight) as i32 - i.key_pressed(Key::ArrowLeft) as i32
+        });
+        self.draw_sample_grid_gradient_steps = self.draw_sample_grid_gradient_steps.max(-1);
+    }
+
     /// draw the fractal and debug stuff
     fn show_fractal(
         &mut self,
-        ctx: &eframe::egui::Context,
+        ctx: &egui::Context,
         ui: &mut egui::Ui,
         primary_camera_map: &CameraMap,
         secondary_camera_map: &CameraMap,
-        needs_full_redraw: bool,
     ) {
         let screen_center = ui.max_rect().center();
         let z0 = primary_camera_map.pos_to_complex(screen_center);
@@ -93,8 +116,11 @@ impl App {
         {
             match self.current_fractal {
                 CurrentFractal::Metabrot => {
+                    // TODO: it would be nice if we could start this earlier in the frame
+                    // lmao maybe we can just switch the order of these two calls?
                     self.metabrot
-                        .begin_rendering(primary_camera_map.clone(), needs_full_redraw);
+                        .begin_rendering(primary_camera_map, self.needs_full_redraw);
+                    self.needs_full_redraw = false;
                     self.metabrot.finish_rendering(&mut self.texture);
                 }
                 CurrentFractal::Mandelbrot => {
@@ -353,183 +379,269 @@ impl App {
     /// factor this out,
     /// bc rustfmt dies on deeply nested code with string literals.
     /// it's fixed by increasing max_width, but that's really coarse.
-    fn show_ui(&mut self, ctx: &eframe::egui::Context, ui: &mut egui::Ui) {
-        egui::CollapsingHeader::new("info")
+    fn show_ui(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
+        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+
+        egui::CollapsingHeader::new("stats")
             .default_open(true)
-            .show_unindented(ui, |ui| {
-                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+            .show(ui, |ui| {
+                // frame rate
+                {
+                    let average_dt = self
+                        .dts
+                        .average()
+                        .expect("we added one this frame so dts must be non-empty");
+                    ui.label(format!("fps: {:.01}", 1.0 / average_dt));
+                    ui.label(format!("spf: {:.05}", average_dt));
+                }
 
-                egui::CollapsingHeader::new("stats").default_open(true).show(ui, |ui| {
-                    // frame rate
-                    {
-                        let average_dt = self.dts.average().expect("we added one this frame so dts must be non-empty");
-                        ui.label(format!("fps: {:.01}", 1.0 / average_dt));
-                        ui.label(format!("spf: {:.05}", average_dt));
-                    }
+                // sample count
+                {
+                    ui.label(format!(
+                        "samples/sec: {:.01}",
+                        self.sample_counts.values().sum::<u64>() as f32
+                            / self.sample_counts.len() as f32
+                    ));
+                }
 
-                    // sample count
-                    {
-                        ui.label(format!(
-                            "samples/sec: {:.01}",
-                            self.sample_counts.values().sum::<u64>() as f32 / self.sample_counts.len() as f32
-                        ));
-                    }
+                // node count
+                // `CollapsingHeader` bc computing `node_count` is expensive
+                egui::CollapsingHeader::new("node count").show(ui, |ui| {
+                    // wacky stuff to get around the borrow checker
+                    let tree = Arc::clone(self.metabrot.tree());
+                    ui.label(format!(
+                        "node count: {}",
+                        tree.node_count(&mut self.metabrot.thread_data)
+                    ));
+                });
 
-                    // node count
-                    {
-                        // note that this leaks memory
-                        ui.label(format!(
-                            "node count: {}",
-                            self.metabrot.tree().node_count(&mut ThreadData::default())
-                        ));
-                    }
+                egui::CollapsingHeader::new("camera").show(ui, |ui| {
+                    ui.label(format!(
+                        "metabrot real mid: {:12.09}",
+                        self.primary_camera.real_mid()
+                    ));
+                    ui.label(format!(
+                        "metabrot imag mid: {:12.09}",
+                        self.primary_camera.imag_mid()
+                    ));
+                    ui.label(format!(
+                        "metabrot real rad: {:12.09}",
+                        self.primary_camera.real_rad()
+                    ));
+                    ui.label(format!(
+                        "mandelbrot real mid: {:12.09}",
+                        self.secondary_camera.real_mid()
+                    ));
+                    ui.label(format!(
+                        "mandelbrot imag mid: {:12.09}",
+                        self.secondary_camera.imag_mid()
+                    ));
+                    ui.label(format!(
+                        "mandelbrot real rad: {:12.09}",
+                        self.secondary_camera.real_rad()
+                    ));
+                });
 
-                    egui::CollapsingHeader::new("camera").show(ui, |ui| {
-                        ui.label(format!("metabrot real mid: {:12.09}", self.primary_camera.real_mid()));
-                        ui.label(format!("metabrot imag mid: {:12.09}", self.primary_camera.imag_mid()));
-                        ui.label(format!("metabrot real rad: {:12.09}", self.primary_camera.real_rad()));
-                        ui.label(format!("mandelbrot real mid: {:12.09}", self.secondary_camera.real_mid()));
-                        ui.label(format!("mandelbrot imag mid: {:12.09}", self.secondary_camera.imag_mid()));
-                        ui.label(format!("mandelbrot real rad: {:12.09}", self.secondary_camera.real_rad()));
-                    });
-
-                    egui::CollapsingHeader::new("timers").default_open(true).show(ui, |ui| {
-                        // fn show_timer(ui: &mut egui::Ui,  timer: &fractal::MultiTimer) {
-                        //     // TODO: be better
-                        // // note that for a flamegraph the average should be with respect to the total count, not each count
-                        //     ui.horizontal(|ui|{
-                        //         ui.label(format!("time per draw: {}", timer.draw.average().unwrap_or_default().as_secs_f32()));
-                        //     });
-                        // }
-                        // for timer in self.metabrot.timers(){
-                        //     show_timer(ui, &timer);
-                        // }
-
-                        let sum_timer = self.metabrot.timers().into_iter().reduce(|a, b| a + b).unwrap_or_default();
-                        self.timers.add(ctx.input(|i| i.time), sum_timer);
-                        self.metabrot.reset_timers();
-                        let sum_timer = self.timers.values().reduce(|a, b| a + b).unwrap_or_default();
+                egui::CollapsingHeader::new("timers")
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        self.timers
+                            .add(ctx.input(|i| i.time), self.metabrot.timer());
+                        let timer = self
+                            .timers
+                            .values()
+                            .reduce(|lhs, rhs| lhs + rhs)
+                            .unwrap_or_default();
 
                         ui.label(format!(
                             "us per draw: {:.03}",
-                            sum_timer.draw.average().unwrap_or_default().as_nanos() as f64 / 1000.0
+                            timer
+                                .draw
+                                .div_count(timer.draw.count())
+                                .unwrap_or_default()
+                                .as_nanos() as f64
+                                / 1000.0
                         ));
                         ui.label(format!(
                             "us per sample: {:.03}",
-                            sum_timer.sample.average().unwrap_or_default().as_nanos() as f64 / 1000.0
+                            timer
+                                .sample
+                                .div_count(timer.sample.count())
+                                .unwrap_or_default()
+                                .as_nanos() as f64
+                                / 1000.0
+                        ));
+                        ui.label(format!(
+                            "us per reclaim: {:.03}",
+                            timer
+                                .reclaim
+                                .div_count(timer.reclaim.count())
+                                .unwrap_or_default()
+                                .as_nanos() as f64
+                                / 1000.0
                         ));
                         ui.label(format!(
                             "us per split: {:.03}",
-                            sum_timer.split.average().unwrap_or_default().as_nanos() as f64 / 1000.0
+                            timer
+                                .split
+                                .div_count(timer.split.count())
+                                .unwrap_or_default()
+                                .as_nanos() as f64
+                                / 1000.0
                         ));
                         ui.label(format!(
                             "us per idle: {:.03}",
-                            sum_timer.idle.average().unwrap_or_default().as_nanos() as f64 / 1000.0
+                            timer
+                                .idle
+                                .div_count(timer.idle.count())
+                                .unwrap_or_default()
+                                .as_nanos() as f64
+                                / 1000.0
                         ));
 
-                        let sum_elapsed = sum_timer.draw.elapsed.as_secs_f64()
-                            + sum_timer.sample.elapsed.as_secs_f64()
-                            + sum_timer.split.elapsed.as_secs_f64()
-                            + sum_timer.idle.elapsed.as_secs_f64();
+                        // TODO: flamegraph
+                        ui.separator();
+                        let total_elapsed = timer.total().elapsed();
+
                         ui.label(format!(
                             "draw portion: {:.03}",
-                            sum_timer.draw.elapsed.as_secs_f64() / sum_elapsed
+                            timer.draw.div_elapsed(total_elapsed)
                         ));
                         ui.label(format!(
                             "sample portion: {:.03}",
-                            sum_timer.sample.elapsed.as_secs_f64() / sum_elapsed
+                            timer.sample.div_elapsed(total_elapsed)
+                        ));
+                        ui.label(format!(
+                            "reclaim portion: {:.03}",
+                            timer.reclaim.div_elapsed(total_elapsed)
                         ));
                         ui.label(format!(
                             "split portion: {:.03}",
-                            sum_timer.split.elapsed.as_secs_f64() / sum_elapsed
+                            timer.split.div_elapsed(total_elapsed)
                         ));
                         ui.label(format!(
                             "idle portion: {:.03}",
-                            sum_timer.idle.elapsed.as_secs_f64() / sum_elapsed
+                            timer.idle.div_elapsed(total_elapsed)
                         ));
                     });
-                });
-
-                egui::CollapsingHeader::new("toggles").default_open(true).show(ui, |ui| {
-                    // sampling
-                    {
-                        ui.checkbox(&mut self.sampling, "metabrot sampling").on_hover_text(
-                            "keybinding: ".to_owned()
-                                + &ctx.format_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::NONE, egui::Key::X)),
-                        );
-                        self.sampling ^= ctx.input(|i| i.key_pressed(Key::X));
-                    }
-
-                    // crosshair
-                    {
-                        ui.checkbox(&mut self.draw_crosshair, "draw crosshair")
-                            .on_hover_text("for metabrot, draw a dot at the screen center. for mandelbrot, draw a dot at z0.");
-                    }
-
-                    // current fractal
-                    ui.horizontal(|ui| {
-                        if ui
-                            .add(egui::Button::new("metabrot").selected(self.current_fractal == CurrentFractal::Metabrot))
-                            .on_hover_text(
-                                "whether to render the metabrot (rather than the mandelbrot). keybinding: ".to_owned()
-                                    + &ctx.format_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::NONE, Key::N)),
-                            )
-                            .clicked()
-                        {
-                            self.current_fractal = CurrentFractal::Metabrot;
-                        }
-                        if ctx.input(|i| i.key_pressed(Key::N)) {
-                            self.current_fractal = CurrentFractal::Metabrot;
-                        }
-
-                        if ui
-                            .add(egui::Button::new("mandelbrot").selected(self.current_fractal == CurrentFractal::Mandelbrot))
-                            .on_hover_text(
-                                "whether to render the mandelbrot (rather than the metabrot). keybinding: ".to_owned()
-                                    + &ctx.format_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::NONE, Key::M)),
-                            )
-                            .clicked()
-                        {
-                            self.current_fractal = CurrentFractal::Mandelbrot;
-                        };
-                        if ctx.input(|i| i.key_pressed(Key::M)) {
-                            self.current_fractal = CurrentFractal::Mandelbrot;
-                        }
-                    });
-
-                    // control other camera
-                    {
-                        ui.checkbox(&mut self.control_other_camera, "control other fractal")
-                            .on_hover_text(
-                                "pan/zoom will affect the other fractal's camera. keybinding: ".to_owned()
-                                    + &ctx.format_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::NONE, Key::C)),
-                            );
-                        self.control_other_camera ^= ctx.input(|i| i.key_pressed(Key::C));
-                    }
-
-                    egui::CollapsingHeader::new("mandelbrot").show(ui, |ui| {
-                        ui.checkbox(&mut self.draw_gradient_steps, "draw gradient steps")
-                            .on_hover_text("draw the gradient steps starting from the mouse position");
-                        ui.checkbox(&mut self.draw_sample_grid, "draw sample grid");
-                        ui.checkbox(&mut self.draw_sample_subgrid, "draw sample subgrid")
-                            .on_hover_text("requires draw sample grid to have an effect.");
-                        ui.label("draw sample grid gradient steps:")
-                            .on_hover_text("-1 to disable, 0 is the same as draw_sample_grid. keybinding: left and right arrows");
-                        ui.add(
-                            egui::Slider::new(&mut self.draw_sample_grid_gradient_steps, -1..=8)
-                                .clamping(egui::SliderClamping::Never),
-                        );
-                        self.draw_sample_grid_gradient_steps +=
-                            ctx.input(|i| i.key_pressed(Key::ArrowRight) as i32 - i.key_pressed(Key::ArrowLeft) as i32);
-                        self.draw_sample_grid_gradient_steps = self.draw_sample_grid_gradient_steps.max(-1);
-                    });
-                });
-
-                // give some margin on the bottom and right,
-                // but only when uncollapsed,
-                // so we can't use frame inner margin.
-                ui.allocate_space(Vec2::new(ui.min_size().x + 3.0, 3.0));
             });
+
+        egui::CollapsingHeader::new("settings").default_open(true).show(ui, |ui| {
+            // max fps
+            {
+                let mut target_fps = 1.0 / self.target_spf.as_secs_f64();
+                let r = ui.add(MyDragValue::new(
+                    egui::Label::new("max fps:"),
+                    egui::DragValue::new(&mut target_fps),
+                ));
+                target_fps = target_fps.max(0.01);
+                if r.dragged() {
+                    target_fps = target_fps.min(240.0);
+                }
+                if r.changed() {
+                    self.target_spf = Duration::from_secs_f64(1.0 / target_fps);
+                }
+            }
+
+            // stride
+            {
+                let mut stride = self.stride as f64;
+                let r = ui
+                    .add(MyDragValue::new(egui::Label::new("pixel size:"), egui::DragValue::new(&mut stride)))
+                    .on_hover_text("how many pixels are in a pixel.");
+                let mut stride = stride.round() as usize;
+                stride = stride.max(1);
+                if r.dragged() {
+                    stride = stride.min(64);
+                }
+                if r.changed() {
+                    self.stride = stride;
+                    self.needs_full_redraw = true;
+                }
+            }
+
+            // sampling
+            {
+                ui.checkbox(&mut self.sampling, "sampling").on_hover_text(
+                    "whether to get new samples of the metabrot. keybinding: ".to_owned()
+                        + &ctx.format_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::NONE, egui::Key::X)),
+                );
+            }
+
+            // reclaiming
+            {
+                ui.checkbox(&mut self.reclaiming, "reclaiming").on_hover_text(
+                    "whether to reclaim/free/deallocate nodes. keybinding: ".to_owned()
+                        + &ctx.format_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::NONE, egui::Key::R)),
+                );
+            }
+
+            // crosshair
+            {
+                ui.checkbox(&mut self.draw_crosshair, "draw crosshair")
+                    .on_hover_text("for metabrot, draw a dot at the screen center. for mandelbrot, draw a dot at z0.");
+            }
+
+            // current fractal
+            ui.horizontal(|ui| {
+                if ui
+                    .add(egui::Button::new("metabrot").selected(self.current_fractal == CurrentFractal::Metabrot))
+                    .on_hover_text(
+                        "whether to render the metabrot (rather than the mandelbrot). this also triggers a full redraw. keybinding: "
+                            .to_owned()
+                            + &ctx.format_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::NONE, Key::N)),
+                    )
+                    .clicked()
+                {
+                    self.current_fractal = CurrentFractal::Metabrot;
+                    self.needs_full_redraw = true;
+                }
+
+                if ui
+                    .add(egui::Button::new("mandelbrot").selected(self.current_fractal == CurrentFractal::Mandelbrot))
+                    .on_hover_text(
+                        "whether to render the mandelbrot (rather than the metabrot). keybinding: ".to_owned()
+                            + &ctx.format_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::NONE, Key::M)),
+                    )
+                    .clicked()
+                {
+                    self.current_fractal = CurrentFractal::Mandelbrot;
+                };
+            });
+
+            // control other camera
+            {
+                ui.checkbox(&mut self.control_other_camera, "control other fractal").on_hover_text(
+                    "pan/zoom will affect the other fractal's camera. keybinding: ".to_owned()
+                        + &ctx.format_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::NONE, Key::C)),
+                );
+            }
+
+            egui::CollapsingHeader::new("mandelbrot").show(ui, |ui| {
+                ui.checkbox(&mut self.draw_gradient_steps, "draw gradient steps")
+                    .on_hover_text("draw the gradient steps starting from the mouse position");
+                ui.checkbox(&mut self.draw_sample_grid, "draw sample grid");
+                ui.checkbox(&mut self.draw_sample_subgrid, "draw sample subgrid")
+                    .on_hover_text("requires draw sample grid to have an effect.");
+                {
+                    let r = ui
+                        .add(MyDragValue::new(
+                            egui::Label::new("draw sample grid gradient steps"),
+                            egui::DragValue::new(&mut self.draw_sample_grid_gradient_steps),
+                        ))
+                        .on_hover_text("-1 to disable, 0 is the same as draw_sample_grid. keybinding: left and right arrows");
+                    self.draw_sample_grid_gradient_steps = self.draw_sample_grid_gradient_steps.max(-1);
+                    if r.dragged() {
+                        self.draw_sample_grid_gradient_steps = self.draw_sample_grid_gradient_steps.min(8);
+                    }
+                }
+            });
+        });
+
+        // // give some margin on the bottom and right,
+        // // but only when uncollapsed,
+        // // so we can't use frame inner margin.
+        // ui.allocate_space(Vec2::new(ui.min_size().x + 3.0, 3.0));
     }
 }
 impl eframe::App for App {
@@ -540,6 +652,8 @@ impl eframe::App for App {
             .show(ctx, |ui| {
                 self.dts
                     .add(ctx.input(|i| i.time), ctx.input(|i| i.stable_dt));
+
+                self.keybinds(ctx);
 
                 // debug static counters
                 #[cfg(false)]
@@ -627,7 +741,7 @@ impl eframe::App for App {
 
                 // panning stuff
                 // pan the other camera when holding backtick
-                let needs_full_redraw = {
+                self.needs_full_redraw |= {
                     let before = (self.primary_camera, self.secondary_camera);
                     if self.control_other_camera
                         != (self.current_fractal == CurrentFractal::Metabrot)
@@ -666,6 +780,13 @@ impl eframe::App for App {
                 } else {
                     self.metabrot.disable_sampling();
                 }
+
+                // // reclaiming
+                // if self.reclaiming {
+                //     self.metabrot.enable_reclaiming();
+                // } else {
+                //     self.metabrot.disable_reclaiming();
+                // }
 
                 // // draw sequence of nodes that contain the mouse
                 // {
@@ -781,13 +902,7 @@ impl eframe::App for App {
                 //     }
                 // }
 
-                self.show_fractal(
-                    ctx,
-                    ui,
-                    &primary_camera_map,
-                    &secondary_camera_map,
-                    needs_full_redraw,
-                );
+                self.show_fractal(ctx, ui, &primary_camera_map, &secondary_camera_map);
 
                 // area is to allow the frame to be drawn on top of the fractal
                 egui::Area::new(egui::Id::new("area"))
@@ -796,10 +911,25 @@ impl eframe::App for App {
                     .show(ui.ctx(), |ui| {
                         // frame is for background
                         egui::Frame::new()
-                            .fill(Color32::from_gray(20))
-                            .inner_margin(3)
+                            .fill(Color32::from_rgba_unmultiplied(40, 40, 40, 245))
+                            .inner_margin(egui::Margin {
+                                left: 3,
+                                right: 6,
+                                top: 3,
+                                bottom: 6,
+                            })
+                            .corner_radius(egui::CornerRadius {
+                                nw: 0,
+                                ne: 0,
+                                sw: 0,
+                                se: 5,
+                            })
                             .show(ui, |ui| {
-                                self.show_ui(ctx, ui);
+                                egui::CollapsingHeader::new("info")
+                                    .default_open(true)
+                                    .show_unindented(ui, |ui| {
+                                        self.show_ui(ctx, ui);
+                                    });
                             });
                     });
             });
@@ -807,5 +937,35 @@ impl eframe::App for App {
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.metabrot.join();
+    }
+}
+
+use my_drag_value::*;
+mod my_drag_value {
+    use std::ops::RangeInclusive;
+
+    use egui::{DragValue, Label, Response, Ui, Widget};
+
+    use super::*;
+
+    /// puts the label to the left of the `DragValue`.
+    pub(super) struct MyDragValue<'a> {
+        label: Label,
+        drag_value: DragValue<'a>,
+    }
+    impl<'a> MyDragValue<'a> {
+        pub fn new(label: Label, drag_value: DragValue<'a>) -> MyDragValue<'a> {
+            MyDragValue { label, drag_value }
+        }
+    }
+    impl Widget for MyDragValue<'_> {
+        fn ui(self, ui: &mut Ui) -> Response {
+            let r = ui.horizontal(|ui| {
+                let label_r = self.label.ui(ui);
+                let slider_r = self.drag_value.ui(ui);
+                label_r | slider_r
+            });
+            r.inner | r.response
+        }
     }
 }

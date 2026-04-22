@@ -35,11 +35,11 @@ struct Node {
     left_child: Atomic<Option<NodeHandle>>,
     // TODO: maybe replace `Atomic` -> `UnsafeCell`
     // actually i think this has to be atomic bc it's modified when other threads might be looking at it.
-    // we could avoid that by putting a tag on the left_child
-    // which prevents other threads from following it, but whatever.
+    // we could avoid that by putting a tag on left_child that
+    // prevents other threads from following it, but whatever.
     color: Atomic<Option<Rgb>>,
     /// distance to the closest leaf.
-    /// 0 if we're a leaf, else 1 + max(children.height).
+    /// 0 if we're a leaf, else 1 + max(c.height for c in children).
     /// this is used in `refine` to find the shallowest leafs.
     /// btw, this could be a u16 or maybe even a u8.
     height: AtomicU32,
@@ -102,14 +102,14 @@ pub(crate) struct Tree {
     root: NodeHandle,
 }
 impl Tree {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(data: &mut ThreadData) -> Self {
         let dom = Domain::default();
         let color = metabrot_sample(dom.mid()).color().try_into().unwrap();
         let alloc = Alloc::default();
 
         // we leave 3 nodes uninit
         // i don't want to deal with a main thread `TreadData`, so just leak
-        let root_handle = alloc.alloc4(&mut ThreadData::default());
+        let root_handle = alloc.alloc4(data);
         let root = alloc.get(root_handle);
 
         // this is UB because `Node` isn't inside an `UnsafeCell`
@@ -219,6 +219,12 @@ impl Tree {
             // this will be UB.
             left_child = parent_handle.left_sibling();
         }
+    }
+
+    /// returns `None` if we shouldn't/can't reclaim.
+    #[cfg_attr(feature = "profiling", inline(never))]
+    pub(crate) fn reclaim(&self) -> Option<()> {
+        todo!()
     }
 
     /// returns `None` if we shouldn't/can't refine.

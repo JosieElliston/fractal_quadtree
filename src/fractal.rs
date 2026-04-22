@@ -44,28 +44,35 @@ struct Shared {
 
 pub(crate) use main_thread::*;
 mod main_thread {
+    use crate::tree::ThreadData;
+
     use super::*;
 
     /// owned by the pool/main thread
     struct WorkerHandle {
         handle: thread::JoinHandle<()>,
-        timer: MultiTimer,
-        timer_receiver: Receiver<MultiTimer>,
+        /// workers don't actually update this on every iteration,
+        /// they batch updates using a local timer.
+        /// this isn't in `shared` bc the workers shouldn't know about each other's timers.
+        // TODO: maybe replace `Mutex` with `Atomic`
+        shared_timer: Arc<Mutex<MultiTimer>>,
     }
 
     pub(crate) struct Fractal {
         shared: Shared,
         workers: Vec<WorkerHandle>,
+        pub(crate) thread_data: ThreadData,
     }
     impl Fractal {
-        pub(crate) fn new_metabrot() -> Self {
+        pub(crate) fn new() -> Self {
             let thread_count = (thread::available_parallelism()
                 .map(|thread_count| thread_count.get())
                 .unwrap_or(1)
                 - 1)
             .max(1);
+            let mut thread_data = ThreadData::default();
             let shared = Shared {
-                tree: Arc::new(Tree::new()),
+                tree: Arc::new(Tree::new(&mut thread_data)),
                 now: Arc::new(Atomic::new(Moment::default())),
                 window: Arc::new(RwLock::new(None)),
                 sample_counter: Arc::new(AtomicU64::new(0)),
@@ -82,19 +89,23 @@ mod main_thread {
                         shared_texture: Arc::clone(&shared.shared_texture),
                         kill: Arc::clone(&shared.kill),
                     };
-                    let (timer_sender, timer_receiver) = mpsc::channel();
+                    let shared_timer = Arc::new(Mutex::new(MultiTimer::default()));
+                    let worker_timer = Arc::clone(&shared_timer);
                     let handle = thread::Builder::new()
                         .name(format!("pool {}", thread_i))
-                        .spawn(move || WorkerLocal::new(shared, thread_i, timer_sender).run())
+                        .spawn(move || WorkerLocal::new(shared, thread_i, worker_timer).run())
                         .unwrap();
                     WorkerHandle {
                         handle,
-                        timer: MultiTimer::default(),
-                        timer_receiver,
+                        shared_timer,
                     }
                 })
                 .collect();
-            Self { shared, workers }
+            Self {
+                shared,
+                workers,
+                thread_data,
+            }
         }
 
         pub(crate) fn tree(&self) -> &Arc<Tree> {
@@ -105,22 +116,38 @@ mod main_thread {
             self.workers.len()
         }
 
-        /// `&mut self` bc we need to receive updates.
-        pub(crate) fn timers(&mut self) -> Vec<MultiTimer> {
-            for worker in &mut self.workers {
-                while let Ok(timer) = worker.timer_receiver.try_recv() {
-                    worker.timer += timer;
-                }
-            }
+        // /// `&mut self` bc we need to receive updates.
+        // pub(crate) fn timers(&mut self) -> Vec<MultiTimer> {
+        //     for worker in &mut self.workers {
+        //         while let Ok(timer) = worker.timer_receiver.try_recv() {
+        //             worker.timer += timer;
+        //         }
+        //     }
+        //     self.workers
+        //         .iter()
+        //         .map(|worker| worker.timer.clone())
+        //         .collect()
+        // }
+        // pub(crate) fn reset_timers(&mut self) {
+        //     for worker in &mut self.workers {
+        //         worker.timer.reset();
+        //     }
+        // }
+
+        /// receive updates and reset the timers.
+        pub(crate) fn timer(&mut self) -> MultiTimer {
             self.workers
                 .iter()
-                .map(|worker| worker.timer.clone())
-                .collect()
-        }
-        pub(crate) fn reset_timers(&mut self) {
-            for worker in &mut self.workers {
-                worker.timer.reset();
-            }
+                .map(|worker| {
+                    let mut timer = worker.shared_timer.lock().expect("shared_timer poisoned");
+                    let ret = *timer;
+                    // this here is why i prefer `reset` over `= MultiTimer::default()`,
+                    // because otherwise it's a bit syntactically ambiguous whether we're just overwriting a local variable.
+                    timer.reset();
+                    ret
+                })
+                .reduce(|lhs, rhs| lhs + rhs)
+                .expect("we don't have any workers")
         }
 
         pub(crate) fn join(&mut self) {
@@ -152,9 +179,19 @@ mod main_thread {
             *shared_window = None;
         }
 
+        #[cfg_attr(feature = "profiling", inline(never))]
+        pub(crate) fn enable_reclaiming(&mut self) {
+            dbg!("somehow notify the workers");
+        }
+
+        #[cfg_attr(feature = "profiling", inline(never))]
+        pub(crate) fn disable_reclaiming(&mut self) {
+            dbg!("somehow notify the workers");
+        }
+
         /// it's optional to call this every frame
         #[cfg_attr(feature = "profiling", inline(never))]
-        pub(crate) fn begin_rendering(&mut self, camera_map: CameraMap, needs_full_redraw: bool) {
+        pub(crate) fn begin_rendering(&mut self, camera_map: &CameraMap, needs_full_redraw: bool) {
             // acquire exclusive access to shared_texture
             // do it now instead of at each access
             // TODO: we shouldn't need to block here once i've gotten rid of `RwLock`
@@ -185,13 +222,7 @@ mod main_thread {
 
             // resize self.texture if needed
             {
-                let (width, height) = (
-                    camera_map.rect().width() as usize,
-                    camera_map.rect().height() as usize,
-                );
-                if shared_texture.needs_resize(width, height) {
-                    shared_texture.resize(width, height);
-                }
+                shared_texture.resize_if_needed(camera_map);
             }
 
             // reset the texture locks
@@ -318,27 +349,27 @@ mod worker_thread {
         /// note that the len should be <= 4.
         /// TODO: rename
         to_be_colored: Vec<NodeHandle>,
-        timer: MultiTimer,
-        timer_sender: Sender<MultiTimer>,
+        /// accumulate updates here.
+        local_timer: MultiTimer,
+        /// use batched updates.
+        shared_timer: Arc<Mutex<MultiTimer>>,
         last_sent: Instant,
     }
     impl WorkerLocal {
-        // make sure it's ever full
-        const TIMER_SEND_INTERVAL: Duration = Duration::from_millis(1);
-        // const TIMER_SEND_INTERVAL: Duration = Duration::from_millis(100);
+        const SHARED_TIMER_UPDATE_INTERVAL: Duration = Duration::from_millis(5);
 
         pub(super) fn new(
             shared: Shared,
             thread_i: usize,
-            timer_sender: Sender<MultiTimer>,
+            shared_timer: Arc<Mutex<MultiTimer>>,
         ) -> Self {
             Self {
                 shared,
                 thread_i,
                 thread_data: ThreadData::default(),
                 to_be_colored: Vec::with_capacity(4),
-                timer: MultiTimer::default(),
-                timer_sender,
+                local_timer: MultiTimer::default(),
+                shared_timer,
                 last_sent: Instant::now(),
             }
         }
@@ -373,10 +404,10 @@ mod worker_thread {
                             )
                             .is_ok()
                     {
+                        // TODO: we don't need this mutex, replace with `UnsafeCell`
                         let mut l = shared_texture.texture()[line_i]
                             .try_lock()
                             .expect("we just locked it");
-
                         {
                             // TODO: do more of this, perhaps bisection bc that's easier than real spacial stuff
                             let line_needs_redraw = prev_frame_start == Moment::MIN
@@ -459,6 +490,14 @@ mod worker_thread {
             Some(())
         }
 
+        fn try_reclaim(&mut self) -> Option<()> {
+            dbg!("somehow notify the workers to reclaim/free/deallocate nodes");
+            return None;
+            dbg!("reclaim");
+
+            Some(())
+        }
+
         fn try_split(&mut self) -> Option<()> {
             let window = match self.shared.window.try_read() {
                 Ok(window) => *window.as_ref()?,
@@ -490,16 +529,19 @@ mod worker_thread {
 
                 // rendering is highest priority
                 // followed by sampling
+                // followed by reclaiming
                 // followed by splitting
 
                 let start = Instant::now();
 
                 if self.try_draw().is_some() {
-                    self.timer.draw.add(start.elapsed());
+                    self.local_timer.draw.insert(start.elapsed());
                 } else if self.try_sample().is_some() {
-                    self.timer.sample.add(start.elapsed());
+                    self.local_timer.sample.insert(start.elapsed());
+                // } else if self.try_reclaim().is_some() {
+                //     self.local_timer.reclaim.insert(start.elapsed());
                 } else if self.try_split().is_some() {
-                    self.timer.split.add(start.elapsed());
+                    self.local_timer.split.insert(start.elapsed());
                 } else {
                     // dbg!("idle");
                     // thread::yield_now();
@@ -508,23 +550,16 @@ mod worker_thread {
                     // except it doesn't work in release mode.
                     thread::sleep(Duration::from_millis(10));
 
-                    self.timer.idle.add(start.elapsed());
+                    self.local_timer.idle.insert(start.elapsed());
                 }
 
                 // update the shared timer rarely for performance
-                if self.last_sent.elapsed() >= Self::TIMER_SEND_INTERVAL {
-                    match self.timer_sender.send(self.timer) {
-                        Ok(()) => {
-                            self.timer.reset();
-                            self.last_sent = Instant::now();
-                        }
-                        Err(SendError(_timer)) => {
-                            eprintln!(
-                                "timer_receiver disconnected, last sent {:?} ago",
-                                self.last_sent.elapsed()
-                            );
-                        }
+                if self.last_sent.elapsed() >= Self::SHARED_TIMER_UPDATE_INTERVAL {
+                    {
+                        let mut guard = self.shared_timer.lock().expect("shared_timer poisoned");
+                        *guard += self.local_timer;
                     }
+                    self.local_timer.reset();
                     self.last_sent = Instant::now();
                 }
             }
@@ -540,25 +575,36 @@ mod timer {
 
     #[derive(Debug, Clone, Copy, Default)]
     pub(crate) struct Timer {
-        pub(crate) elapsed: Duration,
-        pub(crate) count: u64,
+        elapsed: Duration,
+        count: u64,
     }
     impl Timer {
-        pub(super) fn add(&mut self, elapsed: Duration) {
+        pub(super) fn insert(&mut self, elapsed: Duration) {
             self.elapsed += elapsed;
             self.count += 1;
         }
 
-        pub(crate) fn reset(&mut self) {
-            self.elapsed = Duration::ZERO;
-            self.count = 0;
+        pub(crate) fn elapsed(&self) -> Duration {
+            self.elapsed
         }
 
-        pub(crate) fn average(&self) -> Option<Duration> {
+        pub(crate) fn count(&self) -> u64 {
+            self.count
+        }
+
+        pub(crate) fn div_elapsed(&self, elapsed: Duration) -> f64 {
+            self.elapsed.div_duration_f64(elapsed)
+        }
+
+        pub(crate) fn div_count(&self, count: u64) -> Option<Duration> {
             (self.elapsed.as_nanos() as u64)
-                .checked_div(self.count)
+                .checked_div(count)
                 .map(Duration::from_nanos)
         }
+
+        // pub(crate) fn time_per_iter(&self) -> Option<Duration> {
+        //     self.div(self.count)
+        // }
     }
     impl ops::AddAssign for Timer {
         fn add_assign(&mut self, rhs: Self) {
@@ -584,15 +630,17 @@ mod timer {
     pub(crate) struct MultiTimer {
         pub(crate) draw: Timer,
         pub(crate) sample: Timer,
+        pub(crate) reclaim: Timer,
         pub(crate) split: Timer,
         pub(crate) idle: Timer,
     }
     impl MultiTimer {
         pub(crate) fn reset(&mut self) {
-            self.draw.reset();
-            self.sample.reset();
-            self.split.reset();
-            self.idle.reset();
+            *self = Self::default();
+        }
+
+        pub(crate) fn total(&self) -> Timer {
+            self.draw + self.sample + self.reclaim + self.split + self.idle
         }
     }
     impl ops::AddAssign for MultiTimer {
@@ -610,6 +658,7 @@ mod timer {
             Self {
                 draw: self.draw + rhs.draw,
                 sample: self.sample + rhs.sample,
+                reclaim: self.reclaim + rhs.reclaim,
                 split: self.split + rhs.split,
                 idle: self.idle + rhs.idle,
             }
@@ -644,11 +693,13 @@ mod shared_texture {
         /// *and* when workers check if they're finished,
         /// they only need to check one location and not all of the locks.
         camera_map: Option<CameraMap>,
-        /// these are set when a line begins rendering
+        /// these are set when a line begins rendering.
         texture_lock_begin: Vec<AtomicBool>,
-        /// these are set when a line finishes rendering
+        /// these are set when a line finishes rendering.
         texture_lock_finish: Vec<AtomicBool>,
-        /// should never call `lock`, only `try_lock`
+        /// should never call `lock`, only `try_lock`.
+        /// TODO: with the texture locks, maybe this doesn't need a `Mutex`, just an `UnsafeCell`.
+        /// TODO: inner `Vec` should be a `Box<[Color32]>`.
         texture: Vec<Mutex<Vec<Color32>>>,
     }
     impl Default for SharedTextureInner {
@@ -702,17 +753,20 @@ mod shared_texture {
             &self.texture
         }
 
-        pub(super) fn needs_resize(&self, width: usize, height: usize) -> bool {
-            self.width() != width || self.height() != height
-        }
-
         /// also sets `prev_frame_start` to `Moment::MIN` to indicate that we need a full redraw.
-        pub(super) fn resize(&mut self, width: usize, height: usize) {
+        pub(super) fn resize_if_needed(&mut self, camera_map: &CameraMap) {
+            let width = camera_map.pixels_width();
+            let height = camera_map.pixels_height();
+
+            if self.width() == width && self.height() == height {
+                return;
+            }
             self.prev_frame_start = Moment::MIN;
             self.texture_lock_begin.clear();
             self.texture_lock_finish.clear();
             // TODO: is this correct with regard to the mutexes?
             self.texture.clear();
+
             self.texture_lock_begin
                 .resize_with(height, || AtomicBool::new(true));
             self.texture_lock_finish
@@ -726,7 +780,7 @@ mod shared_texture {
         /// should be called after resize.
         /// checks that self.camera_map is None
         // /// &mut self isn't really necessary, but it's semantically nice that only the main thread can reset the locks.
-        pub(super) fn reset_locks(&mut self, camera_map: CameraMap) {
+        pub(super) fn reset_locks(&mut self, camera_map: &CameraMap) {
             assert!(self.camera_map.is_none(), "camera_map wasn't None");
             debug_assert!(
                 self.texture_lock_begin
@@ -750,7 +804,7 @@ mod shared_texture {
                 lock.store(false, Ordering::SeqCst);
             }
 
-            self.camera_map = Some(camera_map);
+            self.camera_map = Some(camera_map.clone());
         }
 
         pub(super) fn block_until_finished(&self) {
