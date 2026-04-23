@@ -54,6 +54,7 @@ pub(crate) struct App {
     current_fractal: CurrentFractal,
     control_other_camera: bool,
     draw_gradient_steps: bool,
+    draw_sample_window: bool,
     draw_sample_grid: bool,
     draw_sample_subgrid: bool,
     draw_sample_grid_gradient_steps: i32,
@@ -88,6 +89,7 @@ impl App {
             current_fractal: CurrentFractal::Metabrot,
             control_other_camera: false,
             draw_gradient_steps: true,
+            draw_sample_window: true,
             draw_sample_grid: true,
             draw_sample_subgrid: false,
             draw_sample_grid_gradient_steps: -1,
@@ -238,12 +240,14 @@ impl App {
             };
 
             // draw the outline of the window
-            painter.rect_stroke(
-                secondary_camera_map.window_to_rect(window),
-                0.0,
-                egui::Stroke::new(2.0, Color32::WHITE),
-                egui::StrokeKind::Middle,
-            );
+            if self.draw_sample_window {
+                painter.rect_stroke(
+                    secondary_camera_map.window_to_rect(window),
+                    0.0,
+                    egui::Stroke::new(2.0, Color32::WHITE),
+                    egui::StrokeKind::Middle,
+                );
+            }
 
             // debug for gradient descent steps
             // draw dots where we took samples, to debug aliasing
@@ -686,6 +690,7 @@ impl App {
             egui::CollapsingHeader::new("mandelbrot").show(ui, |ui| {
                 ui.checkbox(&mut self.draw_gradient_steps, "draw gradient steps")
                     .on_hover_text("draw the gradient steps starting from the mouse position");
+                ui.checkbox(&mut self.draw_sample_window, "draw sample window");
                 ui.checkbox(&mut self.draw_sample_grid, "draw sample grid");
                 ui.checkbox(&mut self.draw_sample_subgrid, "draw sample subgrid")
                     .on_hover_text("requires draw sample grid to have an effect.");
