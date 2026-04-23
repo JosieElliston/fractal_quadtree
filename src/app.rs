@@ -26,9 +26,11 @@ enum CurrentFractal {
     Mandelbrot,
 }
 
+// TODO: separate this into smaller structs
+// ui, fractal, metabrot, mandelbrot
 pub(crate) struct App {
     metabrot: Fractal,
-    target_fractal_spf: Duration,
+    fractal_target_spf: Duration,
     fractal_try_render_time: Instant,
     fractal_successful_render_time: Instant,
     fractal_accumulator_ns: i128,
@@ -67,7 +69,7 @@ impl App {
     pub(crate) fn new(cc: &eframe::CreationContext<'_>) -> Self {
         Self {
             metabrot: Fractal::new(),
-            target_fractal_spf: Duration::from_secs_f64(1.0 / 30.0),
+            fractal_target_spf: Duration::from_secs_f64(1.0 / 30.0),
             fractal_try_render_time: Instant::now(),
             fractal_successful_render_time: Instant::now(),
             fractal_accumulator_ns: 0,
@@ -144,7 +146,7 @@ impl App {
             let dt = (now - self.fractal_try_render_time).as_nanos();
             self.fractal_try_render_time = now;
             self.fractal_accumulator_ns += dt as i128;
-            self.fractal_accumulator_ns > self.target_fractal_spf.as_nanos() as i128
+            self.fractal_accumulator_ns > self.fractal_target_spf.as_nanos() as i128
         };
         // don't wait if we need a full redraw, bc then panning looks bad.
         if should_rerender || self.needs_full_redraw {
@@ -154,13 +156,13 @@ impl App {
             );
             self.fractal_successful_render_time = now;
 
-            self.fractal_accumulator_ns -= self.target_fractal_spf.as_nanos() as i128;
+            self.fractal_accumulator_ns -= self.fractal_target_spf.as_nanos() as i128;
             // because we sometimes are forced to redraw.
             // don't allow the accumulator to get too negative,
             // or else we get a big lag spike when we finally do redraw.
             self.fractal_accumulator_ns = self
                 .fractal_accumulator_ns
-                .max(-(self.target_fractal_spf.as_nanos() as i128));
+                .max(-(self.fractal_target_spf.as_nanos() as i128));
 
             match self.current_fractal {
                 CurrentFractal::Metabrot => {
@@ -555,121 +557,169 @@ impl App {
                 });
 
                 egui::CollapsingHeader::new("camera").show(ui, |ui| {
-                    ui.label(format!(
-                        "metabrot real mid: {:12.09}",
-                        self.primary_camera.real_mid()
-                    ));
-                    ui.label(format!(
-                        "metabrot imag mid: {:12.09}",
-                        self.primary_camera.imag_mid()
-                    ));
-                    ui.label(format!(
-                        "metabrot real rad: {:12.09}",
-                        self.primary_camera.real_rad()
-                    ));
-                    ui.separator();
-                    ui.label(format!(
-                        "mandelbrot real mid: {:12.09}",
-                        self.secondary_camera.real_mid()
-                    ));
-                    ui.label(format!(
-                        "mandelbrot imag mid: {:12.09}",
-                        self.secondary_camera.imag_mid()
-                    ));
-                    ui.label(format!(
-                        "mandelbrot real rad: {:12.09}",
-                        self.secondary_camera.real_rad()
-                    ));
+                    let add_contents = |ui: &mut egui::Ui| {
+                        ui.label(format!(
+                            "metabrot real mid: {:12.09}",
+                            self.primary_camera.real_mid()
+                        ));
+                        ui.label(format!(
+                            "metabrot imag mid: {:12.09}",
+                            self.primary_camera.imag_mid()
+                        ));
+                        ui.label(format!(
+                            "metabrot real rad: {:12.09}",
+                            self.primary_camera.real_rad()
+                        ));
+
+                        // do this so the separator's size is the size of the content,
+                        // rather than the full width of the parent container.
+                        // TODO: the separator only gets sized to the content above it.
+                        ui.shrink_width_to_current();
+                        ui.separator();
+
+                        ui.label(format!(
+                            "mandelbrot real mid: {:12.09}",
+                            self.secondary_camera.real_mid()
+                        ));
+                        ui.label(format!(
+                            "mandelbrot imag mid: {:12.09}",
+                            self.secondary_camera.imag_mid()
+                        ));
+                        ui.label(format!(
+                            "mandelbrot real rad: {:12.09}",
+                            self.secondary_camera.real_rad()
+                        ));
+                    };
+                    add_contents(ui);
+
+                    // egui::Area::new("camera").
+                    // egui::Frame::
+                    // egui::UiBuilder::new()
+                    // ui.set_sizing_pass();
+                    // ui.allocate_exact_size(, egui::Sense::empty());
+                    // ui.scope_builder(egui::UiBuilder::, add_contents)
+                    // ui.scope(|ui| {});
+                    // ui.shrink_width_to_current();
+
+                    // ui.scope_builder(egui::UiBuilder::new(), |ui| {
+                    //     add_contents(ui);
+                    // });
+                    // egui::Area::new(egui::Id::new("camera")).show(ctx, |ui| {
+                    //     ui.scope_builder(egui::UiBuilder::new(), |ui| {
+                    //         add_contents(ui);
+                    //     });
+                    // });
+                    // let r = ui
+                    //     .scope_builder(egui::UiBuilder::new().sizing_pass(), |ui| {
+                    //         add_contents(ui);
+                    //     })
+                    //     .response;
+                    // ui.scope_builder(egui::UiBuilder::new(), |ui| {
+                    //     ui.set_max_size(r.rect.size());
+                    //     add_contents(ui);
+                    // });
                 });
+                // ui.shrink_width_to_current();
 
                 egui::CollapsingHeader::new("timers")
                     .default_open(true)
                     .show(ui, |ui| {
-                        self.timers
-                            .add(ctx.input(|i| i.time), self.metabrot.timer());
-                        let timer = self
-                            .timers
-                            .values()
-                            .reduce(|lhs, rhs| lhs + rhs)
-                            .unwrap_or_default();
+                        let add_contents = |ui: &mut egui::Ui| {
+                            let timer = self
+                                .timers
+                                .values()
+                                .reduce(|lhs, rhs| lhs + rhs)
+                                .unwrap_or_default();
 
-                        ui.label(format!(
-                            "us per draw: {:.03}",
-                            timer
-                                .draw
-                                .div_count(timer.draw.count())
-                                .unwrap_or_default()
-                                .as_nanos() as f64
-                                / 1000.0
-                        ));
-                        ui.label(format!(
-                            "us per sample: {:.03}",
-                            timer
-                                .sample
-                                .div_count(timer.sample.count())
-                                .unwrap_or_default()
-                                .as_nanos() as f64
-                                / 1000.0
-                        ));
-                        ui.label(format!(
-                            "us per reclaim: {:.03}",
-                            timer
-                                .reclaim
-                                .div_count(timer.reclaim.count())
-                                .unwrap_or_default()
-                                .as_nanos() as f64
-                                / 1000.0
-                        ));
-                        ui.label(format!(
-                            "us per split: {:.03}",
-                            timer
-                                .split
-                                .div_count(timer.split.count())
-                                .unwrap_or_default()
-                                .as_nanos() as f64
-                                / 1000.0
-                        ));
-                        ui.label(format!(
-                            "us per idle: {:.03}",
-                            timer
-                                .idle
-                                .div_count(timer.idle.count())
-                                .unwrap_or_default()
-                                .as_nanos() as f64
-                                / 1000.0
-                        ));
+                            ui.label(format!(
+                                "us per draw: {:.03}",
+                                timer
+                                    .draw
+                                    .div_count(timer.draw.count())
+                                    .unwrap_or_default()
+                                    .as_nanos() as f64
+                                    / 1000.0
+                            ));
+                            ui.label(format!(
+                                "us per sample: {:.03}",
+                                timer
+                                    .sample
+                                    .div_count(timer.sample.count())
+                                    .unwrap_or_default()
+                                    .as_nanos() as f64
+                                    / 1000.0
+                            ));
+                            ui.label(format!(
+                                "us per reclaim: {:.03}",
+                                timer
+                                    .reclaim
+                                    .div_count(timer.reclaim.count())
+                                    .unwrap_or_default()
+                                    .as_nanos() as f64
+                                    / 1000.0
+                            ));
+                            ui.label(format!(
+                                "us per split: {:.03}",
+                                timer
+                                    .split
+                                    .div_count(timer.split.count())
+                                    .unwrap_or_default()
+                                    .as_nanos() as f64
+                                    / 1000.0
+                            ));
+                            ui.label(format!(
+                                "us per idle: {:.03}",
+                                timer
+                                    .idle
+                                    .div_count(timer.idle.count())
+                                    .unwrap_or_default()
+                                    .as_nanos() as f64
+                                    / 1000.0
+                            ));
 
-                        // TODO: flamegraph
-                        ui.separator();
-                        let total_elapsed = timer.total().elapsed();
+                            // do this so the separator's size is the size of the content,
+                            // rather than the full width of the parent container.
+                            // TODO: the separator only gets sized to the content above it.
+                            ui.shrink_width_to_current();
+                            ui.separator();
+                            // TODO: flamegraph
+                            let total_elapsed = timer.total().elapsed();
 
-                        ui.label(format!(
-                            "draw portion: {:.03}",
-                            timer.draw.div_elapsed(total_elapsed)
-                        ));
-                        ui.label(format!(
-                            "sample portion: {:.03}",
-                            timer.sample.div_elapsed(total_elapsed)
-                        ));
-                        ui.label(format!(
-                            "reclaim portion: {:.03}",
-                            timer.reclaim.div_elapsed(total_elapsed)
-                        ));
-                        ui.label(format!(
-                            "split portion: {:.03}",
-                            timer.split.div_elapsed(total_elapsed)
-                        ));
-                        ui.label(format!(
-                            "idle portion: {:.03}",
-                            timer.idle.div_elapsed(total_elapsed)
-                        ));
+                            ui.label(format!(
+                                "draw portion: {:.03}",
+                                timer.draw.div_elapsed(total_elapsed)
+                            ));
+                            ui.label(format!(
+                                "sample portion: {:.03}",
+                                timer.sample.div_elapsed(total_elapsed)
+                            ));
+                            ui.label(format!(
+                                "reclaim portion: {:.03}",
+                                timer.reclaim.div_elapsed(total_elapsed)
+                            ));
+                            ui.label(format!(
+                                "split portion: {:.03}",
+                                timer.split.div_elapsed(total_elapsed)
+                            ));
+                            ui.label(format!(
+                                "idle portion: {:.03}",
+                                timer.idle.div_elapsed(total_elapsed)
+                            ));
+                        };
+                        add_contents(ui);
+                        // // we don't want to inherit the min rect from our parent
+                        // // it should be even smaller
+                        // ui.scope_builder(egui::UiBuilder::new(), |ui| {
+                        //     add_contents(ui);
+                        // });
                     });
+                // ui.shrink_width_to_current();
             });
 
         egui::CollapsingHeader::new("settings").default_open(true).show(ui, |ui| {
             // max fps
             {
-                let mut target_fps = 1.0 / self.target_fractal_spf.as_secs_f64();
+                let mut target_fps = 1.0 / self.fractal_target_spf.as_secs_f64();
                 let r = ui
                     .add(MyDragValue::new(egui::Label::new("max fps:"), egui::DragValue::new(&mut target_fps)))
                     .on_hover_text(
@@ -680,7 +730,7 @@ impl App {
                     target_fps = target_fps.min(240.0);
                 }
                 if r.changed() {
-                    self.target_fractal_spf = Duration::from_secs_f64(1.0 / target_fps);
+                    self.fractal_target_spf = Duration::from_secs_f64(1.0 / target_fps);
                 }
             }
 
@@ -816,6 +866,9 @@ impl eframe::App for App {
             .show(ctx, |ui| {
                 self.global_dts
                     .add(ctx.input(|i| i.time), ctx.input(|i| i.stable_dt));
+
+                self.timers
+                    .add(ctx.input(|i| i.time), self.metabrot.timer());
 
                 self.keybinds(ctx);
 

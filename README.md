@@ -7,10 +7,7 @@ drawing the metabrot set, caching samples in a quadtree. [some](https://github.c
 ## controls
 
 - pan/zoom with mouse
-- space to toggle getting new samples
-- number keys to switch which fractal is drawn
-- hold backtick to pan/zoom the secondary camera, which is used for some fractals
-- left/right arrows to draw the debug gradient decent points
+- various controls in info menu, descriptions and keybinds shown on hover
 
 ## implementation
 

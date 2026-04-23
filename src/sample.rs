@@ -124,6 +124,7 @@ impl SampleDepth {
 impl SampleDistanceGradient {
     /// returns the estimated distance and gradient of the estimated distance.
     // TODO: compute the gradient exactly, not with finite difference
+    // TODO: maybe use the wirtinger derivative
     // TODO: if we immediately normalize the gradient, we don't have to deal with fixed point domain errors
     #[cfg_attr(feature = "profiling", inline(never))]
     pub(crate) fn new(z0: (Real, Imag), (c_real, c_imag): (Real, Imag)) -> Option<Self> {
