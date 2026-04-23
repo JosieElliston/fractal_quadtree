@@ -9,7 +9,6 @@ use crate::{
     complex::{Camera, CameraMap, Domain, Window, fixed::*},
     fractal::{self, Fractal},
     sample,
-    tree::ThreadData,
 };
 
 /// fancy dynamic radius based on zoom
@@ -28,15 +27,16 @@ enum CurrentFractal {
 
 pub(crate) struct App {
     metabrot: Fractal,
-    stride: usize,
     target_fractal_spf: Duration,
     fractal_try_render_time: Instant,
     fractal_successful_render_time: Instant,
     fractal_accumulator_ns: i128,
     primary_camera: Camera,
     primary_camera_velocity: Vec2,
+    primary_camera_stride: usize,
     secondary_camera: Camera,
     secondary_camera_velocity: Vec2,
+    secondary_camera_stride: usize,
     global_dts: egui::util::History<f32>,
     fractal_dts: egui::util::History<f32>,
     /// how many samples we received on each frame
@@ -63,15 +63,16 @@ impl App {
     pub(crate) fn new(cc: &eframe::CreationContext<'_>) -> Self {
         Self {
             metabrot: Fractal::new(),
-            stride: 1,
             target_fractal_spf: Duration::from_secs_f64(1.0 / 30.0),
             fractal_try_render_time: Instant::now(),
             fractal_successful_render_time: Instant::now(),
             fractal_accumulator_ns: 0,
             primary_camera: Camera::default(),
             primary_camera_velocity: Vec2::ZERO,
+            primary_camera_stride: 1,
             secondary_camera: Camera::default(),
             secondary_camera_velocity: Vec2::ZERO,
+            secondary_camera_stride: 8,
             global_dts: egui::util::History::new(2..1000, 0.2),
             fractal_dts: egui::util::History::new(2..1000, 0.2),
             sample_counts: egui::util::History::new(10..1000, 5.0),
@@ -498,6 +499,7 @@ impl App {
                         "metabrot real rad: {:12.09}",
                         self.primary_camera.real_rad()
                     ));
+                    ui.separator();
                     ui.label(format!(
                         "mandelbrot real mid: {:12.09}",
                         self.secondary_camera.real_mid()
@@ -613,19 +615,36 @@ impl App {
                 }
             }
 
-            // stride
+            // metabrot stride
             {
-                let mut stride = self.stride as f64;
+                let mut stride = self.primary_camera_stride as f64;
                 let r = ui
-                    .add(MyDragValue::new(egui::Label::new("pixel size:"), egui::DragValue::new(&mut stride)))
-                    .on_hover_text("how many pixels are in a pixel.");
+                    .add(MyDragValue::new(egui::Label::new("metabrot pixel size:"), egui::DragValue::new(&mut stride)))
+                    .on_hover_text("how many pixels are in a pixel for the metabrot.");
                 let mut stride = stride.round() as usize;
                 stride = stride.max(1);
                 if r.dragged() {
                     stride = stride.min(64);
                 }
                 if r.changed() {
-                    self.stride = stride;
+                    self.primary_camera_stride = stride;
+                    self.needs_full_redraw = true;
+                }
+            }
+            
+            // mandelbrot stride
+            {
+                let mut stride = self.secondary_camera_stride as f64;
+                let r = ui
+                    .add(MyDragValue::new(egui::Label::new("mandelbrot pixel size:"), egui::DragValue::new(&mut stride)))
+                    .on_hover_text("how many pixels are in a pixel for the mandelbrot.");
+                let mut stride = stride.round() as usize;
+                stride = stride.max(1);
+                if r.dragged() {
+                    stride = stride.min(64);
+                }
+                if r.changed() {
+                    self.secondary_camera_stride = stride;
                     self.needs_full_redraw = true;
                 }
             }
@@ -836,9 +855,9 @@ impl eframe::App for App {
                 };
 
                 let primary_camera_map =
-                    CameraMap::new(ui.max_rect(), self.primary_camera, self.stride);
+                    CameraMap::new(ui.max_rect(), self.primary_camera, self.primary_camera_stride);
                 let secondary_camera_map =
-                    CameraMap::new(ui.max_rect(), self.secondary_camera, self.stride);
+                    CameraMap::new(ui.max_rect(), self.secondary_camera, self.secondary_camera_stride);
 
                 // sampling
                 if self.sampling {
