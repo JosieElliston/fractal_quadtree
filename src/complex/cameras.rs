@@ -103,6 +103,9 @@ impl CameraMap {
     pub(crate) fn rect(&self) -> Rect {
         self.rect
     }
+    pub(crate) fn camera(&self) -> Camera {
+        self.camera
+    }
     /// equivalent to `self.rect_to_window(self.rect())`
     pub(crate) fn window(&self) -> Option<Window> {
         Window::try_from_lo_hi(
@@ -239,6 +242,23 @@ impl CameraMap {
         self.rect.height() as usize / stride
     }
 
+    pub(crate) fn rect_at(&self, row: usize, col: usize) -> Rect {
+        let stride = self.stride.unwrap().get();
+        Rect::from_min_size(
+            Pos2::new(col as f32, row as f32) * stride as f32 + self.rect.min.to_vec2(),
+            Vec2::new(stride as f32, stride as f32),
+        )
+    }
+    pub(crate) fn pixel_at(&self, row: usize, col: usize) -> Option<Pixel> {
+        let stride = self.stride.unwrap().get();
+        Pixel::try_from_lo_hi(
+            self.x_to_real(col as f32)?,
+            self.x_to_real((col + stride) as f32)?,
+            self.y_to_imag((row + stride) as f32)?,
+            self.y_to_imag(row as f32)?,
+        )
+    }
+
     /// pixel is None if it couldn't be constructed,
     /// so it would be too small or outside the fixed point domain
     pub(crate) fn pixels(
@@ -250,22 +270,7 @@ impl CameraMap {
             .map(move |row| {
                 (0..self.rect.size().x as usize)
                     .step_by(stride)
-                    .map(move |col| {
-                        (
-                            Rect::from_min_size(
-                                Pos2::new(col as f32, row as f32),
-                                Vec2::new(stride as f32, stride as f32),
-                            ),
-                            (|| {
-                                Pixel::try_from_lo_hi(
-                                    self.x_to_real(col as f32)?,
-                                    self.x_to_real((col + stride) as f32)?,
-                                    self.y_to_imag((row + stride) as f32)?,
-                                    self.y_to_imag(row as f32)?,
-                                )
-                            })(),
-                        )
-                    })
+                    .map(move |col| (self.rect_at(row, col), self.pixel_at(row, col)))
             })
     }
 

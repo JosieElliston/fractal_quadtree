@@ -14,8 +14,8 @@ pub(crate) struct Sample {
     pub(crate) depth: f32,
 }
 impl Sample {
-    const MAX_DEPTH: u32 = 256;
-    // const MAX_DEPTH: u32 = 8192;
+    // const MAX_DEPTH: u32 = 256;
+    const MAX_DEPTH: u32 = 8192;
     // const MAX_DEPTH: u32 = 131072;
 
     // fn color(&self) -> Color32 {

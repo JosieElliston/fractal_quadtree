@@ -393,7 +393,7 @@ mod worker_thread {
             // find a line for us to render
             // by just trying to lock each line's texture lock
             // TODO: do this better
-            for (line_i, lock) in shared_texture.texture_lock_begin().iter().enumerate() {
+            for (row, lock) in shared_texture.texture_lock_begin().iter().enumerate() {
                 if lock.load(Ordering::Relaxed) {
                     continue;
                 }
@@ -404,7 +404,7 @@ mod worker_thread {
                     continue;
                 }
                 // TODO: we don't need this mutex, replace with `UnsafeCell`
-                let mut l = shared_texture.texture()[line_i]
+                let mut l = shared_texture.texture()[row]
                     .try_lock()
                     .expect("we just locked it");
                 {
@@ -417,13 +417,11 @@ mod worker_thread {
                     // TODO: do more of this, perhaps bisection bc that's easier than real spacial stuff
                     let line_needs_redraw = shared_texture.needs_full_redraw
                         || 'line_needs_redraw: {
-                            let Some((_, Some(first_pixel))) =
-                                camera_map.pixels().nth(line_i).unwrap().next()
-                            else {
+                            let Some(first_pixel) = camera_map.pixel_at(row, 0) else {
                                 break 'line_needs_redraw true;
                             };
-                            let Some((_, Some(last_pixel))) =
-                                camera_map.pixels().nth(line_i).unwrap().last()
+                            let Some(last_pixel) =
+                                camera_map.pixel_at(row, camera_map.pixels_width() - 1)
                             else {
                                 break 'line_needs_redraw true;
                             };
@@ -451,7 +449,7 @@ mod worker_thread {
                         //     .for_each(|pixel| *pixel = Color32::from_rgb(255, 50, 255));
                     } else {
                         for ((_rect, pixel), target) in
-                            camera_map.pixels().nth(line_i).unwrap().zip(l.iter_mut())
+                            camera_map.pixels().nth(row).unwrap().zip(l.iter_mut())
                         {
                             *target = if let Some(pixel) = pixel {
                                 if let Some(color) =
@@ -470,8 +468,8 @@ mod worker_thread {
                         }
                     }
                 }
-                debug_assert!(!shared_texture.texture_lock_finish()[line_i].load(Ordering::SeqCst));
-                shared_texture.texture_lock_finish()[line_i].store(true, Ordering::SeqCst);
+                debug_assert!(!shared_texture.texture_lock_finish()[row].load(Ordering::SeqCst));
+                shared_texture.texture_lock_finish()[row].store(true, Ordering::SeqCst);
                 return Some(());
             }
             // all locks have been set
