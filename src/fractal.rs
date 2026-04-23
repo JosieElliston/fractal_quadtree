@@ -455,6 +455,8 @@ mod worker_thread {
                                 if let Some(color) =
                                     self.shared.tree.color_of_pixel(pixel, prev_frame_start)
                                 {
+                                    // i kinda with i could debug draw it red for a frame,
+                                    // but that's really hard.
                                     color
                                 } else {
                                     // we proved that the color hasn't changed

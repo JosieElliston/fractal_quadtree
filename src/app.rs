@@ -3,16 +3,17 @@ use std::{
     time::{Duration, Instant},
 };
 
+use eframe::egui_glow::painter;
 use egui::{self, Color32, Key, Pos2, Rect, Vec2};
 
 use crate::{
     complex::{Camera, CameraMap, Domain, Window, fixed::*},
     fractal::{self, Fractal},
-    sample,
+    sample::{self, SampleDistanceGradient, SampleMaybeDistance},
 };
 
-/// fancy dynamic radius based on zoom
-/// so that if you're zoomed out, points don't cover everything
+/// fancy dynamic radius based on zoom,
+/// so that if you're zoomed out, points don't cover everything.
 fn dynamic_draw_size(camera_map: &CameraMap, max_rad: f32) -> f32 {
     const BASE_RAD: Fixed = Fixed::try_from_f64(0.001).unwrap();
     let rad = BASE_RAD.mul_f64(max_rad as f64);
@@ -50,14 +51,17 @@ pub(crate) struct App {
     sampling: bool,
     reclaiming: bool,
     draw_crosshair: bool,
-    // current_fractal: usize,
     current_fractal: CurrentFractal,
     control_other_camera: bool,
-    draw_gradient_steps: bool,
+    draw_z0: bool,
     draw_sample_window: bool,
-    draw_sample_grid: bool,
-    draw_sample_subgrid: bool,
-    draw_sample_grid_gradient_steps: i32,
+    draw_sample_grid_cloud: bool,
+    draw_sample_subgrid_cloud: bool,
+    // /// -1 to disable, 0 is the same as draw_sample_grid_deepest
+    // draw_sample_gradient_steps_deepest: i32,
+    /// -1 to disable, 0 is the same as draw_sample_grid_cloud
+    draw_sample_gradient_steps_cloud: i32,
+    draw_sample_mouse_gradient_steps: bool,
 }
 impl App {
     pub(crate) fn new(cc: &eframe::CreationContext<'_>) -> Self {
@@ -89,11 +93,12 @@ impl App {
             draw_crosshair: false,
             current_fractal: CurrentFractal::Metabrot,
             control_other_camera: false,
-            draw_gradient_steps: true,
+            draw_z0: true,
             draw_sample_window: true,
-            draw_sample_grid: true,
-            draw_sample_subgrid: false,
-            draw_sample_grid_gradient_steps: -1,
+            draw_sample_grid_cloud: true,
+            draw_sample_subgrid_cloud: false,
+            draw_sample_gradient_steps_cloud: 1,
+            draw_sample_mouse_gradient_steps: true,
         }
     }
 
@@ -110,10 +115,10 @@ impl App {
         }
         self.control_other_camera ^= ctx.input(|i| i.key_pressed(Key::C));
 
-        self.draw_sample_grid_gradient_steps += ctx.input(|i| {
+        self.draw_sample_gradient_steps_cloud += ctx.input(|i| {
             i.key_pressed(Key::ArrowRight) as i32 - i.key_pressed(Key::ArrowLeft) as i32
         });
-        self.draw_sample_grid_gradient_steps = self.draw_sample_grid_gradient_steps.max(-1);
+        self.draw_sample_gradient_steps_cloud = self.draw_sample_gradient_steps_cloud.max(-1);
     }
 
     fn show_fractal(
@@ -184,252 +189,315 @@ impl App {
         );
     }
 
+    fn draw_complex_circle_stroke(
+        painter: &egui::Painter,
+        camera_map: &CameraMap,
+        (c_real, c_imag): (Real, Imag),
+        rad: Fixed,
+        stroke: egui::Stroke,
+    ) {
+        painter.circle_stroke(
+            camera_map.complex_to_pos((c_real, c_imag)),
+            camera_map.delta_real_to_vec1(rad),
+            stroke,
+        );
+    }
+
+    fn draw_complex_segment(
+        painter: &egui::Painter,
+        camera_map: &CameraMap,
+        (c1_real, c1_imag): (Real, Imag),
+        (c2_real, c2_imag): (Real, Imag),
+        stroke: egui::Stroke,
+    ) {
+        painter.line_segment(
+            [
+                camera_map.complex_to_pos((c1_real, c1_imag)),
+                camera_map.complex_to_pos((c2_real, c2_imag)),
+            ],
+            stroke,
+        );
+    }
+
+    /// draw a dot at the center of the screen.
+    fn show_crosshair(&self, painter: &egui::Painter, screen_center: Pos2) {
+        painter.circle_filled(screen_center, 5.0, Color32::BLUE);
+    }
+
+    /// draw a dot at z0.
+    fn show_z0(&self, painter: &egui::Painter, secondary_camera_map: &CameraMap, z0: (Real, Imag)) {
+        painter.circle_filled(
+            secondary_camera_map.complex_to_pos(z0),
+            5.0,
+            Color32::from_rgb(160, 0, 160),
+        );
+    }
+
+    /// draw the outline of the window
+    fn show_sample_window(
+        &self,
+        painter: &egui::Painter,
+        secondary_camera_map: &CameraMap,
+        window: Window,
+    ) {
+        painter.rect_stroke(
+            secondary_camera_map.window_to_rect(window),
+            0.0,
+            egui::Stroke::new(2.0, Color32::WHITE),
+            egui::StrokeKind::Middle,
+        );
+    }
+
+    fn show_sample_grid_cloud(
+        &self,
+        painter: &egui::Painter,
+        secondary_camera_map: &CameraMap,
+        z0: (Real, Imag),
+        window: Window,
+    ) {
+        // TODO: less code reuse
+        let mut deepest: f32 = 0.0;
+        let mut deepest_point = (Fixed::ZERO, Fixed::ZERO);
+
+        // draw initial points
+        for (c_real, c_imag) in window
+            .grid_centers(sample::WIDTH0, sample::WIDTH0)
+            .flatten()
+        {
+            let sample = sample::quadratic_map(z0, (c_real, c_imag));
+            if sample.depth > deepest {
+                deepest = sample.depth;
+                deepest_point = (c_real, c_imag);
+            }
+            painter.circle_filled(
+                secondary_camera_map.complex_to_pos((c_real, c_imag)),
+                dynamic_draw_size(secondary_camera_map, 5.0),
+                Color32::DARK_RED,
+            );
+        }
+
+        // draw the deepest point
+        painter.circle_filled(
+            secondary_camera_map.complex_to_pos(deepest_point),
+            // don't use dynamic size for this
+            5.0,
+            Color32::RED,
+        );
+    }
+
+    /// debug hierarchical windows.
+    /// draw points that got resampled in a small window around them.
+    fn show_sample_subgrid_cloud(
+        &self,
+        painter: &egui::Painter,
+        secondary_camera_map: &CameraMap,
+        z0: (Real, Imag),
+        window: Window,
+    ) {
+        // TODO: less code reuse
+
+        let mut deepest: f32 = 0.0;
+        let mut deepest_point = (Fixed::ZERO, Fixed::ZERO);
+        // we want to look through all the points at a coarse grain before resampling
+        let mut to_resample = Vec::with_capacity(sample::WIDTH0 * sample::WIDTH0);
+        let cell_rad = {
+            (window.real_rad().div_f64(sample::WIDTH0 as f64))
+                .max(window.imag_rad().div_f64(sample::WIDTH0 as f64))
+        };
+        // draw initial points
+        for (c_real, c_imag) in window
+            .grid_centers(sample::WIDTH0, sample::WIDTH0)
+            .flatten()
+        {
+            let SampleMaybeDistance { depth, distance } =
+                sample::distance_estimator(z0, (c_real, c_imag));
+            if depth > deepest {
+                deepest = depth;
+                deepest_point = (c_real, c_imag);
+            }
+            if let Some(distance) = distance
+                && distance < cell_rad.mul2()
+            {
+                to_resample.push((c_real, c_imag));
+            }
+            // painter.circle_filled(
+            //     secondary_camera_map.complex_to_pos((c_real, c_imag)),
+            //     dynamic_draw_size(secondary_camera_map, 5.0),
+            //     Color32::DARK_RED,
+            // );
+        }
+
+        // TODO: try sorting the vec by distance estimate
+        // draw points that got resampled
+        for (c0_real, c0_imag) in to_resample {
+            let resample_window =
+                Window::from_mid_rad(c0_real, c0_imag, cell_rad, cell_rad).unwrap();
+            for (c_real, c_imag) in resample_window
+                .grid_centers(sample::WIDTH1, sample::WIDTH1)
+                .flatten()
+            {
+                if (c0_real, c0_imag) == (c_real, c_imag) {
+                    continue;
+                }
+                let sample = sample::quadratic_map(z0, (c_real, c_imag));
+                if sample.depth > deepest {
+                    deepest = sample.depth;
+                    deepest_point = (c_real, c_imag);
+                }
+                painter.circle_filled(
+                    secondary_camera_map.complex_to_pos((c_real, c_imag)),
+                    dynamic_draw_size(secondary_camera_map, 3.0),
+                    // dark orange
+                    Color32::from_rgb(200, 120, 0),
+                );
+            }
+        }
+
+        // draw the deepest point
+        painter.circle_filled(
+            secondary_camera_map.complex_to_pos(deepest_point),
+            // don't use dynamic size for this
+            5.0,
+            // bright orange or smt
+            Color32::from_rgb(255, 200, 0),
+        );
+    }
+
+    fn show_sample_gradient_steps_cloud(
+        &self,
+        painter: &egui::Painter,
+        secondary_camera_map: &CameraMap,
+        z0: (Real, Imag),
+        window: Window,
+    ) {
+        // let mut deepest: f32 = 0.0;
+        // let mut deepest_point = (Fixed::ZERO, Fixed::ZERO);
+
+        for line in window.grid_centers(sample::WIDTH0, sample::WIDTH0) {
+            for (c_real, c_imag) in line {
+                // the image of the sample under a few gradient descent steps
+                let Some(stepped_c) = (|| {
+                    let (mut c_real, mut c_imag) = (c_real, c_imag);
+                    for _ in 0..self.draw_sample_gradient_steps_cloud {
+                        (c_real, c_imag) = SampleDistanceGradient::step(z0, (c_real, c_imag))?;
+                    }
+                    Some((c_real, c_imag))
+                })() else {
+                    continue;
+                };
+                painter.circle_filled(
+                    secondary_camera_map.complex_to_pos(stepped_c),
+                    dynamic_draw_size(secondary_camera_map, 3.0),
+                    Color32::from_gray(200),
+                );
+            }
+        }
+
+        // // TODO: draw the deepest point
+        // painter.circle_filled(
+        //     secondary_camera_map.complex_to_pos(deepest_point),
+        //     // don't use dynamic size for this
+        //     5.0,
+        //     Color32::WHITE,
+        // );
+    }
+
+    /// draw distance estimator with gradient descent steps
+    fn show_sample_mouse_gradient_steps(
+        &self,
+        painter: &egui::Painter,
+        secondary_camera_map: &CameraMap,
+        z0: (Real, Imag),
+        ctx: &egui::Context,
+    ) {
+        let Some(mut c) = secondary_camera_map
+            .pos_to_complex(ctx.input(|i| i.pointer.latest_pos().unwrap_or_default()))
+        else {
+            return;
+        };
+
+        const MAX_STEPS: usize = 8;
+        for _ in 0..MAX_STEPS {
+            let Some(sample) = SampleDistanceGradient::new(z0, c) else {
+                return;
+            };
+            Self::draw_complex_circle_stroke(
+                painter,
+                secondary_camera_map,
+                c,
+                sample.distance,
+                egui::Stroke::new(1.0, Color32::WHITE),
+            );
+
+            let Some(next_c) = sample.stepped(c) else {
+                return;
+            };
+            Self::draw_complex_segment(
+                painter,
+                secondary_camera_map,
+                c,
+                next_c,
+                egui::Stroke::new(1.0, Color32::WHITE),
+            );
+            painter.circle_filled(
+                secondary_camera_map.complex_to_pos(next_c),
+                // don't use dynamic size for this
+                3.0,
+                Color32::WHITE,
+            );
+            c = next_c;
+        }
+    }
+
     fn show_fractal_debug(
-        &mut self,
+        &self,
         ctx: &egui::Context,
         ui: &mut egui::Ui,
         primary_camera_map: &CameraMap,
         secondary_camera_map: &CameraMap,
     ) {
+        let painter = ui.painter_at(ui.max_rect());
         let screen_center = ui.max_rect().center();
         let z0 = primary_camera_map.pos_to_complex(screen_center);
-        let painter = ui.painter_at(ui.max_rect());
+        let window = z0.and_then(sample::initial_window);
 
-        let draw_complex_circle_stroke =
-            |(c_real, c_imag): (Real, Imag), rad: Fixed, stroke: egui::Stroke| {
-                painter.circle_stroke(
-                    secondary_camera_map.complex_to_pos((c_real, c_imag)),
-                    secondary_camera_map.delta_real_to_vec1(rad),
-                    stroke,
-                );
-            };
-        let draw_complex_segment = |(c1_real, c1_imag): (Real, Imag),
-                                    (c2_real, c2_imag): (Real, Imag),
-                                    stroke: egui::Stroke| {
-            painter.line_segment(
-                [
-                    secondary_camera_map.complex_to_pos((c1_real, c1_imag)),
-                    secondary_camera_map.complex_to_pos((c2_real, c2_imag)),
-                ],
-                stroke,
-            );
-        };
-
-        // draw stuff that uses the window we're sampling the mandelbrot in
-        'mandelbrot_window: {
-            if self.current_fractal != CurrentFractal::Mandelbrot {
-                break 'mandelbrot_window;
-            }
-            let Some((z0_real, z0_imag)) = z0 else {
-                break 'mandelbrot_window;
-            };
-            // let window = Window::from_center_size(Fixed::ZERO, Fixed::ZERO, 4.0.into(), 4.0.into());
-            let Some(window) = (|| {
-                Window::from_mid_rad(
-                    (f64::from(z0_imag) * f64::from(z0_imag)
-                        - f64::from(z0_real) * f64::from(z0_real))
-                    .try_into()
-                    .ok()?,
-                    (-2.0 * f64::from(z0_real) * f64::from(z0_imag))
-                        .try_into()
-                        .ok()?,
-                    2.0.try_into().unwrap(),
-                    2.0.try_into().unwrap(),
-                )
-            })() else {
-                break 'mandelbrot_window;
-            };
-
-            // draw the outline of the window
-            if self.draw_sample_window {
-                painter.rect_stroke(
-                    secondary_camera_map.window_to_rect(window),
-                    0.0,
-                    egui::Stroke::new(2.0, Color32::WHITE),
-                    egui::StrokeKind::Middle,
-                );
-            }
-
-            // debug for gradient descent steps
-            // draw dots where we took samples, to debug aliasing
-            // #[cfg(false)]
-            'gradient_descent_steps: {
-                if self.draw_sample_grid_gradient_steps < 0 {
-                    break 'gradient_descent_steps;
-                }
-                let Some(z0) = z0 else {
-                    break 'gradient_descent_steps;
-                };
-                for line in window.grid_centers(sample::WIDTH0, sample::WIDTH0) {
-                    for (c_real, c_imag) in line {
-                        // the image of the sample under a few gradient descent steps
-                        if let Some(stepped_c) = (|| {
-                            let (mut c_real, mut c_imag) = (c_real, c_imag);
-                            for _ in 0..self.draw_sample_grid_gradient_steps {
-                                (c_real, c_imag) = sample::gradient_step(z0, (c_real, c_imag))?;
-                            }
-                            Some((c_real, c_imag))
-                        })() {
-                            painter.circle_filled(
-                                secondary_camera_map.complex_to_pos(stepped_c),
-                                dynamic_draw_size(secondary_camera_map, 3.0),
-                                Color32::WHITE,
-                            );
-                        }
-                    }
-                }
-            }
-
-            // debug hierarchical windows
-            // draw points that got resampled in a small window around them
-            // TODO: less code reuse
-            if self.draw_sample_grid {
-                let mut deepest: f32 = 0.0;
-                let mut deepest_point = (Fixed::ZERO, Fixed::ZERO);
-                // we want to look through all the points at a coarse grain before resampling
-                let mut to_resample = Vec::with_capacity(sample::WIDTH0 * sample::WIDTH0);
-                let cell_rad = {
-                    (window.real_rad().div_f64(sample::WIDTH0 as f64))
-                        .max(window.imag_rad().div_f64(sample::WIDTH0 as f64))
-                };
-                // draw initial points
-                for (c_real, c_imag) in window
-                    .grid_centers(sample::WIDTH0, sample::WIDTH0)
-                    .flatten()
-                {
-                    let (sample, distance) =
-                        sample::distance_estimator((z0_real, z0_imag), (c_real, c_imag));
-                    if sample.depth > deepest {
-                        deepest = sample.depth;
-                        deepest_point = (c_real, c_imag);
-                    }
-                    if let Some(distance) = distance
-                        && distance < cell_rad.mul2()
-                    {
-                        to_resample.push((c_real, c_imag));
-                    }
-                    painter.circle_filled(
-                        secondary_camera_map.complex_to_pos((c_real, c_imag)),
-                        dynamic_draw_size(secondary_camera_map, 5.0),
-                        Color32::DARK_RED,
-                    );
-                }
-
-                if self.draw_sample_subgrid {
-                    // TODO: try sorting the vec by distance estimate
-                    // draw points that got resampled
-                    for (c0_real, c0_imag) in to_resample {
-                        let resample_window =
-                            Window::from_mid_rad(c0_real, c0_imag, cell_rad, cell_rad).unwrap();
-                        for (c_real, c_imag) in resample_window
-                            .grid_centers(sample::WIDTH1, sample::WIDTH1)
-                            .flatten()
-                        {
-                            if (c0_real, c0_imag) == (c_real, c_imag) {
-                                continue;
-                            }
-                            let sample =
-                                sample::quadratic_map((z0_real, z0_imag), (c_real, c_imag));
-                            if sample.depth > deepest {
-                                deepest = sample.depth;
-                                deepest_point = (c_real, c_imag);
-                            }
-                            painter.circle_filled(
-                                secondary_camera_map.complex_to_pos((c_real, c_imag)),
-                                dynamic_draw_size(secondary_camera_map, 3.0),
-                                Color32::ORANGE,
-                            );
-                        }
-                    }
-                }
-
-                // draw the deepest point
-                painter.circle_filled(
-                    secondary_camera_map.complex_to_pos(deepest_point),
-                    // don't use dynamic size for this
-                    5.0,
-                    Color32::RED,
-                );
-            }
-
-            // draw deepest_on_grid
-            {
-                let (deepest_c, _sample) = sample::deepest_on_grid(
-                    (z0_real, z0_imag),
-                    window,
-                    sample::WIDTH,
-                    sample::WIDTH,
-                    sample::GRADIENT_STEPS,
-                );
-                painter.circle_filled(
-                    secondary_camera_map.complex_to_pos(deepest_c),
-                    // don't use dynamic size for this
-                    5.0,
-                    Color32::WHITE,
-                );
-            }
+        if self.draw_crosshair {
+            self.show_crosshair(&painter, screen_center);
         }
 
-        // draw distance estimator with gradient descent steps
-        if self.draw_gradient_steps {
-            (|| {
-                if self.current_fractal != CurrentFractal::Mandelbrot {
-                    return Some(());
-                }
-                let Some(z0) = z0 else {
-                    return Some(());
-                };
-                let Some(mut c) = secondary_camera_map
-                    .pos_to_complex(ctx.input(|i| i.pointer.latest_pos().unwrap_or_default()))
-                else {
-                    return Some(());
-                };
-
-                const MAX_STEPS: usize = 8;
-                for _ in 0..MAX_STEPS {
-                    let (distance, (_grad_real, _grad_imag)) =
-                        sample::distance_estimator_gradient(z0, c)?;
-                    draw_complex_circle_stroke(c, distance, egui::Stroke::new(1.0, Color32::WHITE));
-                    // let scale = distance / ((grad_real * grad_real + grad_imag * grad_imag).into_f32()).sqrt();
-                    // draw_complex_segment(
-                    //     c,
-                    //     (c_real - grad_real * scale, c_imag - grad_imag * scale),
-                    //     egui::Stroke::new(1.0, Color32::RED),
-                    // );
-                    let next_c = sample::gradient_step(z0, c)?;
-                    draw_complex_segment(c, next_c, egui::Stroke::new(1.0, Color32::WHITE));
-                    painter.circle_filled(
-                        secondary_camera_map.complex_to_pos(next_c),
-                        // don't use dynamic size for this
-                        3.0,
-                        Color32::WHITE,
-                    );
-                    c = next_c;
-                }
-
-                Some(())
-            })();
-        }
-
-        // draw a dot at the center of the screen or at z0
-        'draw_z0: {
-            if !self.draw_crosshair {
-                break 'draw_z0;
+        if self.current_fractal == CurrentFractal::Mandelbrot
+            && let Some(z0) = z0
+        {
+            if self.draw_z0 {
+                self.show_z0(&painter, secondary_camera_map, z0);
             }
-            painter.circle_filled(
-                match self.current_fractal {
-                    CurrentFractal::Metabrot => screen_center,
-                    CurrentFractal::Mandelbrot => {
-                        if let Some(z0) = z0 {
-                            secondary_camera_map.complex_to_pos(z0)
-                        } else {
-                            break 'draw_z0;
-                        }
-                    }
-                },
-                3.0,
-                Color32::BLUE,
-            );
+
+            if let Some(window) = window {
+                if self.draw_sample_window {
+                    self.show_sample_window(&painter, secondary_camera_map, window);
+                }
+
+                if self.draw_sample_grid_cloud {
+                    self.show_sample_grid_cloud(&painter, secondary_camera_map, z0, window);
+                }
+
+                if self.draw_sample_subgrid_cloud {
+                    self.show_sample_subgrid_cloud(&painter, secondary_camera_map, z0, window);
+                }
+
+                if self.draw_sample_gradient_steps_cloud >= 0 {
+                    self.show_sample_gradient_steps_cloud(
+                        &painter,
+                        secondary_camera_map,
+                        z0,
+                        window,
+                    );
+                }
+            }
+
+            if self.draw_sample_mouse_gradient_steps {
+                self.show_sample_mouse_gradient_steps(&painter, secondary_camera_map, z0, ctx);
+            }
         }
     }
 
@@ -602,10 +670,11 @@ impl App {
             // max fps
             {
                 let mut target_fps = 1.0 / self.target_fractal_spf.as_secs_f64();
-                let r = ui.add(MyDragValue::new(
-                    egui::Label::new("max fps:"),
-                    egui::DragValue::new(&mut target_fps),
-                )).on_hover_text("the max fps at which we render the fractal. the ui is always rendered at max speed. this is overwritten when eg panning.");
+                let r = ui
+                    .add(MyDragValue::new(egui::Label::new("max fps:"), egui::DragValue::new(&mut target_fps)))
+                    .on_hover_text(
+                        "the max fps at which we render the fractal. the ui is always rendered at max speed. this is overwritten when eg panning.",
+                    );
                 target_fps = target_fps.max(1.0);
                 if r.dragged() {
                     target_fps = target_fps.min(240.0);
@@ -619,7 +688,10 @@ impl App {
             {
                 let mut stride = self.primary_camera_stride as f64;
                 let r = ui
-                    .add(MyDragValue::new(egui::Label::new("metabrot pixel size:"), egui::DragValue::new(&mut stride)))
+                    .add(MyDragValue::new(
+                        egui::Label::new("metabrot pixel size:"),
+                        egui::DragValue::new(&mut stride),
+                    ))
                     .on_hover_text("how many pixels are in a pixel for the metabrot.");
                 let mut stride = stride.round() as usize;
                 stride = stride.max(1);
@@ -631,12 +703,15 @@ impl App {
                     self.needs_full_redraw = true;
                 }
             }
-            
+
             // mandelbrot stride
             {
                 let mut stride = self.secondary_camera_stride as f64;
                 let r = ui
-                    .add(MyDragValue::new(egui::Label::new("mandelbrot pixel size:"), egui::DragValue::new(&mut stride)))
+                    .add(MyDragValue::new(
+                        egui::Label::new("mandelbrot pixel size:"),
+                        egui::DragValue::new(&mut stride),
+                    ))
                     .on_hover_text("how many pixels are in a pixel for the mandelbrot.");
                 let mut stride = stride.round() as usize;
                 stride = stride.max(1);
@@ -668,7 +743,7 @@ impl App {
             // crosshair
             {
                 ui.checkbox(&mut self.draw_crosshair, "draw crosshair")
-                    .on_hover_text("for metabrot, draw a dot at the screen center. for mandelbrot, draw a dot at z0.");
+                    .on_hover_text("draw a dot at the screen center.");
             }
 
             // current fractal
@@ -676,8 +751,7 @@ impl App {
                 if ui
                     .add(egui::Button::new("metabrot").selected(self.current_fractal == CurrentFractal::Metabrot))
                     .on_hover_text(
-                        "whether to render the metabrot (rather than the mandelbrot). this also triggers a full redraw. keybinding: "
-                            .to_owned()
+                        "whether to render the metabrot (rather than the mandelbrot). this also triggers a full redraw. keybinding: ".to_owned()
                             + &ctx.format_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::NONE, Key::N)),
                     )
                     .clicked()
@@ -707,24 +781,24 @@ impl App {
             }
 
             egui::CollapsingHeader::new("mandelbrot").show(ui, |ui| {
-                ui.checkbox(&mut self.draw_gradient_steps, "draw gradient steps")
-                    .on_hover_text("draw the gradient steps starting from the mouse position");
+                ui.checkbox(&mut self.draw_z0, "draw z0");                
                 ui.checkbox(&mut self.draw_sample_window, "draw sample window");
-                ui.checkbox(&mut self.draw_sample_grid, "draw sample grid");
-                ui.checkbox(&mut self.draw_sample_subgrid, "draw sample subgrid")
-                    .on_hover_text("requires draw sample grid to have an effect.");
+                ui.checkbox(&mut self.draw_sample_grid_cloud, "draw sample grid cloud");
+                ui.checkbox(&mut self.draw_sample_subgrid_cloud, "draw sample subgrid cloud");
                 {
                     let r = ui
                         .add(MyDragValue::new(
                             egui::Label::new("draw sample grid gradient steps"),
-                            egui::DragValue::new(&mut self.draw_sample_grid_gradient_steps),
+                            egui::DragValue::new(&mut self.draw_sample_gradient_steps_cloud),
                         ))
                         .on_hover_text("-1 to disable, 0 is the same as draw_sample_grid. keybinding: left and right arrows");
-                    self.draw_sample_grid_gradient_steps = self.draw_sample_grid_gradient_steps.max(-1);
+                    self.draw_sample_gradient_steps_cloud = self.draw_sample_gradient_steps_cloud.max(-1);
                     if r.dragged() {
-                        self.draw_sample_grid_gradient_steps = self.draw_sample_grid_gradient_steps.min(8);
+                        self.draw_sample_gradient_steps_cloud = self.draw_sample_gradient_steps_cloud.min(8);
                     }
                 }
+                ui.checkbox(&mut self.draw_sample_mouse_gradient_steps, "draw mouse gradient steps")
+                    .on_hover_text("draw the gradient steps starting from the mouse position");
             });
         });
 
@@ -854,10 +928,16 @@ impl eframe::App for App {
                     before != after
                 };
 
-                let primary_camera_map =
-                    CameraMap::new(ui.max_rect(), self.primary_camera, self.primary_camera_stride);
-                let secondary_camera_map =
-                    CameraMap::new(ui.max_rect(), self.secondary_camera, self.secondary_camera_stride);
+                let primary_camera_map = CameraMap::new(
+                    ui.max_rect(),
+                    self.primary_camera,
+                    self.primary_camera_stride,
+                );
+                let secondary_camera_map = CameraMap::new(
+                    ui.max_rect(),
+                    self.secondary_camera,
+                    self.secondary_camera_stride,
+                );
 
                 // sampling
                 if self.sampling {
