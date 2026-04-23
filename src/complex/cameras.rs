@@ -235,11 +235,18 @@ impl CameraMap {
 
     pub(crate) fn pixels_width(&self) -> usize {
         let stride = self.stride.unwrap().get();
-        self.rect.width() as usize / stride
+        let ret = (self.rect.width() as usize).div_ceil(stride);
+        #[cfg(debug_assertions)]
+        if let Some(line) = self.pixels().next() {
+            debug_assert_eq!(ret, line.count());
+        }
+        ret
     }
     pub(crate) fn pixels_height(&self) -> usize {
         let stride = self.stride.unwrap().get();
-        self.rect.height() as usize / stride
+        let ret = (self.rect.height() as usize).div_ceil(stride);
+        debug_assert_eq!(ret, self.pixels().count());
+        ret
     }
 
     pub(crate) fn rect_at(&self, row: usize, col: usize) -> Rect {
@@ -484,7 +491,7 @@ mod tests {
         // TODO: this should be transposed
         assert_eq!(camera_map.pixels().count(), camera_map.pixels_width());
         assert_eq!(
-            camera_map.pixels().nth(0).unwrap().count(),
+            camera_map.pixels().next().unwrap().count(),
             camera_map.pixels_height()
         );
         panic!("this should be transposed");
