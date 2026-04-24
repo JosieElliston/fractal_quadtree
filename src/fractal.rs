@@ -610,6 +610,7 @@ mod worker_thread {
             Some(())
         }
 
+        // TODO: rename to try_refine
         #[cfg_attr(feature = "profiling", inline(never))]
         fn try_split(&mut self) -> Option<()> {
             let window = match self.shared.sample_window.try_read() {

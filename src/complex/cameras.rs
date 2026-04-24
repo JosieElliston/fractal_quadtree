@@ -456,7 +456,8 @@ mod tests {
             camera_map.camera.real_hi().try_into().unwrap(),
             camera_map.imag_lo().try_into().unwrap(),
             camera_map.imag_hi().try_into().unwrap(),
-        );
+        )
+        .unwrap();
         assert_eq!(camera_map.rect, camera_map.window_to_rect(window));
         assert_eq!(window, camera_map.rect_to_window(rect).unwrap());
     }
@@ -485,15 +486,13 @@ mod tests {
         let (rect, camera) = get_rect_camera();
         let camera_map = CameraMap::new(rect, camera, 2);
 
-        assert_eq!(camera_map.pixels_width(), 15);
-        assert_eq!(camera_map.pixels_height(), 20);
+        assert_eq!(camera_map.pixels_width(), 5);
+        assert_eq!(camera_map.pixels_height(), 10);
 
-        // TODO: this should be transposed
-        assert_eq!(camera_map.pixels().count(), camera_map.pixels_width());
+        assert_eq!(camera_map.pixels().count(), camera_map.pixels_height());
         assert_eq!(
             camera_map.pixels().next().unwrap().count(),
-            camera_map.pixels_height()
+            camera_map.pixels_width()
         );
-        panic!("this should be transposed");
     }
 }

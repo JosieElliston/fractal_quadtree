@@ -102,3 +102,15 @@ fn main() -> eframe::Result {
 //     println!("time: {:?}", start.elapsed());
 //     println!("sample_counts: {:?}", sample_counts);
 // }
+
+#[macro_use]
+mod macros {
+    /// like dbg! but without duplication.
+    /// like eprintln! but with file:line:column.
+    #[macro_export]
+    macro_rules! log {
+        ($val:expr) => {
+            eprintln!("[{}:{}:{}] {:?}", file!(), line!(), column!(), $val)
+        };
+    }
+}

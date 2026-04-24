@@ -110,7 +110,7 @@ impl App {
             draw_sample_window: true,
             draw_sample_grid_cloud: true,
             draw_sample_subgrid_cloud: false,
-            draw_sample_gradient_steps_cloud: 1,
+            draw_sample_gradient_steps_cloud: 0,
             draw_sample_mouse_gradient_steps: true,
         }
     }
@@ -386,7 +386,7 @@ impl App {
         // let mut deepest: f32 = 0.0;
         // let mut deepest_point = (Fixed::ZERO, Fixed::ZERO);
 
-        for line in window.grid_centers(sample::WIDTH0, sample::WIDTH0) {
+        for line in window.grid_centers(sample::WIDTH, sample::WIDTH) {
             for (c_real, c_imag) in line {
                 // the image of the sample under a few gradient descent steps
                 let Some(stepped_c) = (|| {
@@ -400,7 +400,7 @@ impl App {
                 };
                 painter.circle_filled(
                     secondary_camera_map.complex_to_pos(stepped_c),
-                    dynamic_draw_size(secondary_camera_map, 3.0),
+                    dynamic_draw_size(secondary_camera_map, 5.0),
                     Color32::from_gray(200),
                 );
             }
@@ -1044,9 +1044,8 @@ impl eframe::App for App {
                 );
 
                 // reclaiming
-                if self.reclaiming
-                    && let Some(window) = primary_camera_map.window()
-                {
+                if self.reclaiming {
+                    let window = primary_camera_map.window().unwrap_or_default();
                     let reclaim_count = self.metabrot.enable_reclaiming(window);
                     self.reclaim_counts
                         .add(ctx.input(|i| i.time), reclaim_count);
@@ -1055,9 +1054,8 @@ impl eframe::App for App {
                 }
 
                 // sampling
-                if self.sampling
-                    && let Some(window) = primary_camera_map.window()
-                {
+                if self.sampling {
+                    let window = primary_camera_map.window().unwrap_or_default();
                     let sample_count = self.metabrot.enable_sampling(window);
                     self.sample_counts.add(ctx.input(|i| i.time), sample_count);
                 } else {

@@ -10,16 +10,16 @@ pub(crate) struct Window {
     imag_lo: Imag,
     imag_hi: Imag,
 }
-// impl Default for Window {
-//     fn default() -> Self {
-//         Self {
-//             real_lo: Fixed::from_f64(-2.0),
-//             real_hi: Fixed::from_f64(2.0),
-//             imag_lo: Fixed::from_f64(-2.0),
-//             imag_hi: Fixed::from_f64(2.0),
-//         }
-//     }
-// }
+impl Default for Window {
+    fn default() -> Self {
+        Self {
+            real_lo: Fixed::from_f64(-2.0),
+            real_hi: Fixed::from_f64(2.0),
+            imag_lo: Fixed::from_f64(-2.0),
+            imag_hi: Fixed::from_f64(2.0),
+        }
+    }
+}
 impl Window {
     /// fails if the window would be empty,
     /// ie if it would have zero width or height.

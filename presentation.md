@@ -126,8 +126,10 @@
         - suppose we've selected a node whose children we want to retire
         - we erase the child pointer
         - we have no way to guarantee that no one else is looking at one of the children
+- coloring pt 1: definition of color of pixel
 - proved that the color hasn't changed (implies each nodes has a color_modified timestamp)
 - prove a line hasn't changed
 - rendering
     - like what the main thread does with the texture
     - note the inversion of end then begin
+- refine (implies storing height)
