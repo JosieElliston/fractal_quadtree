@@ -3,7 +3,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use eframe::egui_glow::painter;
 use egui::{self, Color32, Key, Pos2, Rect, Vec2};
 
 use crate::{
@@ -40,10 +39,15 @@ pub(crate) struct App {
     secondary_camera: Camera,
     secondary_camera_velocity: Vec2,
     secondary_camera_stride: usize,
+    /// the ui frame time, not the fractal frame time.
+    last_frame_time: Instant,
     global_dts: egui::util::History<f32>,
     fractal_dts: egui::util::History<f32>,
     /// how many samples we received on each frame
     sample_counts: egui::util::History<u64>,
+    /// the last successful reclaim tick.
+    last_reclaim_tick: Instant,
+    reclaim_dts: egui::util::History<f32>,
     timers: egui::util::History<fractal::MultiTimer>,
     /// this allows us to prevent the main thread from needing to wait for the fractal to finish rendering.
     /// this is only false for the first frame.
@@ -79,10 +83,13 @@ impl App {
             secondary_camera: Camera::default(),
             secondary_camera_velocity: Vec2::ZERO,
             secondary_camera_stride: 8,
+            last_frame_time: Instant::now(),
             global_dts: egui::util::History::new(2..1000, 0.2),
             fractal_dts: egui::util::History::new(2..1000, 0.2),
-            sample_counts: egui::util::History::new(10..1000, 5.0),
-            timers: egui::util::History::new(10..1000, 5.0),
+            sample_counts: egui::util::History::new(10..1000, 1.0),
+            last_reclaim_tick: Instant::now(),
+            reclaim_dts: egui::util::History::new(10..1000, 1.0),
+            timers: egui::util::History::new(10..1000, 1.0),
             has_begun_rendering: false,
             texture: cc.egui_ctx.load_texture(
                 "fractal",
@@ -525,15 +532,17 @@ impl App {
                 }
 
                 // fractal frame rate
-                {
-                    let average_dt = self
-                        .fractal_dts
-                        .average()
-                        .expect("we added one this frame so dts must be non-empty");
+                if let Some(average_dt) = self.fractal_dts.average() {
                     ui.label(format!("fractal fps: {:.01}", 1.0 / average_dt))
                         .on_hover_text("the fractal only frames per second");
                     // ui.label(format!("fractal spf: {:.05}", average_dt))
                     //     .on_hover_text("the fractal only seconds per frame");
+                }
+
+                // reclaim tick rate
+                if let Some(average_dt) = self.reclaim_dts.average() {
+                    ui.label(format!("reclaim tps: {:.01}", 1.0 / average_dt))
+                        .on_hover_text("the reclaim ticks per second");
                 }
 
                 // sample count
@@ -864,8 +873,24 @@ impl eframe::App for App {
         egui::CentralPanel::default()
             .frame(egui::Frame::new())
             .show(ctx, |ui| {
-                self.global_dts
-                    .add(ctx.input(|i| i.time), ctx.input(|i| i.stable_dt));
+                {
+                    // i don't trust `stable_dt`
+                    let now = Instant::now();
+                    let elapsed = now - self.last_frame_time;
+                    self.last_frame_time = now;
+                    self.global_dts
+                        .add(ctx.input(|i| i.time), elapsed.as_secs_f32());
+                }
+
+                if self.metabrot.try_reclaim_tick().is_some() {
+                    let now = Instant::now();
+                    let elapsed = now - self.last_reclaim_tick;
+                    self.last_reclaim_tick = now;
+                    self.reclaim_dts
+                        .add(ctx.input(|i| i.time), elapsed.as_secs_f32());
+                } else {
+                    // dbg!("failed tick reclaim");
+                }
 
                 self.timers
                     .add(ctx.input(|i| i.time), self.metabrot.timer());
@@ -993,12 +1018,10 @@ impl eframe::App for App {
                 );
 
                 // sampling
-                if self.sampling {
-                    let samples_taken = self.metabrot.enable_sampling(
-                        primary_camera_map
-                            .window()
-                            .unwrap_or(Domain::default().into()),
-                    );
+                if self.sampling
+                    && let Some(window) = primary_camera_map.window()
+                {
+                    let samples_taken = self.metabrot.enable_sampling(window);
                     self.sample_counts.add(ctx.input(|i| i.time), samples_taken);
                 } else {
                     self.metabrot.disable_sampling();

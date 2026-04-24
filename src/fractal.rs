@@ -14,13 +14,13 @@ use eframe::egui::{self, Color32};
 use crate::{
     complex::{CameraMap, Window, fixed::*},
     sample,
-    tree::{Moment, NodeHandle, Tree},
+    tree::{NodeHandle, ReclaimMoment, RenderMoment, Tree},
 };
 
 /// this mostly exists so i don't duplicate doc comments
 struct Shared {
     tree: Arc<Tree>,
-    // /// the moment we started drawing the previous frame.
+    /// the main thread's current moment.
     /// we can skip drawing nodes that haven't been updated since the start of the previous frame.
     /// it might happen that we will have correctly drawn pixels that got sampled during frame drawing,
     /// and then redraw those pixels, but this is rare and not too bad.
@@ -28,7 +28,9 @@ struct Shared {
     /// monotonically increasing.
     /// only ever updated by the main thread.
     /// we have that `frame_start < sample_time`.
-    now: Arc<Atomic<Moment>>,
+    render_now: Arc<Atomic<RenderMoment>>,
+    /// tell the worker threads the current reclaim moment.
+    reclaim_now: Arc<Atomic<ReclaimMoment>>,
     /// the `Window` in which we're sampling.
     /// `None` iff sampling is disabled.
     /// note that this is similar to shared_texture.camera_map.window,
@@ -51,6 +53,8 @@ mod main_thread {
     /// owned by the pool/main thread
     struct WorkerHandle {
         handle: thread::JoinHandle<()>,
+        /// receive from the worker thread what tick they think it is.
+        shared_reclaim_now: Arc<Atomic<ReclaimMoment>>,
         /// workers don't actually update this on every iteration,
         /// they batch updates using a local timer.
         /// this isn't in `shared` bc the workers shouldn't know about each other's timers.
@@ -73,7 +77,8 @@ mod main_thread {
             let mut thread_data = ThreadData::default();
             let shared = Shared {
                 tree: Arc::new(Tree::new(&mut thread_data)),
-                now: Arc::new(Atomic::new(Moment::default())),
+                render_now: Arc::new(Atomic::new(RenderMoment::default())),
+                reclaim_now: Arc::new(Atomic::new(ReclaimMoment::default())),
                 window: Arc::new(RwLock::new(None)),
                 sample_counter: Arc::new(AtomicU64::new(0)),
                 shared_texture: SharedTexture::default(),
@@ -83,20 +88,33 @@ mod main_thread {
                 .map(|thread_i| {
                     let shared = Shared {
                         tree: Arc::clone(&shared.tree),
-                        now: Arc::clone(&shared.now),
+                        render_now: Arc::clone(&shared.render_now),
+                        reclaim_now: Arc::clone(&shared.reclaim_now),
                         window: Arc::clone(&shared.window),
                         sample_counter: Arc::clone(&shared.sample_counter),
                         shared_texture: Arc::clone(&shared.shared_texture),
                         kill: Arc::clone(&shared.kill),
                     };
+                    let shared_reclaim_now =
+                        Arc::new(Atomic::new(shared.reclaim_now.load(Ordering::SeqCst)));
                     let shared_timer = Arc::new(Mutex::new(MultiTimer::default()));
-                    let worker_timer = Arc::clone(&shared_timer);
+                    let shared_reclaim_now_clone = Arc::clone(&shared_reclaim_now);
+                    let shared_timer_clone = Arc::clone(&shared_timer);
                     let handle = thread::Builder::new()
                         .name(format!("pool {}", thread_i))
-                        .spawn(move || WorkerLocal::new(shared, thread_i, worker_timer).run())
+                        .spawn(move || {
+                            WorkerLocal::new(
+                                shared,
+                                thread_i,
+                                shared_reclaim_now_clone,
+                                shared_timer_clone,
+                            )
+                            .run()
+                        })
                         .unwrap();
                     WorkerHandle {
                         handle,
+                        shared_reclaim_now,
                         shared_timer,
                     }
                 })
@@ -135,6 +153,7 @@ mod main_thread {
         // }
 
         /// receive updates and reset the timers.
+        #[cfg_attr(feature = "profiling", inline(never))]
         pub(crate) fn timer(&mut self) -> MultiTimer {
             self.workers
                 .iter()
@@ -150,11 +169,35 @@ mod main_thread {
                 .expect("we don't have any workers")
         }
 
+        #[cfg_attr(feature = "profiling", inline(never))]
         pub(crate) fn join(&mut self) {
             self.shared.kill.store(true, Ordering::Relaxed);
             for worker in self.workers.drain(..) {
                 worker.handle.join().expect("worker thread panicked");
             }
+        }
+
+        /// returns `None` if any worker is behind,
+        /// otherwise increments the tick and returns `Some`.
+        #[cfg_attr(feature = "profiling", inline(never))]
+        pub(crate) fn try_reclaim_tick(&mut self) -> Option<()> {
+            let now = self.shared.reclaim_now.load(Ordering::SeqCst);
+            for worker in &self.workers {
+                let worker_now = worker.shared_reclaim_now.load(Ordering::SeqCst);
+                debug_assert!(
+                    now <= worker_now + 1,
+                    "workers should never more than one tick behind the main thread"
+                );
+                debug_assert!(
+                    worker_now <= now,
+                    "workers should never be ahead of the main thread"
+                );
+                if worker_now != now {
+                    return None;
+                }
+            }
+            self.shared.reclaim_now.store(now + 1, Ordering::SeqCst);
+            Some(())
         }
 
         /// updates the window we're sampling in.
@@ -208,7 +251,7 @@ mod main_thread {
 
             shared_texture.needs_full_redraw = needs_full_redraw;
 
-            // update now and prev_frame_start
+            // update render now
             {
                 // // i can't just fetch_add(1) because of how the atomic crate works
                 // let prev_frame_start = self.shared.now.load(Ordering::SeqCst);
@@ -216,7 +259,7 @@ mod main_thread {
                 //     .now
                 //     .store(prev_frame_start + 1, Ordering::SeqCst);
                 self.shared
-                    .now
+                    .render_now
                     .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |now| Some(now + 1))
                     .expect("we should never fail to update `now`");
             }
@@ -285,6 +328,7 @@ mod main_thread {
 
         use super::*;
 
+        #[cfg_attr(feature = "profiling", inline(never))]
         pub(crate) fn render_mandelbrot(
             handle: &mut egui::TextureHandle,
             camera_map: &CameraMap,
@@ -311,6 +355,7 @@ mod main_thread {
             );
         }
 
+        #[cfg_attr(feature = "profiling", inline(never))]
         pub(crate) fn render_color(handle: &mut egui::TextureHandle, camera_map: &CameraMap) {
             let colors = camera_map
                 .pixels()
@@ -346,10 +391,21 @@ mod worker_thread {
         /// `usize` bc [`thread::available_parallelism`] returns a `usize`.
         thread_i: usize,
         thread_data: ThreadData,
+        /// our belief of the current moment.
+        /// we could instead have only `shared_now`,
+        /// but then you need an extra atomic load to check if our belief is up to date.
+        local_reclaim_now: ReclaimMoment,
+        /// tell the main thread about our belief of the current moment.
+        shared_reclaim_now: Arc<Atomic<ReclaimMoment>>,
         /// nodes we split and need to find the color of.
         /// note that the len should be <= 4.
         /// TODO: rename
-        to_be_colored: Vec<NodeHandle>,
+        to_be_colored: Vec<(Real, Imag)>,
+        /// moment is when they were retired,
+        /// not when they should be reclaimed.
+        /// alias: `to_be_reclaimed`,
+        /// but this is sufficiently funnier that the unclarity is worth is.
+        nursing_home: Vec<(ReclaimMoment, [NodeHandle; 4])>,
         /// accumulate updates here.
         local_timer: MultiTimer,
         /// use batched updates.
@@ -362,19 +418,39 @@ mod worker_thread {
         pub(super) fn new(
             shared: Shared,
             thread_i: usize,
+            shared_reclaim_now: Arc<Atomic<ReclaimMoment>>,
             shared_timer: Arc<Mutex<MultiTimer>>,
         ) -> Self {
             Self {
                 shared,
                 thread_i,
                 thread_data: ThreadData::default(),
+                local_reclaim_now: shared_reclaim_now.load(Ordering::SeqCst),
+                shared_reclaim_now,
                 to_be_colored: Vec::with_capacity(4),
+                nursing_home: Vec::new(),
                 local_timer: MultiTimer::default(),
                 shared_timer,
                 last_sent: Instant::now(),
             }
         }
 
+        #[cfg_attr(feature = "profiling", inline(never))]
+        fn update_reclaim_now(&mut self) {
+            let now = self.shared.reclaim_now.load(Ordering::SeqCst);
+            if now == self.local_reclaim_now {
+                return;
+            }
+            debug_assert_eq!(
+                now,
+                self.local_reclaim_now + 1,
+                "we should only ever be one behind"
+            );
+            self.local_reclaim_now = now;
+            self.shared_reclaim_now.store(now, Ordering::SeqCst);
+        }
+
+        #[cfg_attr(feature = "profiling", inline(never))]
         fn try_draw(&mut self) -> Option<()> {
             let shared_texture = match self.shared.shared_texture.try_read() {
                 Ok(shared_texture) => shared_texture,
@@ -409,9 +485,9 @@ mod worker_thread {
                     .expect("we just locked it");
                 {
                     let prev_frame_start = if shared_texture.needs_full_redraw {
-                        Moment::MIN
+                        RenderMoment::MIN
                     } else {
-                        self.shared.now.load(Ordering::SeqCst) - 1
+                        self.shared.render_now.load(Ordering::SeqCst) - 1
                     };
 
                     // TODO: do more of this, perhaps bisection bc that's easier than real spacial stuff
@@ -431,7 +507,7 @@ mod worker_thread {
                             let real_hi = last_pixel.real_mid();
                             debug_assert_ne!(
                                 prev_frame_start,
-                                Moment::MIN,
+                                RenderMoment::MIN,
                                 "we should short circuit earlier"
                             );
                             self.shared.tree.any_on_line_needs_redraw(
@@ -478,28 +554,25 @@ mod worker_thread {
             None
         }
 
-        fn try_sample(&mut self) -> Option<()> {
-            let handle = self.to_be_colored.pop()?;
-
-            // dbg!("sample");
-            let (real, imag) = self.shared.tree.mid_of_node_handle(handle);
-            let color = sample::metabrot_sample((real, imag)).color();
-            self.shared
-                .tree
-                .insert(handle, color, self.shared.now.load(Ordering::SeqCst));
-            self.shared.sample_counter.fetch_add(1, Ordering::Relaxed);
+        #[cfg_attr(feature = "profiling", inline(never))]
+        fn try_retire(&mut self) -> Option<()> {
+            dbg!("somehow notify the workers to reclaim/free/deallocate nodes");
+            // return None;
+            // dbg!("reclaim");
 
             Some(())
         }
 
+        #[cfg_attr(feature = "profiling", inline(never))]
         fn try_reclaim(&mut self) -> Option<()> {
             dbg!("somehow notify the workers to reclaim/free/deallocate nodes");
-            return None;
-            dbg!("reclaim");
+            // return None;
+            // dbg!("reclaim");
 
             Some(())
         }
 
+        #[cfg_attr(feature = "profiling", inline(never))]
         fn try_split(&mut self) -> Option<()> {
             let window = match self.shared.window.try_read() {
                 Ok(window) => *window.as_ref()?,
@@ -514,27 +587,70 @@ mod worker_thread {
             debug_assert!(self.to_be_colored.is_empty());
             if let Some(handles) = self.shared.tree.refine(
                 window,
-                self.shared.now.load(Ordering::SeqCst),
+                self.shared.render_now.load(Ordering::SeqCst),
                 &mut self.thread_data,
             ) {
                 // dbg!("refined");
                 self.to_be_colored.extend(handles);
+                Some(())
+            } else {
+                None
             }
+        }
+
+        #[cfg_attr(feature = "profiling", inline(never))]
+        fn try_sample(&mut self) -> Option<()> {
+            let (real, imag) = self.to_be_colored.pop()?;
+
+            // dbg!("sample");
+            let color = sample::metabrot_sample((real, imag)).color();
+            self.shared.tree.insert(
+                (real, imag),
+                color,
+                self.shared.render_now.load(Ordering::SeqCst),
+                &mut self.thread_data,
+            );
+            self.shared.sample_counter.fetch_add(1, Ordering::Relaxed);
+
             Some(())
         }
 
+        #[cfg_attr(feature = "profiling", inline(never))]
         pub(super) fn run(mut self) {
             loop {
                 if self.shared.kill.load(Ordering::Relaxed) {
                     break;
                 }
 
+                // must call this ever time,
+                // not just when we want to retire,
+                // bc draw uses the cached value too.
+                self.update_reclaim_now();
+
                 // rendering is highest priority
-                // followed by sampling
                 // followed by reclaiming
+                // followed by sampling
+                // followed by retiring
                 // followed by splitting
 
+                // we need get an ack from each thread that they recognize the current moment for the correctness of reclaim.
+                // workers read main thread's now,
+                // if it's incremented compared to the local cache,
+                // they increment the main thread's knowledge of them.
+
+                // TODO: we also need to ensure that the stuff in `to_be_colored` hasn't been reclaimed
+                // idea: get_non_silent that's slow and increments something
+                // or maybe on insert we traverse the point?
+                // oh we could replace the handles with points and then we don't have to worry.
+                // also we can update the timestamps on the way down.
+
+                // ok what about double free?
+                // we definitely own the first level, but need to defer reclaiming their children?
+                //
+
                 let start = Instant::now();
+
+                // TODO: for debugging, do these in a random order.
 
                 if self.try_draw().is_some() {
                     self.local_timer.draw.insert(start.elapsed());
@@ -542,6 +658,8 @@ mod worker_thread {
                     self.local_timer.sample.insert(start.elapsed());
                 // } else if self.try_reclaim().is_some() {
                 //     self.local_timer.reclaim.insert(start.elapsed());
+                // } else if self.try_retire().is_some() {
+                //     self.local_timer.retire.insert(start.elapsed());
                 } else if self.try_split().is_some() {
                     self.local_timer.split.insert(start.elapsed());
                 } else {
@@ -755,6 +873,7 @@ mod shared_texture {
         }
 
         /// also sets `needs_full_redraw` to `true`.
+        #[cfg_attr(feature = "profiling", inline(never))]
         pub(super) fn resize_if_needed(&mut self, camera_map: &CameraMap) {
             let width = camera_map.pixels_width();
             let height = camera_map.pixels_height();
@@ -781,6 +900,7 @@ mod shared_texture {
         /// should be called after resize.
         /// checks that self.camera_map is None
         // /// &mut self isn't really necessary, but it's semantically nice that only the main thread can reset the locks.
+        #[cfg_attr(feature = "profiling", inline(never))]
         pub(super) fn reset_locks(&mut self, camera_map: &CameraMap) {
             assert!(self.camera_map.is_none(), "camera_map wasn't None");
             debug_assert!(
@@ -808,6 +928,7 @@ mod shared_texture {
             self.camera_map = Some(camera_map.clone());
         }
 
+        #[cfg_attr(feature = "profiling", inline(never))]
         pub(super) fn block_until_finished(&self) {
             // while self.camera_map.is_some() {
             //     std::thread::yield_now();
@@ -823,6 +944,7 @@ mod shared_texture {
         }
 
         /// this allocates btw.
+        #[cfg_attr(feature = "profiling", inline(never))]
         pub(super) fn set_texture(&self, handle: &mut egui::TextureHandle) {
             assert!(self.camera_map.is_none(), "camera_map wan't reset");
             debug_assert!(
@@ -849,6 +971,7 @@ mod shared_texture {
     }
 }
 
+#[cfg_attr(feature = "profiling", inline(never))]
 fn set_texture(handle: &mut egui::TextureHandle, size: [usize; 2], colors: Vec<Color32>) {
     handle.set(
         egui::ColorImage::new(size, colors),

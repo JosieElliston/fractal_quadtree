@@ -29,6 +29,8 @@
 - allocator is linked list but with big blocks, handles wrap pointers
 - bug report on `compare_exchange` returning `current` not `new`
 - pausing sampling is broken, also when the fractal is outside the window
+- why does lagging the main thread make sampling so much faster?
+- `left: NodeHandle4` type for groups.
 
 ## optimization
 
@@ -130,7 +132,7 @@
 - draw debug dots on the centers of each quadtree domain
     - camera_map.fixed_to_vec1(fixed)
     - camera_map.complex_to_vec2((real, imag))
-    - don't draw if camera_map.fixed_to_vec1(node.dom().rad()) < 4 * pixel_size
+    - don't draw if camera_map.fixed_to_vec1(node.dom().rad()) < 4 \* pixel_size
 
 ## UX
 

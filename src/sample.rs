@@ -347,8 +347,8 @@ pub(crate) fn distance_estimator(
 }
 
 pub(crate) fn initial_window((z0_real, z0_imag): (Real, Imag)) -> Option<Window> {
-    let real = z0_imag.mul(z0_imag) - z0_real.mul(z0_real);
-    let imag = -z0_real.mul(z0_imag).mul2();
+    let real = z0_imag.mul_checked(z0_imag)? - z0_real.mul_checked(z0_real)?;
+    let imag = -z0_real.mul_checked(z0_imag)?.mul2_checked()?;
     let rad = 2.0.try_into().unwrap();
     Window::from_mid_rad(real, imag, rad, rad)
 }

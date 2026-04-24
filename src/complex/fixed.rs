@@ -137,6 +137,15 @@ impl Fixed {
         ret
     }
 
+    pub(crate) fn mul_checked(self, rhs: Self) -> Option<Self> {
+        Some(Self(
+            (self.0 as i128)
+                .checked_mul(rhs.0 as i128)?
+                .checked_shr(Self::SHIFT)?
+                .try_into()
+                .ok()?,
+        ))
+    }
     pub(crate) fn mul(self, rhs: Self) -> Self {
         Self(
             (self.0 as i128)
