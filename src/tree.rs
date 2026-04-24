@@ -456,6 +456,7 @@ impl Tree {
         fn depth_of_shallowest_leaf(
             tree: &Tree,
             window: Window,
+            reclaim_rad: Option<Real>,
             data: &mut ThreadData,
         ) -> Option<u32> {
             let stack = &mut data.vec_handle_u32;
@@ -471,6 +472,11 @@ impl Tree {
                 // TODO: instead of doing this check on pop, do it on push
                 // this also lets us do less work in the case where the domain is contained inside the window
                 if !window.overlaps(dom) {
+                    continue;
+                }
+                if let Some(reclaim_rad) = reclaim_rad
+                    && dom.rad() <= reclaim_rad
+                {
                     continue;
                 }
                 if let Some(child_handle) = node.left_child.load(Ordering::SeqCst) {
@@ -532,6 +538,7 @@ impl Tree {
         fn leafs_in_window_at_depth(
             tree: &Tree,
             window: Window,
+            reclaim_rad: Option<Real>,
             shallowest_depth: u32,
             data: &mut ThreadData,
         ) -> impl Iterator<Item = NodeHandle> {
@@ -544,7 +551,13 @@ impl Tree {
                         continue;
                     }
                     let node = tree.alloc.get(handle);
-                    if !window.overlaps(unsafe { node.dom() }) {
+                    let dom = unsafe { node.dom() };
+                    if !window.overlaps(dom) {
+                        continue;
+                    }
+                    if let Some(reclaim_rad) = reclaim_rad
+                        && dom.rad() <= reclaim_rad
+                    {
                         continue;
                     }
                     if let Some(child_handle) = node.left_child.load(Ordering::SeqCst) {
@@ -651,7 +664,11 @@ impl Tree {
             Some(())
         }
 
-        let shallowest_depth = depth_of_shallowest_leaf(self, sample_window, data)?;
+        // used for filtering out leafs that would be immediately reclaimed.
+        let reclaim_rad =
+            reclaim_window.and_then(|w| Self::RECLAIM_SCALE.mul_checked(w.real_rad()));
+
+        let shallowest_depth = depth_of_shallowest_leaf(self, sample_window, reclaim_rad, data)?;
         // TODO: sometimes we get into a state where refine never succeeds.
 
         // #[cfg(false)]
@@ -682,21 +699,21 @@ impl Tree {
         // and if it fails (bc someone already got there),
         // reuse the memory we allocated for the children for the next iteration.
         // if we go through all the leafs at this depth, don't bother retrying, just return `None`.
-        let reclaim_rad =
-            reclaim_window.and_then(|w| Self::RECLAIM_SCALE.mul_checked(w.real_rad()));
         let mut debug_attempts = 0;
-        for leaf_handle in leafs_in_window_at_depth(self, sample_window, shallowest_depth, data) {
+        for leaf_handle in
+            leafs_in_window_at_depth(self, sample_window, reclaim_rad, shallowest_depth, data)
+        {
             debug_attempts += 1;
-            // filter out leafs that would be immediately reclaimed.
-            // TODO: put this in a better spot
-            if let Some(reclaim_rad) = reclaim_rad {
-                let leaf = self.alloc.get(leaf_handle);
-                let leaf_dom = unsafe { leaf.dom() };
-                if leaf_dom.rad() <= reclaim_rad {
-                    // log!("skipping a leaf that would be immediately reclaimed");
-                    continue;
-                }
-            }
+            // // filter out leafs that would be immediately reclaimed.
+            // // TODO: put this in a better spot
+            // if let Some(reclaim_rad) = reclaim_rad {
+            //     let leaf = self.alloc.get(leaf_handle);
+            //     let leaf_dom = unsafe { leaf.dom() };
+            //     if leaf_dom.rad() <= reclaim_rad {
+            //         // log!("skipping a leaf that would be immediately reclaimed");
+            //         continue;
+            //     }
+            // }
             if let Some(()) = try_split(self, leaf_handle, left_child) {
                 // log!("successfully split");
                 return Some(
@@ -706,18 +723,19 @@ impl Tree {
                 );
             }
         }
-        // log!(format!(
-        //     "shallowest_depth: {}, attempts: {}",
-        //     shallowest_depth, attempts
-        // ));
-        {
-            let shallowest_depth_oracle =
-                depth_of_shallowest_leaf_oracle(self, sample_window, data)?;
-            log!(format!(
-                "shallowest depth oracle: {}, actual: {}, attempts: {}",
-                shallowest_depth_oracle, shallowest_depth, debug_attempts
-            ));
-        }
+
+        log!(format!(
+            "shallowest_depth: {}, attempts: {}",
+            shallowest_depth, debug_attempts
+        ));
+        // {
+        //     let shallowest_depth_oracle =
+        //         depth_of_shallowest_leaf_oracle(self, sample_window, data)?;
+        //     log!(format!(
+        //         "shallowest depth oracle: {}, actual: {}, attempts: {}",
+        //         shallowest_depth_oracle, shallowest_depth, debug_attempts
+        //     ));
+        // }
 
         // dbg!("failed to split");
         // if rand::rng().random_bool(0.0001) {
