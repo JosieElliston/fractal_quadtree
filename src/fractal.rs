@@ -613,19 +613,29 @@ mod worker_thread {
         // TODO: rename to try_refine
         #[cfg_attr(feature = "profiling", inline(never))]
         fn try_split(&mut self) -> Option<()> {
-            let window = match self.shared.sample_window.try_read() {
+            let sample_window = match self.shared.sample_window.try_read() {
                 Ok(window) => *window.as_ref()?,
-                Err(TryLockError::Poisoned(_)) => panic!("window poisoned"),
+                Err(TryLockError::Poisoned(_)) => panic!("sample_window poisoned"),
                 Err(TryLockError::WouldBlock) => {
                     // the main thread is updating the window
                     return None;
                 }
             };
 
+            let reclaim_window = match self.shared.reclaim_window.try_read() {
+                Ok(window) => *window,
+                Err(TryLockError::Poisoned(_)) => panic!("reclaim_window poisoned"),
+                Err(TryLockError::WouldBlock) => {
+                    // the main thread is updating the window
+                    None
+                }
+            };
+
             // dbg!("split");
             debug_assert!(self.to_be_colored.is_empty());
             if let Some(handles) = self.shared.tree.refine(
-                window,
+                sample_window,
+                reclaim_window,
                 self.shared.render_now.load(Ordering::SeqCst),
                 &mut self.thread_data,
             ) {

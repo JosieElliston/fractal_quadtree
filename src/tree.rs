@@ -259,15 +259,16 @@ impl Tree {
         // log!("TODO: actually reclaim the nodes instead of just leaking them");
     }
 
+    // const RECLAIM_SCALE: Real = Real::try_from_f64(1.0 / 1024.0).unwrap();
+    const RECLAIM_SCALE: Real = Real::try_from_f64(1.0 / 100.0).unwrap();
+
     /// selects a node to retire, and retires its children.
     /// returns `None` if we shouldn't/can't retire.
     /// must not call `reclaim` on the returned children within two (or maybe three) frames/moments/epochs.
     /// note that we don't guarantee that the returned nodes are leafs.
     #[cfg_attr(feature = "profiling", inline(never))]
     pub(crate) fn retire(&self, window: Window, data: &mut ThreadData) -> Option<NodeHandle4> {
-        // const RECLAIM_SCALE: Real = Real::try_from_f64(1.0 / 1024.0).unwrap();
-        const RECLAIM_SCALE: Real = Real::try_from_f64(1.0 / 100.0).unwrap();
-        let Some(target_rad) = RECLAIM_SCALE.mul_checked(window.real_rad()) else {
+        let Some(reclaim_rad) = Self::RECLAIM_SCALE.mul_checked(window.real_rad()) else {
             log!("window is too big/small to reclaim anything");
             return None;
         };
@@ -304,7 +305,7 @@ impl Tree {
         // log!("TODO: update height");
 
         // let node_handle = select(self, target_rad, data)?;
-        let Some(node_handle) = select(self, target_rad, data) else {
+        let Some(node_handle) = select(self, reclaim_rad, data) else {
             // log!("failed to find a node to retire");
             return None;
         };
@@ -384,7 +385,8 @@ impl Tree {
     #[cfg_attr(feature = "profiling", inline(never))]
     pub(crate) fn refine(
         &self,
-        window: Window,
+        sample_window: Window,
+        reclaim_window: Option<Window>,
         now: RenderMoment,
         data: &mut ThreadData,
     ) -> Option<[(Real, Imag); 4]> {
@@ -649,7 +651,7 @@ impl Tree {
             Some(())
         }
 
-        let shallowest_depth = depth_of_shallowest_leaf(self, window, data)?;
+        let shallowest_depth = depth_of_shallowest_leaf(self, sample_window, data)?;
         // TODO: sometimes we get into a state where refine never succeeds.
 
         // #[cfg(false)]
@@ -680,9 +682,21 @@ impl Tree {
         // and if it fails (bc someone already got there),
         // reuse the memory we allocated for the children for the next iteration.
         // if we go through all the leafs at this depth, don't bother retrying, just return `None`.
-        let mut attempts = 0;
-        for leaf_handle in leafs_in_window_at_depth(self, window, shallowest_depth, data) {
-            attempts += 1;
+        let reclaim_rad =
+            reclaim_window.and_then(|w| Self::RECLAIM_SCALE.mul_checked(w.real_rad()));
+        let mut debug_attempts = 0;
+        for leaf_handle in leafs_in_window_at_depth(self, sample_window, shallowest_depth, data) {
+            debug_attempts += 1;
+            // filter out leafs that would be immediately reclaimed.
+            // TODO: put this in a better spot
+            if let Some(reclaim_rad) = reclaim_rad {
+                let leaf = self.alloc.get(leaf_handle);
+                let leaf_dom = unsafe { leaf.dom() };
+                if leaf_dom.rad() <= reclaim_rad {
+                    // log!("skipping a leaf that would be immediately reclaimed");
+                    continue;
+                }
+            }
             if let Some(()) = try_split(self, leaf_handle, left_child) {
                 // log!("successfully split");
                 return Some(
@@ -697,10 +711,11 @@ impl Tree {
         //     shallowest_depth, attempts
         // ));
         {
-            let shallowest_depth_oracle = depth_of_shallowest_leaf_oracle(self, window, data)?;
+            let shallowest_depth_oracle =
+                depth_of_shallowest_leaf_oracle(self, sample_window, data)?;
             log!(format!(
                 "shallowest depth oracle: {}, actual: {}, attempts: {}",
-                shallowest_depth_oracle, shallowest_depth, attempts
+                shallowest_depth_oracle, shallowest_depth, debug_attempts
             ));
         }
 
