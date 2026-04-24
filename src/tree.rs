@@ -162,9 +162,9 @@ impl Tree {
         count
     }
 
-    pub(crate) fn mid_of_node_handle(&self, handle: NodeHandle) -> (Real, Imag) {
-        unsafe { self.alloc.get(handle).dom().mid() }
-    }
+    // pub(crate) fn mid_of_node_handle(&self, handle: NodeHandle) -> (Real, Imag) {
+    //     unsafe { self.alloc.get(handle).dom().mid() }
+    // }
 
     // /// maxes `handle` and all its ancestors timestamps with `now`.
     // #[cfg_attr(feature = "profiling", inline(never))]
@@ -220,14 +220,44 @@ impl Tree {
     //     }
     // }
 
+    /// erase the child pointer and return the children.
+    /// we can't deinit the children's fields at this time
+    /// because other threads can still be looking at the children,
+    /// and we need their child pointers later.
+    #[cfg_attr(feature = "profiling", inline(never))]
+    fn retire_node(&self, node_handle: NodeHandle) -> Option<NodeHandle4> {
+        let node = self.alloc.get(node_handle);
+        let left_child = node.left_child.swap(None, Ordering::SeqCst)?;
+        Some(left_child)
+    }
+
+    /// deinits the fields for debugging.
+    /// any read of any sibling after this is UB.
+    #[cfg_attr(feature = "profiling", inline(never))]
+    fn reclaim_node(&self, left: NodeHandle4) {
+        for node_handle in left.siblings() {
+            let node = self.alloc.get(node_handle);
+            unsafe {
+                node.write_dom(Domain::uninit());
+                node.write_parent(None);
+            }
+            node.left_child.store(None, Ordering::Relaxed);
+            node.color.store(None, Ordering::Relaxed);
+            node.height.store(0, Ordering::Relaxed);
+            node.timestamp
+                .store(RenderMoment::uninit(), Ordering::Relaxed);
+        }
+        dbg!("TODO: actually reclaim the nodes instead of just leaking them");
+    }
+
+    /// selects a node to retire, and retires its children.
     /// returns `None` if we shouldn't/can't retire.
-    /// must not call `reclaim` within two frames/moments/epochs.
-    /// returns a handle to the left child that
-    /// we will now have exclusive ownership of after a while.
-    /// note that we don't guarantee that the return nodes are leafs.
+    /// must not call `reclaim` on the returned children within two (or maybe three) frames/moments/epochs.
+    /// note that we don't guarantee that the returned nodes are leafs.
     #[cfg_attr(feature = "profiling", inline(never))]
     pub(crate) fn retire(&self, window: Window, data: &mut ThreadData) -> Option<NodeHandle4> {
-        const RECLAIM_SCALE: Real = Real::try_from_f64(1.0 / 1024.0).unwrap();
+        // const RECLAIM_SCALE: Real = Real::try_from_f64(1.0 / 1024.0).unwrap();
+        const RECLAIM_SCALE: Real = Real::try_from_f64(1.0 / 10.0).unwrap();
         let Some(target_rad) = RECLAIM_SCALE.mul_checked(window.real_rad()) else {
             eprintln!("window is too big/small to reclaim anything");
             return None;
@@ -261,17 +291,28 @@ impl Tree {
         }
 
         // TODO: update height (or maybe do it in reclaim)
+        // dbg!("TODO: update height");
 
-        // erase the child pointer and return the children
-        let node = self.alloc.get(select(self, target_rad, data)?);
-        let left_child = node.left_child.swap(None, Ordering::SeqCst)?;
-        Some(left_child)
+        let node_handle = select(self, target_rad, data)?;
+        self.retire_node(node_handle)
     }
 
+    /// must be called on what you got from `retire` after a delay.
+    /// retires `left`'s siblings' children.
+    /// these children should be reclaimed after the delay.
     #[cfg_attr(feature = "profiling", inline(never))]
-    pub(crate) fn reclaim(&self, left: NodeHandle) {
-        // note that we have to recurse on the children
-        dbg!("TODO: this leaks memory");
+    pub(crate) fn retire_children(&self, left: NodeHandle4) -> impl Iterator<Item = NodeHandle4> {
+        left.siblings()
+            .into_iter()
+            .filter_map(|node_handle| self.retire_node(node_handle))
+    }
+
+    /// should be called soon after `retire_children`.
+    /// but must be called after you've consumed the iterator `retire_children` returned.
+    /// free `left`'s siblings,
+    #[cfg_attr(feature = "profiling", inline(never))]
+    pub(crate) fn reclaim(&self, left: NodeHandle4) {
+        self.reclaim_node(left);
     }
 
     /// returns `None` if we shouldn't/can't refine.

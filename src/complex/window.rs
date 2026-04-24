@@ -24,7 +24,7 @@ impl Window {
     /// fails if the window would be empty,
     /// ie if it would have zero width or height.
     /// also fails if the window is too big, to avoid later overflow issues.
-    pub(crate) fn try_from_lo_hi(
+    pub(crate) fn from_lo_hi(
         real_lo: Real,
         real_hi: Real,
         imag_lo: Imag,
@@ -35,13 +35,8 @@ impl Window {
         }
         let _ = real_hi.add_checked(real_lo)?;
         let _ = imag_hi.add_checked(imag_lo)?;
-        // if !(Fixed::in_domain(2.0 * real_lo.into_f64())
-        //     && Fixed::in_domain(2.0 * real_hi.into_f64())
-        //     && Fixed::in_domain(2.0 * imag_lo.into_f64())
-        //     && Fixed::in_domain(2.0 * imag_hi.into_f64()))
-        // {
-        //     return None;
-        // }
+        let _ = real_hi.sub_checked(real_lo)?;
+        let _ = imag_hi.sub_checked(imag_lo)?;
         Some(Self {
             real_lo,
             real_hi,
@@ -49,11 +44,7 @@ impl Window {
             imag_hi,
         })
     }
-    /// panics if the window would be empty,
-    /// including if it would have zero width or height
-    pub(crate) fn from_lo_hi(real_lo: Real, real_hi: Real, imag_lo: Imag, imag_hi: Imag) -> Self {
-        Self::try_from_lo_hi(real_lo, real_hi, imag_lo, imag_hi).unwrap()
-    }
+
     /// fails if the window would be empty,
     /// ie if it would have zero width or height.
     /// also fails if the window is too big, to avoid overflow issues.
@@ -69,7 +60,7 @@ impl Window {
         let real_hi = real_mid.add_checked(real_rad)?;
         let imag_lo = imag_mid.sub_checked(imag_rad)?;
         let imag_hi = imag_mid.add_checked(imag_rad)?;
-        Self::try_from_lo_hi(real_lo, real_hi, imag_lo, imag_hi)
+        Self::from_lo_hi(real_lo, real_hi, imag_lo, imag_hi)
     }
     // /// panics if the diameter is too small
     // pub(crate) fn from_mid_diam(
@@ -97,6 +88,12 @@ impl Window {
     pub(crate) fn real_rad(self) -> Real {
         (self.real_hi - self.real_lo).div2_floor()
     }
+    // pub(crate) fn real_mid_checked(self) -> Option<Real> {
+    //     Some(self.real_hi.add_checked(self.real_lo)?.div2_floor())
+    // }
+    // pub(crate) fn real_rad_checked(self) -> Option<Real> {
+    //     Some(self.real_hi.sub_checked(self.real_lo)?.div2_floor())
+    // }
 
     pub(crate) fn imag_lo(self) -> Imag {
         self.imag_lo
@@ -104,12 +101,18 @@ impl Window {
     pub(crate) fn imag_hi(self) -> Imag {
         self.imag_hi
     }
-    pub(crate) fn imag_rad(self) -> Imag {
-        (self.imag_hi - self.imag_lo).div2_floor()
-    }
     pub(crate) fn imag_mid(self) -> Imag {
         (self.imag_hi + self.imag_lo).div2_floor()
     }
+    pub(crate) fn imag_rad(self) -> Imag {
+        (self.imag_hi - self.imag_lo).div2_floor()
+    }
+    // pub(crate) fn imag_mid_checked(self) -> Option<Imag> {
+    //     Some(self.imag_hi.add_checked(self.imag_lo)?.div2_floor())
+    // }
+    // pub(crate) fn imag_rad_checked(self) -> Option<Imag> {
+    //     Some(self.imag_hi.sub_checked(self.imag_lo)?.div2_floor())
+    // }
 
     pub(crate) fn mid(self) -> (Real, Imag) {
         (self.real_mid(), self.imag_mid())
@@ -125,7 +128,7 @@ impl Window {
         let real_hi = Fixed::min(self.real_hi, other.real_hi);
         let imag_lo = Fixed::max(self.imag_lo, other.imag_lo);
         let imag_hi = Fixed::min(self.imag_hi, other.imag_hi);
-        Self::try_from_lo_hi(real_lo, real_hi, imag_lo, imag_hi)
+        Self::from_lo_hi(real_lo, real_hi, imag_lo, imag_hi)
     }
 
     pub(crate) fn overlaps(self, other: impl Into<Self>) -> bool {

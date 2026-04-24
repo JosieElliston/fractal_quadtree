@@ -31,12 +31,20 @@ struct Shared {
     render_now: Arc<Atomic<RenderMoment>>,
     /// tell the worker threads the current reclaim moment.
     reclaim_now: Arc<Atomic<ReclaimMoment>>,
+    /// the `Window` in which we're reclaiming.
+    /// `None` iff reclaiming is disabled.
+    /// note that this is similar to shared_texture.camera_map.window,
+    /// it's just that reclaiming, sampling, and rendering are decoupled (eg any one may be disabled).
+    /// TODO: this could be an atomic option instead of a `RwLock`.
+    reclaim_window: Arc<RwLock<Option<Window>>>,
+    /// how many nodes were reclaimed since we last cleared this?
+    reclaim_counter: Arc<AtomicU64>,
     /// the `Window` in which we're sampling.
     /// `None` iff sampling is disabled.
     /// note that this is similar to shared_texture.camera_map.window,
-    /// it's just that sampling and rendering are decoupled (eg either one may be disabled).
+    /// it's just that reclaiming, sampling, and rendering are decoupled (eg any one may be disabled).
     /// TODO: this could be an atomic option instead of a `RwLock`.
-    window: Arc<RwLock<Option<Window>>>,
+    sample_window: Arc<RwLock<Option<Window>>>,
     /// how many samples were taken since we last cleared this?
     sample_counter: Arc<AtomicU64>,
     shared_texture: SharedTexture,
@@ -79,7 +87,9 @@ mod main_thread {
                 tree: Arc::new(Tree::new(&mut thread_data)),
                 render_now: Arc::new(Atomic::new(RenderMoment::default())),
                 reclaim_now: Arc::new(Atomic::new(ReclaimMoment::default())),
-                window: Arc::new(RwLock::new(None)),
+                reclaim_window: Arc::new(RwLock::new(None)),
+                reclaim_counter: Arc::new(AtomicU64::new(0)),
+                sample_window: Arc::new(RwLock::new(None)),
                 sample_counter: Arc::new(AtomicU64::new(0)),
                 shared_texture: SharedTexture::default(),
                 kill: Arc::new(AtomicBool::new(false)),
@@ -90,7 +100,9 @@ mod main_thread {
                         tree: Arc::clone(&shared.tree),
                         render_now: Arc::clone(&shared.render_now),
                         reclaim_now: Arc::clone(&shared.reclaim_now),
-                        window: Arc::clone(&shared.window),
+                        reclaim_window: Arc::clone(&shared.reclaim_window),
+                        reclaim_counter: Arc::clone(&shared.reclaim_counter),
+                        sample_window: Arc::clone(&shared.sample_window),
                         sample_counter: Arc::clone(&shared.sample_counter),
                         shared_texture: Arc::clone(&shared.shared_texture),
                         kill: Arc::clone(&shared.kill),
@@ -200,36 +212,45 @@ mod main_thread {
             Some(())
         }
 
+        /// updates the window we're reclaiming in.
+        /// returns how many nodes were reclaimed since the last time this was called.
+        #[cfg_attr(feature = "profiling", inline(never))]
+        pub(crate) fn enable_reclaiming(&mut self, window: Window) -> u64 {
+            // update the shared window
+            {
+                let mut reclaim_window =
+                    self.shared.reclaim_window.write().expect("window poisoned");
+                *reclaim_window = Some(window);
+            }
+
+            self.shared.reclaim_counter.swap(0, Ordering::SeqCst)
+        }
+
+        /// sets the reclaiming window to `None`
+        #[cfg_attr(feature = "profiling", inline(never))]
+        pub(crate) fn disable_reclaiming(&mut self) {
+            let mut reclaim_window = self.shared.reclaim_window.write().expect("window poisoned");
+            *reclaim_window = None;
+        }
+
         /// updates the window we're sampling in.
-        /// should be called every frame.
         /// returns how many samples were taken since the last time this was called.
-        /// TODO: rename.
         #[cfg_attr(feature = "profiling", inline(never))]
         pub(crate) fn enable_sampling(&mut self, window: Window) -> u64 {
             // update the shared window
             {
-                let mut shared_window = self.shared.window.write().expect("window poisoned");
-                *shared_window = Some(window);
+                let mut sample_window = self.shared.sample_window.write().expect("window poisoned");
+                *sample_window = Some(window);
             }
 
             self.shared.sample_counter.swap(0, Ordering::SeqCst)
         }
 
-        /// sets the shared window to `None`
+        /// sets the sampling window to `None`
         #[cfg_attr(feature = "profiling", inline(never))]
         pub(crate) fn disable_sampling(&mut self) {
-            let mut shared_window = self.shared.window.write().expect("window poisoned");
-            *shared_window = None;
-        }
-
-        #[cfg_attr(feature = "profiling", inline(never))]
-        pub(crate) fn enable_reclaiming(&mut self) {
-            dbg!("somehow notify the workers");
-        }
-
-        #[cfg_attr(feature = "profiling", inline(never))]
-        pub(crate) fn disable_reclaiming(&mut self) {
-            dbg!("somehow notify the workers");
+            let mut sample_window = self.shared.sample_window.write().expect("window poisoned");
+            *sample_window = None;
         }
 
         /// it's optional to call this every frame
@@ -381,7 +402,9 @@ mod main_thread {
 
 use worker_thread::*;
 mod worker_thread {
-    use crate::tree::ThreadData;
+    use std::collections::VecDeque;
+
+    use crate::tree::{NodeHandle4, ThreadData};
 
     use super::*;
 
@@ -405,7 +428,7 @@ mod worker_thread {
         /// not when they should be reclaimed.
         /// alias: `to_be_reclaimed`,
         /// but this is sufficiently funnier that the unclarity is worth is.
-        nursing_home: Vec<(ReclaimMoment, [NodeHandle; 4])>,
+        nursing_home: VecDeque<(ReclaimMoment, NodeHandle4)>,
         /// accumulate updates here.
         local_timer: MultiTimer,
         /// use batched updates.
@@ -428,7 +451,7 @@ mod worker_thread {
                 local_reclaim_now: shared_reclaim_now.load(Ordering::SeqCst),
                 shared_reclaim_now,
                 to_be_colored: Vec::with_capacity(4),
-                nursing_home: Vec::new(),
+                nursing_home: VecDeque::new(),
                 local_timer: MultiTimer::default(),
                 shared_timer,
                 last_sent: Instant::now(),
@@ -556,25 +579,40 @@ mod worker_thread {
 
         #[cfg_attr(feature = "profiling", inline(never))]
         fn try_retire(&mut self) -> Option<()> {
-            dbg!("somehow notify the workers to reclaim/free/deallocate nodes");
-            // return None;
-            // dbg!("reclaim");
-
+            let window = match self.shared.reclaim_window.try_read() {
+                Ok(window) => *window.as_ref()?,
+                Err(TryLockError::Poisoned(_)) => panic!("window poisoned"),
+                Err(TryLockError::WouldBlock) => {
+                    // the main thread is updating the window
+                    return None;
+                }
+            };
+            // dbg!("retire");
+            let left = self.shared.tree.retire(window, &mut self.thread_data)?;
+            // dbg!("retired");
+            self.nursing_home.push_back((self.local_reclaim_now, left));
             Some(())
         }
 
         #[cfg_attr(feature = "profiling", inline(never))]
         fn try_reclaim(&mut self) -> Option<()> {
-            dbg!("somehow notify the workers to reclaim/free/deallocate nodes");
-            // return None;
+            // TODO: is this correct?
+            let (_, front) = self.nursing_home.pop_front_if(|(reclaim_moment, _)| {
+                *reclaim_moment <= self.local_reclaim_now + 3
+            })?;
             // dbg!("reclaim");
-
+            for left_child in self.shared.tree.retire_children(front) {
+                self.nursing_home
+                    .push_back((self.local_reclaim_now, left_child));
+            }
+            self.shared.tree.reclaim(front);
+            self.shared.reclaim_counter.fetch_add(1, Ordering::Relaxed);
             Some(())
         }
 
         #[cfg_attr(feature = "profiling", inline(never))]
         fn try_split(&mut self) -> Option<()> {
-            let window = match self.shared.window.try_read() {
+            let window = match self.shared.sample_window.try_read() {
                 Ok(window) => *window.as_ref()?,
                 Err(TryLockError::Poisoned(_)) => panic!("window poisoned"),
                 Err(TryLockError::WouldBlock) => {
@@ -651,15 +689,16 @@ mod worker_thread {
                 let start = Instant::now();
 
                 // TODO: for debugging, do these in a random order.
+                // TODO: put functions and ui in a consistent order.
 
                 if self.try_draw().is_some() {
                     self.local_timer.draw.insert(start.elapsed());
                 } else if self.try_sample().is_some() {
                     self.local_timer.sample.insert(start.elapsed());
-                // } else if self.try_reclaim().is_some() {
-                //     self.local_timer.reclaim.insert(start.elapsed());
-                // } else if self.try_retire().is_some() {
-                //     self.local_timer.retire.insert(start.elapsed());
+                } else if self.try_reclaim().is_some() {
+                    self.local_timer.reclaim.insert(start.elapsed());
+                } else if self.try_retire().is_some() {
+                    self.local_timer.retire.insert(start.elapsed());
                 } else if self.try_split().is_some() {
                     self.local_timer.split.insert(start.elapsed());
                 } else {
@@ -751,6 +790,7 @@ mod timer {
         pub(crate) draw: Timer,
         pub(crate) sample: Timer,
         pub(crate) reclaim: Timer,
+        pub(crate) retire: Timer,
         pub(crate) split: Timer,
         pub(crate) idle: Timer,
     }
@@ -760,13 +800,15 @@ mod timer {
         }
 
         pub(crate) fn total(&self) -> Timer {
-            self.draw + self.sample + self.reclaim + self.split + self.idle
+            self.draw + self.sample + self.reclaim + self.retire + self.split + self.idle
         }
     }
     impl ops::AddAssign for MultiTimer {
         fn add_assign(&mut self, rhs: Self) {
             self.draw += rhs.draw;
             self.sample += rhs.sample;
+            self.reclaim += rhs.reclaim;
+            self.retire += rhs.retire;
             self.split += rhs.split;
             self.idle += rhs.idle;
         }
@@ -779,6 +821,7 @@ mod timer {
                 draw: self.draw + rhs.draw,
                 sample: self.sample + rhs.sample,
                 reclaim: self.reclaim + rhs.reclaim,
+                retire: self.retire + rhs.retire,
                 split: self.split + rhs.split,
                 idle: self.idle + rhs.idle,
             }

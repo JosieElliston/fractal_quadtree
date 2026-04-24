@@ -108,7 +108,7 @@ impl CameraMap {
     }
     /// equivalent to `self.rect_to_window(self.rect())`
     pub(crate) fn window(&self) -> Option<Window> {
-        Window::try_from_lo_hi(
+        Window::from_lo_hi(
             self.camera.real_lo().try_into().ok()?,
             self.camera.real_hi().try_into().ok()?,
             self.imag_lo().try_into().ok()?,
@@ -218,7 +218,7 @@ impl CameraMap {
     }
 
     pub(crate) fn rect_to_window(&self, rect: Rect) -> Option<Window> {
-        Window::try_from_lo_hi(
+        Window::from_lo_hi(
             self.x_to_real(rect.min.x)?,
             self.x_to_real(rect.max.x)?,
             self.y_to_imag(rect.max.y)?,
@@ -258,7 +258,7 @@ impl CameraMap {
     }
     pub(crate) fn pixel_at(&self, row: usize, col: usize) -> Option<Pixel> {
         let stride = self.stride.unwrap().get();
-        Pixel::try_from_lo_hi(
+        Pixel::from_lo_hi(
             self.x_to_real(col as f32)?,
             self.x_to_real((col + stride) as f32)?,
             self.y_to_imag((row + stride) as f32)?,

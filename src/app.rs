@@ -1,3 +1,5 @@
+#[cfg(debug_assertions)]
+use std::hint;
 use std::{
     sync::Arc,
     time::{Duration, Instant},
@@ -6,7 +8,7 @@ use std::{
 use egui::{self, Color32, Key, Pos2, Rect, Vec2};
 
 use crate::{
-    complex::{Camera, CameraMap, Domain, Window, fixed::*},
+    complex::{Camera, CameraMap, Window, fixed::*},
     fractal::{self, Fractal},
     sample::{self, SampleDistanceGradient, SampleMaybeDistance},
 };
@@ -43,11 +45,12 @@ pub(crate) struct App {
     last_frame_time: Instant,
     global_dts: egui::util::History<f32>,
     fractal_dts: egui::util::History<f32>,
-    /// how many samples we received on each frame
-    sample_counts: egui::util::History<u64>,
     /// the last successful reclaim tick.
     last_reclaim_tick: Instant,
     reclaim_dts: egui::util::History<f32>,
+    reclaim_counts: egui::util::History<u64>,
+    /// how many samples we received on each frame
+    sample_counts: egui::util::History<u64>,
     timers: egui::util::History<fractal::MultiTimer>,
     /// this allows us to prevent the main thread from needing to wait for the fractal to finish rendering.
     /// this is only false for the first frame.
@@ -86,9 +89,10 @@ impl App {
             last_frame_time: Instant::now(),
             global_dts: egui::util::History::new(2..1000, 0.2),
             fractal_dts: egui::util::History::new(2..1000, 0.2),
-            sample_counts: egui::util::History::new(10..1000, 1.0),
             last_reclaim_tick: Instant::now(),
             reclaim_dts: egui::util::History::new(10..1000, 1.0),
+            reclaim_counts: egui::util::History::new(10..1000, 1.0),
+            sample_counts: egui::util::History::new(10..1000, 1.0),
             timers: egui::util::History::new(10..1000, 1.0),
             has_begun_rendering: false,
             texture: cc.egui_ctx.load_texture(
@@ -545,6 +549,15 @@ impl App {
                         .on_hover_text("the reclaim ticks per second");
                 }
 
+                // reclaim count
+                {
+                    ui.label(format!(
+                        "reclaims/sec: {:.01}",
+                        self.reclaim_counts.values().sum::<u64>() as f32
+                            / self.reclaim_counts.len() as f32
+                    ));
+                }
+
                 // sample count
                 {
                     ui.label(format!(
@@ -650,19 +663,28 @@ impl App {
                                     / 1000.0
                             ));
                             ui.label(format!(
-                                "us per sample: {:.03}",
+                                "us per reclaim: {:.03}",
                                 timer
-                                    .sample
-                                    .div_count(timer.sample.count())
+                                    .reclaim
+                                    .div_count(timer.reclaim.count())
                                     .unwrap_or_default()
                                     .as_nanos() as f64
                                     / 1000.0
                             ));
                             ui.label(format!(
-                                "us per reclaim: {:.03}",
+                                "us per retire: {:.03}",
                                 timer
-                                    .reclaim
-                                    .div_count(timer.reclaim.count())
+                                    .retire
+                                    .div_count(timer.retire.count())
+                                    .unwrap_or_default()
+                                    .as_nanos() as f64
+                                    / 1000.0
+                            ));
+                            ui.label(format!(
+                                "us per sample: {:.03}",
+                                timer
+                                    .sample
+                                    .div_count(timer.sample.count())
                                     .unwrap_or_default()
                                     .as_nanos() as f64
                                     / 1000.0
@@ -699,12 +721,16 @@ impl App {
                                 timer.draw.div_elapsed(total_elapsed)
                             ));
                             ui.label(format!(
-                                "sample portion: {:.03}",
-                                timer.sample.div_elapsed(total_elapsed)
-                            ));
-                            ui.label(format!(
                                 "reclaim portion: {:.03}",
                                 timer.reclaim.div_elapsed(total_elapsed)
+                            ));
+                            ui.label(format!(
+                                "retire portion: {:.03}",
+                                timer.retire.div_elapsed(total_elapsed)
+                            ));
+                            ui.label(format!(
+                                "sample portion: {:.03}",
+                                timer.sample.div_elapsed(total_elapsed)
                             ));
                             ui.label(format!(
                                 "split portion: {:.03}",
@@ -1017,12 +1043,23 @@ impl eframe::App for App {
                     self.secondary_camera_stride,
                 );
 
+                // reclaiming
+                if self.reclaiming
+                    && let Some(window) = primary_camera_map.window()
+                {
+                    let reclaim_count = self.metabrot.enable_reclaiming(window);
+                    self.reclaim_counts
+                        .add(ctx.input(|i| i.time), reclaim_count);
+                } else {
+                    self.metabrot.disable_reclaiming();
+                }
+
                 // sampling
                 if self.sampling
                     && let Some(window) = primary_camera_map.window()
                 {
-                    let samples_taken = self.metabrot.enable_sampling(window);
-                    self.sample_counts.add(ctx.input(|i| i.time), samples_taken);
+                    let sample_count = self.metabrot.enable_sampling(window);
+                    self.sample_counts.add(ctx.input(|i| i.time), sample_count);
                 } else {
                     self.metabrot.disable_sampling();
                 }
