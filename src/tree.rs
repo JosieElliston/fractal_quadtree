@@ -115,7 +115,10 @@ pub(crate) struct Tree {
 impl Tree {
     pub(crate) fn new(data: &mut ThreadData) -> Self {
         let dom = Domain::default();
-        let color = metabrot_sample(dom.mid()).color().try_into().unwrap();
+        let color = metabrot_sample::<false>(&mut None, dom.mid())
+            .color()
+            .try_into()
+            .unwrap();
         let alloc = Alloc::default();
 
         // we leave 3 nodes uninit
@@ -243,7 +246,7 @@ impl Tree {
     /// deinits the fields for debugging.
     /// any read of any sibling after this is UB.
     #[cfg_attr(feature = "profiling", inline(never))]
-    fn reclaim_node(&self, left: NodeHandle4) {
+    fn reclaim_node(&self, left: NodeHandle4, data: &mut ThreadData) {
         for node_handle in left.siblings() {
             let node = self.alloc.get(node_handle);
             unsafe {
@@ -256,11 +259,11 @@ impl Tree {
             node.timestamp
                 .store(RenderMoment::uninit(), Ordering::Relaxed);
         }
-        // log!("TODO: actually reclaim the nodes instead of just leaking them");
+        data.free_list.push(left);
     }
 
-    // const RECLAIM_SCALE: Real = Real::try_from_f64(1.0 / 1024.0).unwrap();
-    const RECLAIM_SCALE: Real = Real::try_from_f64(1.0 / 100.0).unwrap();
+    const RECLAIM_SCALE: Real = Real::try_from_f64(1.0 / 1024.0).unwrap();
+    // const RECLAIM_SCALE: Real = Real::try_from_f64(1.0 / 100.0).unwrap();
 
     /// selects a node to retire, and retires its children.
     /// returns `None` if we shouldn't/can't retire.
@@ -280,6 +283,8 @@ impl Tree {
         /// for now, select the first node we find that's small enough.
         // for now just do the same thing as refine to detect bugs?
         // TODO: return an iter over all such nodes
+        // TODO: max_height
+        #[cfg_attr(feature = "profiling", inline(never))]
         fn select(tree: &Tree, target_rad: Real, data: &mut ThreadData) -> Option<NodeHandle> {
             let stack = &mut data.vec_handle;
             stack.clear();
@@ -322,23 +327,28 @@ impl Tree {
             node.min_height.store(0, Ordering::SeqCst);
         }
 
+        // TODO: maybe also update render timestamps?
+        // but it just makes the image look worse.
+        // it's still good for debugging.
+
         // at this point, the node is a leaf (unless someone split it in this small window)
         // update heights
         // TODO: don't use parent pointers
-        {
-            let mut node_handle = node_handle.left_sibling();
+        #[cfg_attr(feature = "profiling", inline(never))]
+        fn update_ancestors_height(tree: &Tree, mut node_handle: NodeHandle4) {
+            // let mut node_handle = node_handle.left_sibling();
 
             loop {
-                let node = self.alloc.get(node_handle.into());
+                let node = tree.alloc.get(node_handle.into());
                 let Some(parent) = (unsafe { node.parent() }) else {
                     break;
                 };
-                let parent_node = self.alloc.get(parent);
+                let parent_node = tree.alloc.get(parent);
 
                 let height = node_handle
                     .siblings()
                     .map(|sibling_handle| {
-                        self.alloc
+                        tree.alloc
                             .get(sibling_handle)
                             .min_height
                             .load(Ordering::SeqCst)
@@ -351,6 +361,7 @@ impl Tree {
                 node_handle = parent.left_sibling();
             }
         }
+        update_ancestors_height(self, node_handle.left_sibling());
 
         Some(left)
     }
@@ -369,8 +380,8 @@ impl Tree {
     /// but must be called after you've consumed the iterator `retire_children` returned.
     /// free `left`'s siblings,
     #[cfg_attr(feature = "profiling", inline(never))]
-    pub(crate) fn reclaim(&self, left: NodeHandle4) {
-        self.reclaim_node(left);
+    pub(crate) fn reclaim(&self, left: NodeHandle4, data: &mut ThreadData) {
+        self.reclaim_node(left, data);
     }
 
     /// returns `None` if we shouldn't/can't refine.
@@ -681,7 +692,7 @@ impl Tree {
         // }
 
         // note that we have an exclusive reference to the new children
-        let left_child = match data.handle.take() {
+        let left_child = match data.free_list.pop() {
             Some(handle) => handle,
             None => self.alloc.alloc4(data),
         };
@@ -699,11 +710,11 @@ impl Tree {
         // and if it fails (bc someone already got there),
         // reuse the memory we allocated for the children for the next iteration.
         // if we go through all the leafs at this depth, don't bother retrying, just return `None`.
-        let mut debug_attempts = 0;
+        // let mut debug_attempts = 0;
         for leaf_handle in
             leafs_in_window_at_depth(self, sample_window, reclaim_rad, shallowest_depth, data)
         {
-            debug_attempts += 1;
+            // debug_attempts += 1;
             // // filter out leafs that would be immediately reclaimed.
             // // TODO: put this in a better spot
             // if let Some(reclaim_rad) = reclaim_rad {
@@ -724,10 +735,10 @@ impl Tree {
             }
         }
 
-        log!(format!(
-            "shallowest_depth: {}, attempts: {}",
-            shallowest_depth, debug_attempts
-        ));
+        // log!(format!(
+        //     "shallowest_depth: {}, attempts: {}",
+        //     shallowest_depth, debug_attempts
+        // ));
         // {
         //     let shallowest_depth_oracle =
         //         depth_of_shallowest_leaf_oracle(self, sample_window, data)?;
@@ -747,7 +758,7 @@ impl Tree {
         //     );
         // }
 
-        data.handle = Some(left_child);
+        data.free_list.push(left_child);
 
         None
     }
@@ -1081,8 +1092,9 @@ impl Tree {
 /// dropping this may leak memory, but is safe.
 #[derive(Debug, Default)]
 pub(crate) struct ThreadData {
-    /// the owned group of nodes we allocated in `refine`
-    handle: Option<NodeHandle4>,
+    /// nodes we have freed.
+    /// you should look in here before going to the global allocator.
+    free_list: Vec<NodeHandle4>,
     /// the block we allocated in `realloc`
     block: Option<NonNull<Block>>,
     /// for various stacks (and perhaps queues).

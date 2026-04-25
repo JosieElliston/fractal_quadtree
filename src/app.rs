@@ -10,7 +10,8 @@ use egui::{self, Color32, Key, Pos2, Rect, Vec2};
 use crate::{
     complex::{Camera, CameraMap, Window, fixed::*},
     fractal::{self, Fractal},
-    sample::{self, SampleDistanceGradient, SampleMaybeDistance},
+    log,
+    sample::{self, SampleDistanceGradient, SampleLog, SampleMaybeDistance},
 };
 
 /// fancy dynamic radius based on zoom,
@@ -63,6 +64,7 @@ pub(crate) struct App {
     current_fractal: CurrentFractal,
     control_other_camera: bool,
     draw_z0: bool,
+    draw_sample_log: bool,
     draw_sample_window: bool,
     draw_sample_grid_cloud: bool,
     draw_sample_subgrid_cloud: bool,
@@ -107,6 +109,7 @@ impl App {
             current_fractal: CurrentFractal::Metabrot,
             control_other_camera: false,
             draw_z0: true,
+            draw_sample_log: false,
             draw_sample_window: true,
             draw_sample_grid_cloud: true,
             draw_sample_subgrid_cloud: false,
@@ -246,6 +249,17 @@ impl App {
         );
     }
 
+    /// draw the sample log for z0
+    fn show_sample_log(
+        &self,
+        painter: &egui::Painter,
+        secondary_camera_map: &CameraMap,
+        z0: (Real, Imag),
+    ) {
+        let sample_log = SampleLog::default();
+        log!("todo: show_sample_log");
+    }
+
     /// draw the outline of the window
     fn show_sample_window(
         &self,
@@ -277,7 +291,7 @@ impl App {
             .grid_centers(sample::WIDTH0, sample::WIDTH0)
             .flatten()
         {
-            let sample = sample::quadratic_map(z0, (c_real, c_imag));
+            let sample = sample::quadratic_map::<false>(&mut None, z0, (c_real, c_imag));
             if sample.depth > deepest {
                 deepest = sample.depth;
                 deepest_point = (c_real, c_imag);
@@ -323,7 +337,7 @@ impl App {
             .flatten()
         {
             let SampleMaybeDistance { depth, distance } =
-                sample::distance_estimator(z0, (c_real, c_imag));
+                sample::distance_estimator::<false>(&mut None, z0, (c_real, c_imag));
             if depth > deepest {
                 deepest = depth;
                 deepest_point = (c_real, c_imag);
@@ -352,7 +366,7 @@ impl App {
                 if (c0_real, c0_imag) == (c_real, c_imag) {
                     continue;
                 }
-                let sample = sample::quadratic_map(z0, (c_real, c_imag));
+                let sample = sample::quadratic_map::<false>(&mut None, z0, (c_real, c_imag));
                 if sample.depth > deepest {
                     deepest = sample.depth;
                     deepest_point = (c_real, c_imag);
@@ -392,7 +406,8 @@ impl App {
                 let Some(stepped_c) = (|| {
                     let (mut c_real, mut c_imag) = (c_real, c_imag);
                     for _ in 0..self.draw_sample_gradient_steps_cloud {
-                        (c_real, c_imag) = SampleDistanceGradient::step(z0, (c_real, c_imag))?;
+                        (c_real, c_imag) =
+                            SampleDistanceGradient::step::<false>(&mut None, z0, (c_real, c_imag))?;
                     }
                     Some((c_real, c_imag))
                 })() else {
@@ -431,7 +446,7 @@ impl App {
 
         const MAX_STEPS: usize = 8;
         for _ in 0..MAX_STEPS {
-            let Some(sample) = SampleDistanceGradient::new(z0, c) else {
+            let Some(sample) = SampleDistanceGradient::new::<false>(&mut None, z0, c) else {
                 return;
             };
             Self::draw_complex_circle_stroke(
@@ -486,6 +501,10 @@ impl App {
             }
 
             if let Some(window) = window {
+                if self.draw_sample_log {
+                    self.show_sample_log(&painter, secondary_camera_map, z0);
+                }
+
                 if self.draw_sample_window {
                     self.show_sample_window(&painter, secondary_camera_map, window);
                 }
@@ -577,6 +596,43 @@ impl App {
                         tree.node_count(&mut self.metabrot.thread_data)
                     ));
                 });
+
+                // sizing pass example by hactar
+                // TODO: do this (i forgot .invisible() when i tried it earlier)
+                // fn show_centered_with_sizing_pass<R>(
+                //     ui: &mut egui::Ui,
+                //     horizontal: bool,
+                //     vertical: bool,
+                //     mut f: impl FnMut(&mut egui::Ui) -> R,
+                // ) -> egui::InnerResponse<R> {
+                //     let total_rect = ui.max_rect();
+                //     let mut r = ui.scope_builder(
+                //         egui::UiBuilder::new()
+                //             .layout(egui::Layout::top_down(egui::Align::LEFT))
+                //             .sizing_pass()
+                //             .invisible(),
+                //         &mut f,
+                //     );
+                //     let size = r.response.rect.size();
+                //     if !ui.is_sizing_pass() {
+                //         let mut desired_rect =
+                //             egui::Rect::from_center_size(total_rect.center(), size);
+                //         let go_back = total_rect.min - desired_rect.min;
+                //         if !horizontal {
+                //             desired_rect = desired_rect.translate(egui::vec2(go_back.x, 0.0));
+                //         }
+                //         if !vertical {
+                //             desired_rect = desired_rect.translate(egui::vec2(0.0, go_back.y));
+                //         }
+                //         r = ui.scope_builder(
+                //             egui::UiBuilder::new()
+                //                 .layout(egui::Layout::top_down(egui::Align::Center))
+                //                 .max_rect(desired_rect),
+                //             f,
+                //         );
+                //     }
+                //     r
+                // }
 
                 egui::CollapsingHeader::new("camera").show(ui, |ui| {
                     let add_contents = |ui: &mut egui::Ui| {
@@ -867,6 +923,7 @@ impl App {
 
             egui::CollapsingHeader::new("mandelbrot").show(ui, |ui| {
                 ui.checkbox(&mut self.draw_z0, "draw z0");                
+                ui.checkbox(&mut self.draw_sample_log, "draw sample log");
                 ui.checkbox(&mut self.draw_sample_window, "draw sample window");
                 ui.checkbox(&mut self.draw_sample_grid_cloud, "draw sample grid cloud");
                 ui.checkbox(&mut self.draw_sample_subgrid_cloud, "draw sample subgrid cloud");

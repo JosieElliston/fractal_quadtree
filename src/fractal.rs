@@ -38,6 +38,7 @@ struct Shared {
     /// TODO: this could be an atomic option instead of a `RwLock`.
     reclaim_window: Arc<RwLock<Option<Window>>>,
     /// how many nodes were reclaimed since we last cleared this?
+    /// for debugging / UX, not needed for the main algorithm.
     reclaim_counter: Arc<AtomicU64>,
     /// the `Window` in which we're sampling.
     /// `None` iff sampling is disabled.
@@ -46,6 +47,7 @@ struct Shared {
     /// TODO: this could be an atomic option instead of a `RwLock`.
     sample_window: Arc<RwLock<Option<Window>>>,
     /// how many samples were taken since we last cleared this?
+    /// for debugging / UX, not needed for the main algorithm.
     sample_counter: Arc<AtomicU64>,
     shared_texture: SharedTexture,
     /// set by the main thread to ask worker threads to exit.
@@ -363,7 +365,7 @@ mod main_thread {
                 .map(|(_rect, pixel)| {
                     if let Some(pixel) = pixel {
                         let c = pixel.mid();
-                        sample::quadratic_map((z0_real, z0_imag), c).color()
+                        sample::quadratic_map::<false>(&mut None, (z0_real, z0_imag), c).color()
                     } else {
                         Color32::MAGENTA
                     }
@@ -605,7 +607,7 @@ mod worker_thread {
                 self.nursing_home
                     .push_back((self.local_reclaim_now, left_child));
             }
-            self.shared.tree.reclaim(front);
+            self.shared.tree.reclaim(front, &mut self.thread_data);
             self.shared.reclaim_counter.fetch_add(1, Ordering::Relaxed);
             Some(())
         }
@@ -652,7 +654,7 @@ mod worker_thread {
             let (real, imag) = self.to_be_colored.pop()?;
 
             // dbg!("sample");
-            let color = sample::metabrot_sample((real, imag)).color();
+            let color = sample::metabrot_sample::<false>(&mut None, (real, imag)).color();
             self.shared.tree.insert(
                 (real, imag),
                 color,

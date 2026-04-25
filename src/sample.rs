@@ -10,13 +10,16 @@ use crate::complex::{Window, fixed::*};
 // pub(crate) static SAMPLE_ELAPSED_NANOS: AtomicU64 = AtomicU64::new(0);
 // pub(crate) static SAMPLE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+#[derive(Debug, Clone)]
 pub(crate) struct SampleDepth {
     pub(crate) depth: f32,
 }
+#[derive(Debug, Clone)]
 pub(crate) struct SampleMaybeDistance {
     pub(crate) depth: f32,
     pub(crate) distance: Option<Fixed>,
 }
+#[derive(Debug, Clone)]
 struct SampleDistance {
     depth: f32,
     distance: Fixed,
@@ -26,6 +29,7 @@ struct SampleDistance {
 //     distance: Fixed,
 //     grad: Option<(Real, Imag)>,
 // }
+#[derive(Debug, Clone)]
 pub(crate) struct SampleDistanceGradient {
     pub(crate) depth: f32,
     pub(crate) distance: Fixed,
@@ -127,15 +131,23 @@ impl SampleDistanceGradient {
     // TODO: maybe use the wirtinger derivative
     // TODO: if we immediately normalize the gradient, we don't have to deal with fixed point domain errors
     #[cfg_attr(feature = "profiling", inline(never))]
-    pub(crate) fn new(z0: (Real, Imag), (c_real, c_imag): (Real, Imag)) -> Option<Self> {
+    pub(crate) fn new<const LOGGING: bool>(
+        sample_log: &mut Option<SampleLog>,
+        z0: (Real, Imag),
+        (c_real, c_imag): (Real, Imag),
+    ) -> Option<Self> {
         let delta = 0.00001.try_into().unwrap();
-        let init: SampleDistance = distance_estimator(z0, (c_real, c_imag)).try_into().ok()?;
-        let right: SampleDistance = distance_estimator(z0, (c_real + delta, c_imag))
+        let init: SampleDistance = distance_estimator::<LOGGING>(sample_log, z0, (c_real, c_imag))
             .try_into()
             .ok()?;
-        let up: SampleDistance = distance_estimator(z0, (c_real, c_imag + delta))
-            .try_into()
-            .ok()?;
+        let right: SampleDistance =
+            distance_estimator::<LOGGING>(sample_log, z0, (c_real + delta, c_imag))
+                .try_into()
+                .ok()?;
+        let up: SampleDistance =
+            distance_estimator::<LOGGING>(sample_log, z0, (c_real, c_imag + delta))
+                .try_into()
+                .ok()?;
         let grad_real =
             Fixed::try_from_f64((right.distance - init.distance).into_f64() / delta.into_f64())?;
         let grad_imag =
@@ -173,18 +185,117 @@ impl SampleDistanceGradient {
     /// one iteration of ~gradient descent,
     /// except that we know how far to step.
     #[cfg_attr(feature = "profiling", inline(never))]
-    pub(crate) fn step(z0: (Real, Imag), c: (Real, Imag)) -> Option<(Real, Imag)> {
-        Self::new(z0, c)?.stepped(c)
+    pub(crate) fn step<const LOGGING: bool>(
+        sample_log: &mut Option<SampleLog>,
+        z0: (Real, Imag),
+        c: (Real, Imag),
+    ) -> Option<(Real, Imag)> {
+        Self::new::<LOGGING>(sample_log, z0, c)?.stepped(c)
     }
 }
 
+pub(crate) use logging::*;
+mod logging {
+    use egui::ahash::HashMap;
+
+    use super::*;
+
+    #[derive(Debug, Clone)]
+    pub(crate) enum SampleLogEntry {
+        // QuadraticMap { z0: (Real, Imag), c: (Real, Imag) },
+        // DistanceEstimator { z0: (Real, Imag), c: (Real, Imag) },
+        // Complex((Real, Imag)),
+        ComplexStatic {
+            real: Real,
+            imag: Imag,
+            rad: f32,
+            color: Color32,
+        },
+        ComplexDynamic {
+            real: Real,
+            imag: Imag,
+            max_rad: f32,
+            color: Color32,
+        },
+        Window {
+            window: Window,
+            stroke: egui::Stroke,
+        },
+    }
+
+    /// for drawing what points we sampled
+    #[derive(Debug, Default)]
+    pub(crate) struct SampleLog {
+        pub(crate) entries: Vec<SampleLogEntry>,
+        quadratic_map: HashMap<((Real, Imag), (Real, Imag)), SampleDepth>,
+        distance_estimator: HashMap<((Real, Imag), (Real, Imag)), SampleMaybeDistance>,
+    }
+    impl SampleLog {
+        pub fn insert_quadratic_map(
+            &mut self,
+            z0: (Real, Imag),
+            c: (Real, Imag),
+            depth: SampleDepth,
+        ) {
+            self.quadratic_map.insert((z0, c), depth);
+        }
+
+        pub fn insert_distance_estimator(
+            &mut self,
+            z0: (Real, Imag),
+            c: (Real, Imag),
+            depth: SampleMaybeDistance,
+        ) {
+            self.distance_estimator.insert((z0, c), depth);
+        }
+
+        // fn quadratic_map(&mut self, z0: (Real, Imag), c: (Real, Imag), color: Color32) {
+        //     self.entries
+        //         .push((SampleLogEntry::QuadraticMap { z0, c }, color));
+        // }
+
+        // fn distance_estimator(&mut self, z0: (Real, Imag), c: (Real, Imag), color: Color32) {
+        //     self.entries
+        //         .push((SampleLogEntry::DistanceEstimator { z0, c }, color));
+        // }
+
+        // fn complex(&mut self, c: (Real, Imag), color: Color32) {
+        //     self.entries.push((SampleLogEntry::Complex(c), color));
+        // }
+
+        pub(crate) fn window_primary(&mut self, window: Window) {
+            self.entries.push(SampleLogEntry::Window {
+                window,
+                stroke: egui::Stroke::new(2.0, Color32::WHITE),
+            });
+        }
+
+        pub(crate) fn window_secondary(&mut self, window: Window) {
+            self.entries.push(SampleLogEntry::Window {
+                window,
+                stroke: egui::Stroke::new(1.0, Color32::LIGHT_GRAY),
+            });
+        }
+    }
+}
+
+/// note that this doesn't tell the log to draw anything.
 #[cfg_attr(feature = "profiling", inline(never))]
-pub(crate) fn quadratic_map(
+pub(crate) fn quadratic_map<const LOGGING: bool>(
+    sample_log: &mut Option<SampleLog>,
     (z0_real, z0_imag): (Real, Imag),
     (c_real, c_imag): (Real, Imag),
 ) -> SampleDepth {
+    assert_eq!(LOGGING, sample_log.is_some());
+
     // const Z_ESCAPE_RAD2: f32 = 4.0;
     const Z_ESCAPE_RAD2: f32 = 64.0;
+
+    // do it like this so the argument names are nice
+    let z0_real_fixed = z0_real;
+    let z0_imag_fixed = z0_imag;
+    let c_real_fixed = c_real;
+    let c_imag_fixed = c_imag;
 
     let z0_real: f32 = z0_real.into_f64() as f32;
     let z0_imag: f32 = z0_imag.into_f64() as f32;
@@ -202,12 +313,21 @@ pub(crate) fn quadratic_map(
     let mut period_len = 1;
     for depth in 0..SampleDepth::MAX_DEPTH {
         if z_real2 + z_imag2 > Z_ESCAPE_RAD2 {
-            return SampleDepth {
+            let ret = SampleDepth {
                 // TODO: defer computing log unless we actually need it
                 // depth
                 // depth: depth as f32 + 2.0 - (z_real2 + z_imag2).sqrt().ln().ln() / 2.0f32.ln(),
                 depth: depth as f32 + 2.0 - (z_real2 + z_imag2).sqrt().ln().log2(),
             };
+            if LOGGING {
+                let sample_log = sample_log.as_mut().unwrap();
+                sample_log.insert_quadratic_map(
+                    (z0_real_fixed, z0_imag_fixed),
+                    (c_real_fixed, c_imag_fixed),
+                    ret.clone(),
+                );
+            }
+            return ret;
         }
 
         z_imag = (z_real + z_real).mul_add(z_imag, c_imag);
@@ -224,9 +344,18 @@ pub(crate) fn quadratic_map(
         // }
 
         if (old_real == z_real) && (old_imag == z_imag) {
-            return SampleDepth {
+            let ret = SampleDepth {
                 depth: SampleDepth::MAX_DEPTH as f32,
             };
+            if LOGGING {
+                let sample_log = sample_log.as_mut().unwrap();
+                sample_log.insert_quadratic_map(
+                    (z0_real_fixed, z0_imag_fixed),
+                    (c_real_fixed, c_imag_fixed),
+                    ret.clone(),
+                );
+            }
+            return ret;
         }
 
         period_i += 1;
@@ -240,17 +369,30 @@ pub(crate) fn quadratic_map(
         debug_assert!(z_imag.is_finite());
     }
 
-    SampleDepth {
+    let ret = SampleDepth {
         depth: SampleDepth::MAX_DEPTH as f32,
+    };
+    if LOGGING {
+        let sample_log = sample_log.as_mut().unwrap();
+        sample_log.insert_quadratic_map(
+            (z0_real_fixed, z0_imag_fixed),
+            (c_real_fixed, c_imag_fixed),
+            ret.clone(),
+        );
     }
+    ret
 }
 
-/// fails if the fixed point can't be constructed from the float
+/// fails if the fixed point can't be constructed from the float.
+/// note that this doesn't tell the log to draw anything.
 #[cfg_attr(feature = "profiling", inline(never))]
-pub(crate) fn distance_estimator(
+pub(crate) fn distance_estimator<const LOGGING: bool>(
+    sample_log: &mut Option<SampleLog>,
     (z0_real, z0_imag): (Real, Imag),
     (c_real, c_imag): (Real, Imag),
 ) -> SampleMaybeDistance {
+    assert_eq!(LOGGING, sample_log.is_some());
+
     // const Z_ESCAPE_RAD2: f32 = 4.0;
     // TODO: probably make this bigger
     // const Z_ESCAPE_RAD2: f32 = 64.0;
@@ -286,6 +428,12 @@ pub(crate) fn distance_estimator(
     // g probably isn't differentiable actually
     // fn gradient() -> (Real, Imag) {}
 
+    // do it like this so the argument names are nice
+    let z0_real_fixed = z0_real;
+    let z0_imag_fixed = z0_imag;
+    let c_real_fixed = c_real;
+    let c_imag_fixed = c_imag;
+
     let z0_real: f32 = z0_real.into_f64() as f32;
     let z0_imag: f32 = z0_imag.into_f64() as f32;
     let c_real: f32 = c_real.into_f64() as f32;
@@ -303,11 +451,20 @@ pub(crate) fn distance_estimator(
     let mut period_len = 1;
     for depth in 0..SampleDepth::MAX_DEPTH {
         if z_real2 + z_imag2 > Z_ESCAPE_RAD2 {
-            return SampleMaybeDistance {
+            let ret = SampleMaybeDistance {
                 // depth: depth as f32 + 2.0 - (z_real2 + z_imag2).sqrt().ln().ln() / 2.0f32.ln(),
                 depth: depth as f32 + 2.0 - (z_real2 + z_imag2).sqrt().ln().log2(),
                 distance: estimate(z_real, z_imag, dz_real, dz_imag),
             };
+            if LOGGING {
+                let sample_log = sample_log.as_mut().unwrap();
+                sample_log.insert_distance_estimator(
+                    (z0_real_fixed, z0_imag_fixed),
+                    (c_real_fixed, c_imag_fixed),
+                    ret.clone(),
+                );
+            }
+            return ret;
         }
 
         // 2 * z * dz + 1
@@ -323,10 +480,19 @@ pub(crate) fn distance_estimator(
 
         if (old_real == z_real) && (old_imag == z_imag) {
             // return estimate(z_real, z_imag, dz_real, dz_imag);
-            return SampleMaybeDistance {
+            let ret = SampleMaybeDistance {
                 depth: SampleDepth::MAX_DEPTH as f32,
                 distance: Some(Fixed::ZERO),
             };
+            if LOGGING {
+                let sample_log = sample_log.as_mut().unwrap();
+                sample_log.insert_distance_estimator(
+                    (z0_real_fixed, z0_imag_fixed),
+                    (c_real_fixed, c_imag_fixed),
+                    ret.clone(),
+                );
+            }
+            return ret;
         }
 
         period_i += 1;
@@ -340,17 +506,56 @@ pub(crate) fn distance_estimator(
         debug_assert!(z_imag.is_finite());
     }
 
-    SampleMaybeDistance {
+    let ret = SampleMaybeDistance {
         depth: SampleDepth::MAX_DEPTH as f32,
         distance: estimate(z_real, z_imag, dz_real, dz_imag),
+    };
+    if LOGGING {
+        let sample_log = sample_log.as_mut().unwrap();
+        sample_log.insert_distance_estimator(
+            (z0_real_fixed, z0_imag_fixed),
+            (c_real_fixed, c_imag_fixed),
+            ret.clone(),
+        );
     }
+    ret
 }
 
 pub(crate) fn initial_window((z0_real, z0_imag): (Real, Imag)) -> Option<Window> {
+    // TODO: actually these comments are wrong,
+    // and the escape circles are more subtle,
+    // but the results are probably still correct bc the mandelbrots are a lot smaller than the circles
+
+    // it's also the case that for coloring things far away, we care about how deep they get, which can be far away
+    // also the non-fixed window works better
+
+    // points outside of circle with radius 2 centered at the origin escape
+    // let window0 = Window::from_mid_rad(
+    //     Fixed::ZERO,
+    //     Fixed::ZERO,
+    //     2.0.try_into().unwrap(),
+    //     2.0.try_into().unwrap(),
+    // );
+
+    // on the first iteration, the points that were outside of
+    // the circle with radius 2 centered at (z0_imag*z0_imag - z0_real*z0_real, -2.0*z0_real*z0_imag)
+    // will escape
     let real = z0_imag.mul_checked(z0_imag)? - z0_real.mul_checked(z0_real)?;
     let imag = -z0_real.mul_checked(z0_imag)?.mul2_checked()?;
     let rad = 2.0.try_into().unwrap();
     Window::from_mid_rad(real, imag, rad, rad)
+
+    // let window1 = Window::from_mid_diam(
+    //     (f64::from(z0_imag) * f64::from(z0_imag) - f64::from(z0_real) * f64::from(z0_real))
+    //         .into(),
+    //     (-2.0 * f64::from(z0_real) * f64::from(z0_imag)).into(),
+    //     4.0.into(),
+    //     4.0.into(),
+    // );
+
+    // their intersection gives a tighter bound on the area that can escape
+    // which lets us use our samples on a more important area
+    // window0.intersect(window1)
 }
 
 pub(crate) const WIDTH: usize = 32;
@@ -358,13 +563,15 @@ pub(crate) const WIDTH: usize = 32;
 // pub(crate) const GRADIENT_STEPS: usize = 1;
 pub(crate) const GRADIENT_STEPS: usize = 0;
 #[cfg_attr(feature = "profiling", inline(never))]
-pub(crate) fn deepest_via_gradient_steps(
+pub(crate) fn deepest_via_gradient_steps<const LOGGING: bool>(
+    sample_log: &mut Option<SampleLog>,
     z0: (Real, Imag),
     window: Window,
     width: usize,
     height: usize,
     gradient_steps: usize,
 ) -> ((Real, Imag), SampleDepth) {
+    assert_eq!(LOGGING, sample_log.is_some());
     let log_delta = 8;
     let delta = Fixed::ONE.div2_n_floor(log_delta);
     let mut deepest: f32 = 0.0;
@@ -375,13 +582,11 @@ pub(crate) fn deepest_via_gradient_steps(
             for _ in 0..gradient_steps {
                 let Some(distance_init) = ({
                     let c = (c_real, c_imag);
-                    let SampleMaybeDistance {
-                        depth,
-                        distance: distance,
-                    } = distance_estimator(z0, (c_real, c_imag));
+                    let SampleMaybeDistance { depth, distance } =
+                        distance_estimator::<LOGGING>(sample_log, z0, c);
                     if depth > deepest {
                         if depth >= SampleDepth::MAX_DEPTH as f32 {
-                            return ((c_real, c_imag), SampleDepth { depth });
+                            return (c, SampleDepth { depth });
                         }
                         deepest = depth;
                         deepest_point = c;
@@ -393,10 +598,8 @@ pub(crate) fn deepest_via_gradient_steps(
 
                 let Some(distance_right) = ({
                     let c = (c_real + delta, c_imag);
-                    let SampleMaybeDistance {
-                        depth,
-                        distance: distance_right,
-                    } = distance_estimator(z0, c);
+                    let SampleMaybeDistance { depth, distance } =
+                        distance_estimator::<LOGGING>(sample_log, z0, c);
                     if depth > deepest {
                         if depth >= SampleDepth::MAX_DEPTH as f32 {
                             return (c, SampleDepth { depth });
@@ -404,14 +607,15 @@ pub(crate) fn deepest_via_gradient_steps(
                         deepest = depth;
                         deepest_point = c;
                     }
-                    distance_right
+                    distance
                 }) else {
                     break;
                 };
 
                 let Some(distance_left) = ({
                     let c = (c_real, c_imag + delta);
-                    let SampleMaybeDistance { depth, distance } = distance_estimator(z0, c);
+                    let SampleMaybeDistance { depth, distance } =
+                        distance_estimator::<LOGGING>(sample_log, z0, c);
                     if depth > deepest {
                         if depth >= SampleDepth::MAX_DEPTH as f32 {
                             return (c, SampleDepth { depth });
@@ -439,7 +643,7 @@ pub(crate) fn deepest_via_gradient_steps(
                 c_imag = c_imag_new;
             }
 
-            let sample = quadratic_map(z0, (c_real, c_imag));
+            let sample = quadratic_map::<LOGGING>(sample_log, z0, (c_real, c_imag));
             // metajulia
             // let sample = mandelbrot_sample(c_real, c_imag, z0_real, z0_imag);
             if sample.depth > deepest {
@@ -459,50 +663,27 @@ pub(crate) const WIDTH0: usize = 64;
 /// for the resamples
 pub(crate) const WIDTH1: usize = 8;
 
+/// sample_log should be `Some` iff `LOGGING`
 #[cfg_attr(feature = "profiling", inline(never))]
-pub(crate) fn metabrot_sample((z0_real, z0_imag): (Real, Imag)) -> SampleDepth {
+pub(crate) fn metabrot_sample<const LOGGING: bool>(
+    sample_log: &mut Option<SampleLog>,
+    (z0_real, z0_imag): (Real, Imag),
+) -> SampleDepth {
     // pub(crate) const WIDTH: usize = 128;
     // const WIDTH: usize = 512;
+    assert_eq!(LOGGING, sample_log.is_some());
 
-    let Some(window) = ({
-        // TODO: actually these comments are wrong,
-        // and the escape circles are more subtle,
-        // but the results are probably still correct bc the mandelbrots are a lot smaller than the circles
-
-        // it's also the case that for coloring things far away, we care about how deep they get, which can be far away
-        // also the non-fixed window works better
-
-        // points outside of circle with radius 2 centered at the origin escape
-        let window0 = Window::from_mid_rad(
-            Fixed::ZERO,
-            Fixed::ZERO,
-            2.0.try_into().unwrap(),
-            2.0.try_into().unwrap(),
+    if LOGGING {
+        let sample_log = sample_log.as_mut().unwrap();
+        assert!(
+            sample_log.entries.is_empty(),
+            "maybe i should just clear it here"
         );
+    }
+    // #[cfg(LOGGING)]
+    // let sample_log = sample_log.unwrap();
 
-        // on the first iteration, the points that were outside of
-        // the circle with radius 2 centered at (z0_imag*z0_imag - z0_real*z0_real, -2.0*z0_real*z0_imag)
-        // will escape
-        let Some(window1) = initial_window((z0_real, z0_imag)) else {
-            return SampleDepth { depth: 0.0 };
-        };
-        // let window1 = Window::from_mid_diam(
-        //     (f64::from(z0_imag) * f64::from(z0_imag) - f64::from(z0_real) * f64::from(z0_real))
-        //         .into(),
-        //     (-2.0 * f64::from(z0_real) * f64::from(z0_imag)).into(),
-        //     4.0.into(),
-        //     4.0.into(),
-        // );
-
-        // their intersection gives a tighter bound on the area that can escape
-        // which lets us use our samples on a more important area
-        // window0.intersect(window1)
-
-        // don't use the fancy stuff,
-        // wait until i can have debug tools for comparing fractals
-        // Some(window0)
-        Some(window1)
-    }) else {
+    let Some(window) = initial_window((z0_real, z0_imag)) else {
         // if the windows don't intersect,
         // then we know that all points escape immediately
         return SampleDepth {
@@ -511,14 +692,24 @@ pub(crate) fn metabrot_sample((z0_real, z0_imag): (Real, Imag)) -> SampleDepth {
             // depth: Sample::MAX_DEPTH,
         };
     };
+    if LOGGING {
+        let sample_log = sample_log.as_mut().unwrap();
+        sample_log.window_primary(window);
+    }
 
     let start = Instant::now();
 
     let mut deepest: f32 = 0.0;
     let mut deepest_point = (Fixed::ZERO, Fixed::ZERO);
 
-    let (c, sample) =
-        deepest_via_gradient_steps((z0_real, z0_imag), window, WIDTH, WIDTH, GRADIENT_STEPS);
+    let (c, sample) = deepest_via_gradient_steps::<LOGGING>(
+        sample_log,
+        (z0_real, z0_imag),
+        window,
+        WIDTH,
+        WIDTH,
+        GRADIENT_STEPS,
+    );
     deepest = sample.depth;
     deepest_point = c;
 
@@ -549,7 +740,7 @@ pub(crate) fn metabrot_sample((z0_real, z0_imag): (Real, Imag)) -> SampleDepth {
     // initial samples
     for (c_real, c_imag) in window.grid_centers(WIDTH0, WIDTH0).flatten() {
         let SampleMaybeDistance { depth, distance } =
-            distance_estimator((z0_real, z0_imag), (c_real, c_imag));
+            distance_estimator::<LOGGING>(sample_log, (z0_real, z0_imag), (c_real, c_imag));
         if depth > deepest {
             if depth >= SampleDepth::MAX_DEPTH as f32 {
                 return SampleDepth { depth };
@@ -571,7 +762,7 @@ pub(crate) fn metabrot_sample((z0_real, z0_imag): (Real, Imag)) -> SampleDepth {
             if (c0_real, c0_imag) == (c_real, c_imag) {
                 continue;
             }
-            let sample = quadratic_map((z0_real, z0_imag), (c_real, c_imag));
+            let sample = quadratic_map::<LOGGING>(sample_log, (z0_real, z0_imag), (c_real, c_imag));
             if sample.depth > deepest {
                 if sample.depth >= SampleDepth::MAX_DEPTH as f32 {
                     return sample;

@@ -126,6 +126,7 @@
         - suppose we've selected a node whose children we want to retire
         - we erase the child pointer
         - we have no way to guarantee that no one else is looking at one of the children
+    - i have ideas about how to put them back into the global pool (have each block store a bitset of free nodes), but right now they're put into a thread local pool for reuse before you request an allocation from the global pool.
 - coloring pt 1: definition of color of pixel
 - proved that the color hasn't changed (implies each nodes has a color_modified timestamp)
 - prove a line hasn't changed
