@@ -252,10 +252,10 @@ impl Tree {
     /// because other threads can still be looking at the children,
     /// and we need their child pointers later.
     #[cfg_attr(feature = "profiling", inline(never))]
-    fn retire_children_of_node(&self, sibling: NodeHandle) -> Option<NodeHandle4> {
-        let node = self.alloc.get(sibling);
-        let left_child = node.left_child.swap(None, Ordering::SeqCst)?;
-        Some(left_child)
+    fn retire_children_of_node(&self, node_handle: NodeHandle) -> Option<NodeHandle4> {
+        let node = self.alloc.get(node_handle);
+        let left_sibling = node.left_child.swap(None, Ordering::SeqCst)?;
+        Some(left_sibling)
     }
 
     /// deinits the fields for debugging.
@@ -272,6 +272,10 @@ impl Tree {
             node.color.store(None, Ordering::Relaxed);
             node.min_height.store(0, Ordering::Relaxed);
             node.max_height.store(0, Ordering::Relaxed);
+            debug_assert_ne!(
+                node.timestamp.load(Ordering::Relaxed),
+                RenderMoment::uninit()
+            );
             node.timestamp
                 .store(RenderMoment::uninit(), Ordering::Relaxed);
         }
@@ -286,18 +290,12 @@ impl Tree {
     /// must not call `reclaim` on the returned children within two (or maybe three) frames/moments/epochs.
     /// note that we don't guarantee that the returned nodes are leafs.
     #[cfg_attr(feature = "profiling", inline(never))]
-    pub(crate) fn retire(&self, window: Window, data: &mut ThreadData) -> Option<NodeHandle4> {
-        let Some(reclaim_scale) =
-            Real::try_from_f64(1.0 / RECLAIM_MAX_WIDTH.load(Ordering::SeqCst) as f64)
-        else {
-            log!("failed to compute reclaim scale");
-            return None;
-        };
-        let Some(reclaim_rad) = reclaim_scale.mul_checked(window.real_rad()) else {
-            log!("window is too big/small to reclaim anything");
-            return None;
-        };
-
+    pub(crate) fn retire(
+        &self,
+        window: Window,
+        now: RenderMoment,
+        data: &mut ThreadData,
+    ) -> Option<NodeHandle4> {
         fn depth_needed_for_rad(tree: &Tree, reclaim_rad: Real) -> u16 {
             let mut depth = 0;
             let mut rad = tree.dom.rad();
@@ -337,11 +335,6 @@ impl Tree {
         // if !can_retire_any(self, reclaim_rad) {
         //     return None;
         // }
-
-        // the depth needed for a node to be small enough.
-        // note that we're allowed to go deeper.
-        let required_depth = depth_needed_for_rad(self, reclaim_rad);
-        // let reclaim_rad = ();
 
         // /// returns the depth of the deepest leaf
         // /// st
@@ -394,31 +387,28 @@ impl Tree {
             None
         }
 
-        // let node_handle = select(self, target_rad, data)?;
-        let Some(node_handle) = select(self, required_depth, data) else {
-            // log!("failed to find a node to retire");
-            return None;
-        };
-        debug_assert!(
-            unsafe { self.alloc.get(node_handle).dom() }.rad() <= reclaim_rad,
-            "dom isn't small enough"
-        );
-        let Some(left) = self.retire_children_of_node(node_handle) else {
-            // log!("someone else retired the node we selected");
-            return None;
-        };
-        // log!("successfully retired a node");
-
-        // update the height of the node
-        {
-            let node = self.alloc.get(node_handle);
-            node.min_height.store(0, Ordering::SeqCst);
-            node.max_height.store(0, Ordering::SeqCst);
+        // // TODO: maybe also update render timestamps?
+        // // but it just makes the image look worse.
+        // // it's still good for debugging.
+        #[cfg_attr(feature = "profiling", inline(never))]
+        fn update_render_timestamp(tree: &Tree, mut node_handle: NodeHandle, now: RenderMoment) {
+            loop {
+                let node = tree.alloc.get(node_handle);
+                let old = node.timestamp.load(Ordering::SeqCst);
+                if old >= now {
+                    break;
+                }
+                let _ = node
+                    .timestamp
+                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |old| {
+                        if old >= now { None } else { Some(now) }
+                    });
+                let Some(parent_handle) = (unsafe { node.parent() }) else {
+                    break;
+                };
+                node_handle = parent_handle;
+            }
         }
-
-        // TODO: maybe also update render timestamps?
-        // but it just makes the image look worse.
-        // it's still good for debugging.
 
         // at this point, the node is a leaf (unless someone split it in this small window)
         // update heights
@@ -465,9 +455,54 @@ impl Tree {
                 node_handle = parent.left_sibling();
             }
         }
-        update_ancestors_height(self, node_handle.left_sibling());
 
-        Some(left)
+        let Some(reclaim_scale) =
+            Real::try_from_f64(1.0 / RECLAIM_MAX_WIDTH.load(Ordering::SeqCst) as f64)
+        else {
+            log!("failed to compute reclaim scale");
+            return None;
+        };
+        let Some(reclaim_rad) = reclaim_scale.mul_checked(window.real_rad()) else {
+            log!("window is too big/small to reclaim anything");
+            return None;
+        };
+
+        // the depth needed for a node to be small enough.
+        // note that we're allowed to go deeper.
+        let required_depth = depth_needed_for_rad(self, reclaim_rad);
+        // let reclaim_rad = ();
+
+        // let node_handle = select(self, target_rad, data)?;
+        let Some(node_handle) = select(self, required_depth, data) else {
+            // log!("failed to find a node to retire");
+            return None;
+        };
+        debug_assert!(
+            unsafe { self.alloc.get(node_handle).dom() }.rad() <= reclaim_rad,
+            "dom isn't small enough"
+        );
+        let Some(left_sibling) = self.retire_children_of_node(node_handle) else {
+            // log!("someone else retired the node we selected");
+            return None;
+        };
+        // log!("successfully retired a node");
+
+        let node = self.alloc.get(node_handle);
+
+        // update heights
+        {
+            node.min_height.store(0, Ordering::SeqCst);
+            node.max_height.store(0, Ordering::SeqCst);
+            update_ancestors_height(self, node_handle.left_sibling());
+        }
+
+        // update timestamps
+        {
+            // node.timestamp.store(now, Ordering::SeqCst);
+            update_render_timestamp(self, node_handle, now);
+        }
+
+        Some(left_sibling)
     }
 
     /// must be called on what you got from `retire` after a delay.
@@ -489,7 +524,7 @@ impl Tree {
     /// free `left`'s siblings,
     #[cfg_attr(feature = "profiling", inline(never))]
     pub(crate) fn reclaim(&self, left_sibling: NodeHandle4, data: &mut ThreadData) {
-        // see if immediately reclaiming the children is bad
+        // // see if immediately reclaiming the children is bad
         {
             let mut stack = Vec::new();
             stack.push(left_sibling);
@@ -502,7 +537,7 @@ impl Tree {
                 self.reclaim_node(left_sibling, data);
             }
         }
-        // self.reclaim_node(left, data);
+        // self.reclaim_node(left_sibling, data);
     }
 
     /// returns `None` if we shouldn't/can't refine.

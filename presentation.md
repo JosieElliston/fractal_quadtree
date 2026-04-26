@@ -162,8 +162,9 @@
             push the children's handles onto a bfs queue,
             and then do a use-after-free once it gets around to them.
     - upper bound proof
-        - first, the previous example doesn't disprove this,
-            even if the other thread sees and acks the new tick before exploring.
+        - first, the previous example doesn't disprove this.
+            - **DRAW**: move └─f─┘ to the next tick.
+            - we can't have that the touching subroutine lives long enough for the tick to happen, because the tick happening is dependent on the death of the the subroutine.
         <!-- - we want to prove that between retiring and reclaiming,
             all threads have ever not been inside a subroutine
             (because handles don't persist across subroutine calls). -->
@@ -182,10 +183,16 @@
                 - like we could try to select a node with height one, but we can't guarantee that it remains height one, that's like the whole problem
             - **DRAW**: ☐ > ☐☐☐☐ > ☐☐☐☐
             - obviously we shouldn't leak them.
-            - we can retire them, put them in the nursing home, and wait the grace period.
+            - we can just retire them, put them in the nursing home, and wait the grace period.
             - but do we actually need to wait or can we reclaim them now?
-            - it turns out that we can!
-          - can we reclaim them now?
+            - it turns out we can!
+                - the thing we're worried about is a double free
+                - any left_sibling in a free-list must have cleared its parent's child pointer.
+                - we have exclusive handles to the nodes we carry across ticks.
+                - 
+            <!-- - we need to wait, otherwise we may do a double free.
+                - let A be an ancestor of B.
+                -  -->
 
     - but do threads ever smuggle handles to nodes across ticks?
         - yes, but only for reclamation.

@@ -591,7 +591,7 @@ mod worker_thread {
                 }
             };
             // dbg!("retire");
-            let left = self.shared.tree.retire(window, &mut self.thread_data)?;
+            let left = self.shared.tree.retire(window, self.shared.render_now.load(Ordering::SeqCst), &mut self.thread_data)?;
             // dbg!("retired");
             self.nursing_home.push_back((self.local_reclaim_now, left));
             Some(())
@@ -599,12 +599,12 @@ mod worker_thread {
 
         #[cfg_attr(feature = "profiling", inline(never))]
         fn try_reclaim(&mut self) -> Option<()> {
-            // TODO: is this correct?
+            // + 3 instead of + 2 because the reclaim_moment is from the start of retire, rather than the end
             let (_, left_sibling) = self.nursing_home.pop_front_if(|(reclaim_moment, _)| {
                 *reclaim_moment <= self.local_reclaim_now + 3
             })?;
             // dbg!("reclaim");
-            // for left_child in self.shared.tree.retire_children(front) {
+            // for left_child in self.shared.tree.retire_siblings_children(left_sibling) {
             //     self.nursing_home
             //         .push_back((self.local_reclaim_now, left_child));
             // }

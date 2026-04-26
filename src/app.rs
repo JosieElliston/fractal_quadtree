@@ -796,8 +796,8 @@ impl App {
                     }
                     if r.changed() {
                         RECLAIM_MAX_WIDTH.store(reclaim_max_width, Ordering::Relaxed);
-                        // hack bc i don't update render timestamps when reclaiming
-                        self.needs_full_redraw = true;
+                        // // hack bc i don't update render timestamps when reclaiming
+                        // self.needs_full_redraw = true;
                     }
                 }
             });
