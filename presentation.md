@@ -42,16 +42,14 @@
 - coloring
     - main thread rendering
         - resize the texture if needed
-        - clears the finish_locks then begin_locks on the lines/pixels of the texture
+        - clears begin_count and finish_count
         - does other stuff
-        - waits for the finish_locks to get set by the workers
+        - blocks until finish_count matches the texture height
         - give the texture to egui
     - worker threads rendering
-        - try to acquire an unset begin_lock
-        - (if they're all set it means that there isn't anymore rendering to do for this frame, so we go do something else)
+        - check if begin_lock is less than height, do a fetch_and_add, check again that its less than height
         - render a line to the texture
-        - set the finish_lock
-        - TODO: these should really be counters with fetch and add
+        - increment the finish_count
     - **DRAW**
         - 1d ~quadtree, binary tree but nodes as their doms which are horizontal lines
         - vertical line representing the path of the pixel, with the closest center not being a leaf
@@ -180,7 +178,7 @@
         - we can't guarantee that the picture look like ☐ > ☐☐☐☐ (that's like the whole problem of non-blocking algorithms)
         - **DRAW**: ☐ > ☐☐☐☐ > ☐☐☐☐
 
-      - asdf
+        - asdf
             -
 
     - problem

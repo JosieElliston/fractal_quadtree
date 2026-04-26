@@ -495,7 +495,7 @@ mod worker_thread {
             // by just trying to lock each line's texture lock
             // TODO: do this better
             // TODO: these should really be counters with fetch and add
-            let texture_lock_begin = shared_texture.texture_lock_begin();
+            let texture_lock_begin = shared_texture.begin_count();
             if texture_lock_begin.load(Ordering::Relaxed) >= camera_map.pixels_height() {
                 return None;
             }
@@ -583,7 +583,7 @@ mod worker_thread {
             // debug_assert!(!shared_texture.texture_lock_finish()[row].load(Ordering::SeqCst));
             // shared_texture.texture_lock_finish()[row].store(true, Ordering::SeqCst);
             shared_texture
-                .texture_lock_finish()
+                .finish_count()
                 .fetch_add(1, Ordering::Release);
             return Some(());
             // }
@@ -890,10 +890,10 @@ mod shared_texture {
         // texture_lock_finish: Vec<AtomicBool>,
         /// these are incremented when a worker acquires a line to render.
         /// may be greater than the height.
-        texture_lock_begin: AtomicUsize,
+        begin_count: AtomicUsize,
         /// these are incremented when a worker finishes rendering a line.
         /// must not be greater than the height.
-        texture_lock_finish: AtomicUsize,
+        finish_count: AtomicUsize,
         /// should never call `lock`, only `try_lock`.
         /// TODO: with the texture locks, maybe this doesn't need a `Mutex`, just an `UnsafeCell`.
         /// TODO: inner `Vec` should be a `Box<[Color32]>`.
@@ -904,8 +904,8 @@ mod shared_texture {
             Self {
                 needs_full_redraw: false,
                 camera_map: None,
-                texture_lock_begin: AtomicUsize::new(0),
-                texture_lock_finish: AtomicUsize::new(0),
+                begin_count: AtomicUsize::new(0),
+                finish_count: AtomicUsize::new(0),
                 texture: Vec::new(),
             }
         }
@@ -940,11 +940,11 @@ mod shared_texture {
             &mut self.camera_map
         }
 
-        pub(super) fn texture_lock_begin(&self) -> &AtomicUsize {
-            &self.texture_lock_begin
+        pub(super) fn begin_count(&self) -> &AtomicUsize {
+            &self.begin_count
         }
-        pub(super) fn texture_lock_finish(&self) -> &AtomicUsize {
-            &self.texture_lock_finish
+        pub(super) fn finish_count(&self) -> &AtomicUsize {
+            &self.finish_count
         }
         pub(super) fn texture(&self) -> &Vec<Mutex<Vec<Color32>>> {
             &self.texture
@@ -969,8 +969,8 @@ mod shared_texture {
             //     .resize_with(height, || AtomicBool::new(true));
             // self.texture_lock_finish
             //     .resize_with(height, || AtomicBool::new(true));
-            self.texture_lock_begin.store(height, Ordering::SeqCst);
-            self.texture_lock_finish.store(height, Ordering::SeqCst);
+            self.begin_count.store(height, Ordering::SeqCst);
+            self.finish_count.store(height, Ordering::SeqCst);
             self.texture
                 .resize_with(height, || Mutex::new(vec![Color32::MAGENTA; width]));
         }
@@ -996,11 +996,11 @@ mod shared_texture {
             //     "texture_lock_finish not all true"
             // );
             debug_assert!(
-                self.texture_lock_begin.load(Ordering::SeqCst) >= self.texture.len(),
+                self.begin_count.load(Ordering::SeqCst) >= self.texture.len(),
                 "texture_lock_begin not all started"
             );
             debug_assert_eq!(
-                self.texture_lock_finish.load(Ordering::SeqCst),
+                self.finish_count.load(Ordering::SeqCst),
                 self.texture.len(),
                 "texture_lock_finish not all ended"
             );
@@ -1013,8 +1013,8 @@ mod shared_texture {
             // for lock in self.texture_lock_begin.iter() {
             //     lock.store(false, Ordering::SeqCst);
             // }
-            self.texture_lock_finish.store(0, Ordering::SeqCst);
-            self.texture_lock_begin.store(0, Ordering::SeqCst);
+            self.finish_count.store(0, Ordering::SeqCst);
+            self.begin_count.store(0, Ordering::SeqCst);
 
             self.camera_map = Some(camera_map.clone());
         }
@@ -1032,7 +1032,7 @@ mod shared_texture {
             // {
             //     std::thread::yield_now();
             // }
-            while self.texture_lock_finish.load(Ordering::SeqCst) < self.texture.len() {
+            while self.finish_count.load(Ordering::SeqCst) < self.texture.len() {
                 std::thread::yield_now();
             }
         }
@@ -1054,11 +1054,11 @@ mod shared_texture {
             //     "texture_lock_finish not all true"
             // );
             debug_assert!(
-                self.texture_lock_begin.load(Ordering::SeqCst) >= self.texture.len(),
+                self.begin_count.load(Ordering::SeqCst) >= self.texture.len(),
                 "texture_lock_begin not all started"
             );
             debug_assert_eq!(
-                self.texture_lock_finish.load(Ordering::SeqCst),
+                self.finish_count.load(Ordering::SeqCst),
                 self.texture.len(),
                 "texture_lock_finish not all ended"
             );
