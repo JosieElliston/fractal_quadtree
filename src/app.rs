@@ -1,7 +1,7 @@
 #[cfg(debug_assertions)]
 use std::hint;
 use std::{
-    sync::Arc,
+    sync::{Arc, atomic::Ordering},
     time::{Duration, Instant},
 };
 
@@ -12,6 +12,7 @@ use crate::{
     fractal::{self, Fractal},
     log,
     sample::{self, SampleDistanceGradient, SampleLog, SampleMaybeDistance},
+    tree::RECLAIM_MAX_WIDTH,
 };
 
 /// fancy dynamic radius based on zoom,
@@ -555,40 +556,31 @@ impl App {
             // global frame rate
             {
                 let average_dt = self.global_dts.average().expect("we added one this frame so dts must be non-empty");
-                ui.label(format!("global fps: {:.01}", 1.0 / average_dt))
-                    .on_hover_text("the global / app / ui frames per second");
+                ui.label(format!("global fps: {:.01}", 1.0 / average_dt)).on_hover_text("the global / app / ui frames per second");
                 // ui.label(format!("global spf: {:.05}", average_dt))
                 //     .on_hover_text("the global / app / ui seconds per frame");
             }
 
             // fractal frame rate
             if let Some(average_dt) = self.fractal_dts.average() {
-                ui.label(format!("fractal fps: {:.01}", 1.0 / average_dt))
-                    .on_hover_text("the fractal only frames per second");
+                ui.label(format!("fractal fps: {:.01}", 1.0 / average_dt)).on_hover_text("the fractal only frames per second");
                 // ui.label(format!("fractal spf: {:.05}", average_dt))
                 //     .on_hover_text("the fractal only seconds per frame");
             }
 
             // reclaim tick rate
             if let Some(average_dt) = self.reclaim_dts.average() {
-                ui.label(format!("reclaim tps: {:.01}", 1.0 / average_dt))
-                    .on_hover_text("the reclaim ticks per second");
+                ui.label(format!("reclaim tps: {:.01}", 1.0 / average_dt)).on_hover_text("the reclaim ticks per second");
             }
 
             // reclaim count
             {
-                ui.label(format!(
-                    "reclaims/sec: {:.01}",
-                    self.reclaim_counts.values().sum::<u64>() as f32 / self.reclaim_counts.len() as f32
-                ));
+                ui.label(format!("reclaims/sec: {:.01}", self.reclaim_counts.values().sum::<u64>() as f32 / self.reclaim_counts.len() as f32));
             }
 
             // sample count
             {
-                ui.label(format!(
-                    "samples/sec: {:.01}",
-                    self.sample_counts.values().sum::<u64>() as f32 / self.sample_counts.len() as f32
-                ));
+                ui.label(format!("samples/sec: {:.01}", self.sample_counts.values().sum::<u64>() as f32 / self.sample_counts.len() as f32));
             }
 
             // tree shape
@@ -598,25 +590,19 @@ impl App {
 
                 // node count
                 ui.label(format!("node count: {}", tree.node_count(&mut self.metabrot.thread_data)))
-                    .on_hover_text(
-                        "how many nodes are in the quadtree. note that this can be expensive to compute, try collapsing the header.",
-                    );
+                    .on_hover_text("how many nodes are in the quadtree. note that this can be expensive to compute, try collapsing the header.");
 
                 // min_height
-                ui.label(format!("min leaf depth: {}", tree.min_height()))
-                    .on_hover_text("the minimum depth of any leaf node.");
+                ui.label(format!("min leaf depth: {}", tree.min_height())).on_hover_text("the minimum depth of any leaf node.");
 
                 // max_height
-                ui.label(format!("max leaf depth: {}", tree.max_height()))
-                    .on_hover_text("the maximum depth of any leaf node.");
+                ui.label(format!("max leaf depth: {}", tree.max_height())).on_hover_text("the maximum depth of any leaf node.");
             });
 
-            egui::CollapsingHeader::new(
-                match self.current_fractal.other_if_control_other_camera(self.control_other_camera) {
-                    CurrentFractal::Metabrot => "metabrot camera",
-                    CurrentFractal::Mandelbrot => "mandelbrot camera",
-                },
-            )
+            egui::CollapsingHeader::new(match self.current_fractal.other_if_control_other_camera(self.control_other_camera) {
+                CurrentFractal::Metabrot => "metabrot camera",
+                CurrentFractal::Mandelbrot => "mandelbrot camera",
+            })
             .id_salt("camera")
             .show(ui, |ui| {
                 let camera = match self.current_fractal.other_if_control_other_camera(self.control_other_camera) {
@@ -669,10 +655,7 @@ impl App {
                 let add_contents = |ui: &mut egui::Ui| {
                     let timer = self.timers.values().reduce(|lhs, rhs| lhs + rhs).unwrap_or_default();
 
-                    ui.label(format!(
-                        "us per draw: {:.03}",
-                        timer.draw.div_count(timer.draw.count()).unwrap_or_default().as_nanos() as f64 / 1000.0
-                    ));
+                    ui.label(format!("us per draw: {:.03}", timer.draw.div_count(timer.draw.count()).unwrap_or_default().as_nanos() as f64 / 1000.0));
                     ui.label(format!(
                         "us per reclaim: {:.03}",
                         timer.reclaim.div_count(timer.reclaim.count()).unwrap_or_default().as_nanos() as f64 / 1000.0
@@ -689,10 +672,7 @@ impl App {
                         "us per split: {:.03}",
                         timer.split.div_count(timer.split.count()).unwrap_or_default().as_nanos() as f64 / 1000.0
                     ));
-                    ui.label(format!(
-                        "us per idle: {:.03}",
-                        timer.idle.div_count(timer.idle.count()).unwrap_or_default().as_nanos() as f64 / 1000.0
-                    ));
+                    ui.label(format!("us per idle: {:.03}", timer.idle.div_count(timer.idle.count()).unwrap_or_default().as_nanos() as f64 / 1000.0));
 
                     // do this so the separator's size is the size of the content,
                     // rather than the full width of the parent container.
@@ -801,6 +781,24 @@ impl App {
                 {
                     ui.checkbox(&mut self.reclaiming, "reclaiming")
                         .on_hover_text("whether to reclaim/free/deallocate nodes. keybinding: ".to_owned() + &ctx.format_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::NONE, egui::Key::R)));
+                }
+
+                // reclaim max width
+                {
+                    let mut reclaim_max_width = RECLAIM_MAX_WIDTH.load(Ordering::Relaxed) as f64;
+                    let r = ui
+                        .add(MyDragValue::new(egui::Label::new("reclaim max width:"), egui::DragValue::new(&mut reclaim_max_width)))
+                        .on_hover_text("nodes get reclaimed if they're smaller than window.rad / reclaim_max_width");
+                    let mut reclaim_max_width = reclaim_max_width.round() as usize;
+                    reclaim_max_width = reclaim_max_width.max(1);
+                    if r.dragged() {
+                        reclaim_max_width = reclaim_max_width.min(10000);
+                    }
+                    if r.changed() {
+                        RECLAIM_MAX_WIDTH.store(reclaim_max_width, Ordering::Relaxed);
+                        // hack bc i don't update render timestamps when reclaiming
+                        self.needs_full_redraw = true;
+                    }
                 }
             });
 

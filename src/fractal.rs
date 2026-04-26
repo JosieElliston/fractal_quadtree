@@ -503,16 +503,7 @@ mod worker_thread {
             if row >= camera_map.pixels_height() {
                 return None;
             }
-            // for (row, lock) in shared_texture.texture_lock_begin().iter().enumerate() {
-            //     if lock.load(Ordering::Relaxed) {
-            //         continue;
-            //     }
-            //     if lock
-            //         .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
-            //         .is_err()
-            //     {
-            //         continue;
-            //     }
+
             // TODO: we don't need this mutex, replace with `UnsafeCell`
             let mut l = shared_texture.texture()[row]
                 .try_lock()
@@ -580,15 +571,13 @@ mod worker_thread {
                     }
                 }
             }
-            // debug_assert!(!shared_texture.texture_lock_finish()[row].load(Ordering::SeqCst));
-            // shared_texture.texture_lock_finish()[row].store(true, Ordering::SeqCst);
+            debug_assert!(
+                shared_texture.finish_count().load(Ordering::SeqCst) < camera_map.pixels_height()
+            );
             shared_texture
                 .finish_count()
                 .fetch_add(1, Ordering::Release);
-            return Some(());
-            // }
-            // // all locks have been set
-            // None
+            Some(())
         }
 
         #[cfg_attr(feature = "profiling", inline(never))]
@@ -611,15 +600,17 @@ mod worker_thread {
         #[cfg_attr(feature = "profiling", inline(never))]
         fn try_reclaim(&mut self) -> Option<()> {
             // TODO: is this correct?
-            let (_, front) = self.nursing_home.pop_front_if(|(reclaim_moment, _)| {
+            let (_, left_sibling) = self.nursing_home.pop_front_if(|(reclaim_moment, _)| {
                 *reclaim_moment <= self.local_reclaim_now + 3
             })?;
             // dbg!("reclaim");
-            for left_child in self.shared.tree.retire_children(front) {
-                self.nursing_home
-                    .push_back((self.local_reclaim_now, left_child));
-            }
-            self.shared.tree.reclaim(front, &mut self.thread_data);
+            // for left_child in self.shared.tree.retire_children(front) {
+            //     self.nursing_home
+            //         .push_back((self.local_reclaim_now, left_child));
+            // }
+            self.shared
+                .tree
+                .reclaim(left_sibling, &mut self.thread_data);
             self.shared.reclaim_counter.fetch_add(1, Ordering::Relaxed);
             Some(())
         }

@@ -56,6 +56,7 @@
 - if a group of pixels are all inside a node, we can search them together?
 - to interpolate between samples, make a delaunay triangulation on the samples, go to the dual voronoi diagram, then do some interpolation on the vertices of each cell. you could also maybe make a voronoi diagram with the samples as the seeds and do a different interpolation. the delaunay triangulation could include constraints based on parents/children/siblings, if that makes it faster.
 - for coloring, for finding the node center closest to your sample: go down to the leaf you're in without checking distance, then go up with checking distance until the distance is provably too big. maybe if child_offset of child in parent and child_offset of parent in grandparent are anything except diagonal, we can cancel?
+- guarantee that a leaf will never be draw again (this frame) once the pixel containing its center has been drawn? (and so we can remove it from the bvh, and check if its parent has no children in the bvh, and remove it too)
 
 ## architecture
 

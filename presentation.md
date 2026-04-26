@@ -10,8 +10,8 @@
 
 ## speaker notes for datastructure
 
-- section on why do i have min_height and max_height
-- more DRAW commands
+- TODO: section on why do i have min_height and max_height
+- TODO: more DRAW commands
 
 - intro
     - show off program if it's easy.
@@ -85,7 +85,7 @@
     - **DRAW**
         - struct Alloc { head: Atomic<*Block> (: 1 word) }
         <!-- - struct Block { mem: [Node; 63], prev: Atomic<*Block>, len: usize  } -->
-        - struct Block { mem: [Node; 63], len: usize  } (don't draw prev)
+        - struct Block { mem: [Node; 63], len: usize } (don't draw prev)
         - draw these as boxes with members (as opposed to member list (which i might never use))
         - draw two `Block`s, draw `Alloc` underneath.
     - 64x64 byte blocks, of which one cache line is reserved for metadata.
@@ -138,22 +138,24 @@
     - epoch reclamation: how?
         - **DRAW**: nodes ☐ > ☐☐☐☐
         - note that we're reclaiming the children, not the node itself.
-        - erase the child pointer, push the children onto a queue with the timestamp.
-        - after a few ticks, reclaim the children.
+        - erase the child pointer, push the children/siblings onto a queue with the timestamp.
+        - after a few ticks, reclaim the siblings.
     - fn retire
         - select a node, which should be internal
-        - atomically swap in `None` for the child pointer
-        - if the old value was `None`, someone else got there first, whatever
-        - if it wasn't `None`, we are now responsible for reclaiming the children after some delay
-    - how long a delay? we need to wait two ticks from the end (or three ticks from the start).
-    - lower bound on how long to wait
+        - do an atomic get-and-set on the child pointer to clear it
+        - if the child pointer was `None`, someone else got there first, whatever
+        - if it wasn't `None`, we put the siblings into the thread-local nursing home.
+        - (we change to calling them siblings at this point)
+        - we are now responsible for reclaiming the siblings after some grace period.
+    - how long a grace period? we need to wait two ticks from the end (or three ticks from the start).
+    - lower bound on grace period
         - **DRAW**: timeline
-            - ~~         X |       |             X |                        ~~
+            - ~~         X |       |             X                          ~~
             - free:    └────────c─┘                 └─f─┘
             - touch:        └─r─────────────────────────x─┘
         - suppose i'm retiring, and it's very late in the tick.
         - i select a node, clear its child pointer, and exit.
-        - i find out the tick has happened, so i publish my ack and free the children.
+        - i find out the tick has happened, so i publish my ack and free the siblings.
         - but this allows for a use-after-free:
             there's nothing stopping a thread
             from having looked at the child pointer before i cleared it,
@@ -169,18 +171,31 @@
             - acking a tick proves to the main thread that you aren't in a subroutine.
             - seeing a tick proves to you that every thread has acked the previous tick.
         - what we we want?
-            - we need an entire tick to elapse during which no one can look through the child pointer.
+            - we need an entire tick to elapse during which no one can look through the child pointer (bc it's None).
         - the tick after exiting retire is the start of this period, and the next tick ends it.
+    - ok so we've waited the grace period, can we now reclaim the nodes?
+        - are we sure no one has handles to them?
+            - only reclamation stores handles across acks
+            - we get our handles from an atomic get-and-set, so we're confident that no one has pointers to the siblings
+        - but what about the siblings' children?
+            - my picture is misleading, we can't guarantee that the picture look like ☐ > ☐☐☐☐
+                - like we could try to select a node with height one, but we can't guarantee that it remains height one, that's like the whole problem
+            - **DRAW**: ☐ > ☐☐☐☐ > ☐☐☐☐
+            - obviously we shouldn't leak them.
+            - we can retire them, put them in the nursing home, and wait the grace period.
+            - but do we actually need to wait or can we reclaim them now?
+            - it turns out that we can!
+          - can we reclaim them now?
+
     - but do threads ever smuggle handles to nodes across ticks?
         - yes, but only for reclamation.
         - we don't ever do a double free because we take the child pointer atomically.
-    - but what about children of children?
+    - but what about the children of the siblings?
         - we can't guarantee that the picture look like ☐ > ☐☐☐☐ (that's like the whole problem of non-blocking algorithms)
         - **DRAW**: ☐ > ☐☐☐☐ > ☐☐☐☐
-
-        - asdf
-            -
-
+        - we recurse, atomically retiring each sibling and sending their children to the thread's nursing home
+        - TODO: why can't we free them?
+        - and now we can reclaim the siblings, and say that they're deinitialized and reading them is UB
     - problem
         - or rather, no one can find them via following child pointers
         - but you can find them via direct pointer.

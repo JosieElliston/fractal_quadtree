@@ -2,7 +2,7 @@ use std::{
     cell::UnsafeCell,
     num::NonZeroU32,
     ptr::NonNull,
-    sync::atomic::{AtomicU16, AtomicU32, Ordering},
+    sync::atomic::{AtomicU16, AtomicU32, AtomicUsize, Ordering},
 };
 
 use atomic::Atomic;
@@ -23,6 +23,10 @@ use crate::{
 // pub(crate) static PRUNED_COUNTER: AtomicU64 = AtomicU64::new(0);
 // pub(crate) static UNPRUNED_ELAPSED: AtomicU64 = AtomicU64::new(0);
 // pub(crate) static UNPRUNED_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// hack to make this easy to add to the UI.
+/// the min size of a node to reclaim is `window.real_rad() / RECLAIM_MAX_WIDTH`.
+pub(crate) static RECLAIM_MAX_WIDTH: AtomicUsize = AtomicUsize::new(100);
 
 #[repr(C, align(64))]
 #[derive(Debug)]
@@ -248,8 +252,8 @@ impl Tree {
     /// because other threads can still be looking at the children,
     /// and we need their child pointers later.
     #[cfg_attr(feature = "profiling", inline(never))]
-    fn retire_node(&self, node_handle: NodeHandle) -> Option<NodeHandle4> {
-        let node = self.alloc.get(node_handle);
+    fn retire_children_of_node(&self, sibling: NodeHandle) -> Option<NodeHandle4> {
+        let node = self.alloc.get(sibling);
         let left_child = node.left_child.swap(None, Ordering::SeqCst)?;
         Some(left_child)
     }
@@ -257,8 +261,8 @@ impl Tree {
     /// deinits the fields for debugging.
     /// any read of any sibling after this is UB.
     #[cfg_attr(feature = "profiling", inline(never))]
-    fn reclaim_node(&self, left: NodeHandle4, data: &mut ThreadData) {
-        for node_handle in left.siblings() {
+    fn reclaim_node(&self, left_sibling: NodeHandle4, data: &mut ThreadData) {
+        for node_handle in left_sibling.siblings() {
             let node = self.alloc.get(node_handle);
             unsafe {
                 node.write_dom(Domain::uninit());
@@ -271,11 +275,11 @@ impl Tree {
             node.timestamp
                 .store(RenderMoment::uninit(), Ordering::Relaxed);
         }
-        data.free_list.push(left);
+        data.free_list.push(left_sibling);
     }
 
     // const RECLAIM_SCALE: Real = Real::try_from_f64(1.0 / 1000.0).unwrap();
-    const RECLAIM_SCALE: Real = Real::try_from_f64(1.0 / 100.0).unwrap();
+    // const RECLAIM_SCALE: Real = Real::try_from_f64(1.0 / 100.0).unwrap();
 
     /// selects a node to retire, and retires its children.
     /// returns `None` if we shouldn't/can't retire.
@@ -283,7 +287,13 @@ impl Tree {
     /// note that we don't guarantee that the returned nodes are leafs.
     #[cfg_attr(feature = "profiling", inline(never))]
     pub(crate) fn retire(&self, window: Window, data: &mut ThreadData) -> Option<NodeHandle4> {
-        let Some(reclaim_rad) = Self::RECLAIM_SCALE.mul_checked(window.real_rad()) else {
+        let Some(reclaim_scale) =
+            Real::try_from_f64(1.0 / RECLAIM_MAX_WIDTH.load(Ordering::SeqCst) as f64)
+        else {
+            log!("failed to compute reclaim scale");
+            return None;
+        };
+        let Some(reclaim_rad) = reclaim_scale.mul_checked(window.real_rad()) else {
             log!("window is too big/small to reclaim anything");
             return None;
         };
@@ -393,7 +403,7 @@ impl Tree {
             unsafe { self.alloc.get(node_handle).dom() }.rad() <= reclaim_rad,
             "dom isn't small enough"
         );
-        let Some(left) = self.retire_node(node_handle) else {
+        let Some(left) = self.retire_children_of_node(node_handle) else {
             // log!("someone else retired the node we selected");
             return None;
         };
@@ -464,18 +474,35 @@ impl Tree {
     /// retires `left`'s siblings' children.
     /// these children should be reclaimed after the delay.
     #[cfg_attr(feature = "profiling", inline(never))]
-    pub(crate) fn retire_children(&self, left: NodeHandle4) -> impl Iterator<Item = NodeHandle4> {
-        left.siblings()
+    pub(crate) fn retire_siblings_children(
+        &self,
+        left_sibling: NodeHandle4,
+    ) -> impl Iterator<Item = NodeHandle4> {
+        left_sibling
+            .siblings()
             .into_iter()
-            .filter_map(|node_handle| self.retire_node(node_handle))
+            .filter_map(|node_handle| self.retire_children_of_node(node_handle))
     }
 
     /// should be called soon after `retire_children`.
     /// but must be called after you've consumed the iterator `retire_children` returned.
     /// free `left`'s siblings,
     #[cfg_attr(feature = "profiling", inline(never))]
-    pub(crate) fn reclaim(&self, left: NodeHandle4, data: &mut ThreadData) {
-        self.reclaim_node(left, data);
+    pub(crate) fn reclaim(&self, left_sibling: NodeHandle4, data: &mut ThreadData) {
+        // see if immediately reclaiming the children is bad
+        {
+            let mut stack = Vec::new();
+            stack.push(left_sibling);
+            while let Some(left_sibling) = stack.pop() {
+                for sibling in left_sibling.siblings() {
+                    if let Some(left_child) = self.retire_children_of_node(sibling) {
+                        stack.push(left_child);
+                    }
+                }
+                self.reclaim_node(left_sibling, data);
+            }
+        }
+        // self.reclaim_node(left, data);
     }
 
     /// returns `None` if we shouldn't/can't refine.
@@ -771,8 +798,15 @@ impl Tree {
         }
 
         // used for filtering out leafs that would be immediately reclaimed.
-        let reclaim_rad =
-            reclaim_window.and_then(|w| Self::RECLAIM_SCALE.mul_checked(w.real_rad()));
+        let reclaim_rad = reclaim_window.and_then(|w| {
+            let Some(reclaim_scale) =
+                Real::try_from_f64(1.0 / RECLAIM_MAX_WIDTH.load(Ordering::SeqCst) as f64)
+            else {
+                log!("failed to compute reclaim scale");
+                return None;
+            };
+            reclaim_scale.mul_checked(w.real_rad())
+        });
 
         let shallowest_depth = depth_of_shallowest_leaf(self, sample_window, reclaim_rad, data)?;
         // TODO: sometimes we get into a state where refine never succeeds.
