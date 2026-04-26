@@ -3,16 +3,9 @@
 ## unorganized
 
 - organize `TODO.md`
-- search for concurrent/parallel dynamic array/resizable ... instead of arena/linear/bump/heap allocator
-- my epoch idea doesn't work bc we might be writing to the old array. actually we can only write after we've called a method on arena so maybe it's workable
-- make arena align(16), ie cache_size / 4, bc there's four leaves?
-- try to use SOA for cache reasons and partial mut borrowing
-- can we have non exclusive mut NodeHandles you can specialize into at most one mut ColorHandle and (not or) multiple ColorHandles?
-- so to free stuff, a thread collects all the mut handles. or we can permit multiple mut handles at once, just that the freeing thread needs to prevent issuing new mut handles.
+- make blocks align(cache_size * 4) bc there's four leaves?
 - do raii for the handles?
 - texture barrier should just be counters
-- debugging: try starting with a large capacity to separate whether it's realloc that's deadlocking
-- on successful get in cur, debug_assert that old flag ... is false
 - during realloc, if we halt reads until the end, can we get reads to only ever look in cur
 - when improving leaf_distance_cache, use try_promote not promote
 - maybe have the api never give out mutable handles and make everything be atomic?
@@ -30,7 +23,6 @@
 - bug report on `compare_exchange` returning `current` not `new`
 - pausing sampling is broken, also when the fractal is outside the window
 - why does lagging the main thread make sampling so much faster?
-- `left: NodeHandle4` type for groups.
 
 ## optimization
 
@@ -55,7 +47,7 @@
 - note that we're refining 256/4 times with the same window, maybe we can use that
 - refine in parallel
 
-## pruning
+## reclaiming
 
 - prune tree by double window sizes and doubling allowed domain radius
 
@@ -63,6 +55,7 @@
 
 - if a group of pixels are all inside a node, we can search them together?
 - to interpolate between samples, make a delaunay triangulation on the samples, go to the dual voronoi diagram, then do some interpolation on the vertices of each cell. you could also maybe make a voronoi diagram with the samples as the seeds and do a different interpolation. the delaunay triangulation could include constraints based on parents/children/siblings, if that makes it faster.
+- for coloring, for finding the node center closest to your sample: go down to the leaf you're in without checking distance, then go up with checking distance until the distance is provably too big. maybe if child_offset of child in parent and child_offset of parent in grandparent are anything except diagonal, we can cancel?
 
 ## architecture
 

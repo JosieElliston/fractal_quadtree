@@ -27,6 +27,18 @@ enum CurrentFractal {
     Metabrot,
     Mandelbrot,
 }
+impl CurrentFractal {
+    fn other_if_control_other_camera(&self, control_other_camera: bool) -> Self {
+        if control_other_camera {
+            match self {
+                CurrentFractal::Metabrot => CurrentFractal::Mandelbrot,
+                CurrentFractal::Mandelbrot => CurrentFractal::Metabrot,
+            }
+        } else {
+            self.clone()
+        }
+    }
+}
 
 // TODO: separate this into smaller structs
 // ui, fractal, metabrot, mandelbrot
@@ -120,7 +132,7 @@ impl App {
 
     /// this can't be in `show_ui` bc it needs to run even when the stats/settings panels are collapsed
     fn keybinds(&mut self, ctx: &egui::Context) {
-        self.sampling ^= ctx.input(|i| i.key_pressed(Key::X));
+        self.sampling ^= ctx.input(|i| i.key_pressed(Key::S));
         self.reclaiming ^= ctx.input(|i| i.key_pressed(Key::R));
         if ctx.input(|i| i.key_pressed(Key::N)) {
             self.current_fractal = CurrentFractal::Metabrot;
@@ -539,390 +551,278 @@ impl App {
     fn show_ui(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
         ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
 
-        egui::CollapsingHeader::new("stats")
-            .default_open(true)
-            .show(ui, |ui| {
-                // global frame rate
-                {
-                    let average_dt = self
-                        .global_dts
-                        .average()
-                        .expect("we added one this frame so dts must be non-empty");
-                    ui.label(format!("global fps: {:.01}", 1.0 / average_dt))
-                        .on_hover_text("the global / app / ui frames per second");
-                    // ui.label(format!("global spf: {:.05}", average_dt))
-                    //     .on_hover_text("the global / app / ui seconds per frame");
-                }
+        egui::CollapsingHeader::new("stats").default_open(true).show(ui, |ui| {
+            // global frame rate
+            {
+                let average_dt = self.global_dts.average().expect("we added one this frame so dts must be non-empty");
+                ui.label(format!("global fps: {:.01}", 1.0 / average_dt))
+                    .on_hover_text("the global / app / ui frames per second");
+                // ui.label(format!("global spf: {:.05}", average_dt))
+                //     .on_hover_text("the global / app / ui seconds per frame");
+            }
 
-                // fractal frame rate
-                if let Some(average_dt) = self.fractal_dts.average() {
-                    ui.label(format!("fractal fps: {:.01}", 1.0 / average_dt))
-                        .on_hover_text("the fractal only frames per second");
-                    // ui.label(format!("fractal spf: {:.05}", average_dt))
-                    //     .on_hover_text("the fractal only seconds per frame");
-                }
+            // fractal frame rate
+            if let Some(average_dt) = self.fractal_dts.average() {
+                ui.label(format!("fractal fps: {:.01}", 1.0 / average_dt))
+                    .on_hover_text("the fractal only frames per second");
+                // ui.label(format!("fractal spf: {:.05}", average_dt))
+                //     .on_hover_text("the fractal only seconds per frame");
+            }
 
-                // reclaim tick rate
-                if let Some(average_dt) = self.reclaim_dts.average() {
-                    ui.label(format!("reclaim tps: {:.01}", 1.0 / average_dt))
-                        .on_hover_text("the reclaim ticks per second");
-                }
+            // reclaim tick rate
+            if let Some(average_dt) = self.reclaim_dts.average() {
+                ui.label(format!("reclaim tps: {:.01}", 1.0 / average_dt))
+                    .on_hover_text("the reclaim ticks per second");
+            }
 
-                // reclaim count
-                {
-                    ui.label(format!(
-                        "reclaims/sec: {:.01}",
-                        self.reclaim_counts.values().sum::<u64>() as f32
-                            / self.reclaim_counts.len() as f32
-                    ));
-                }
+            // reclaim count
+            {
+                ui.label(format!(
+                    "reclaims/sec: {:.01}",
+                    self.reclaim_counts.values().sum::<u64>() as f32 / self.reclaim_counts.len() as f32
+                ));
+            }
 
-                // sample count
-                {
-                    ui.label(format!(
-                        "samples/sec: {:.01}",
-                        self.sample_counts.values().sum::<u64>() as f32
-                            / self.sample_counts.len() as f32
-                    ));
-                }
+            // sample count
+            {
+                ui.label(format!(
+                    "samples/sec: {:.01}",
+                    self.sample_counts.values().sum::<u64>() as f32 / self.sample_counts.len() as f32
+                ));
+            }
+
+            // tree shape
+            egui::CollapsingHeader::new("tree shape").show(ui, |ui| {
+                // wacky stuff to get around the borrow checker
+                let tree = Arc::clone(self.metabrot.tree());
 
                 // node count
-                // `CollapsingHeader` bc computing `node_count` is expensive
-                egui::CollapsingHeader::new("node count").show(ui, |ui| {
-                    // wacky stuff to get around the borrow checker
-                    let tree = Arc::clone(self.metabrot.tree());
-                    ui.label(format!(
-                        "node count: {}",
-                        tree.node_count(&mut self.metabrot.thread_data)
-                    ));
-                });
+                ui.label(format!("node count: {}", tree.node_count(&mut self.metabrot.thread_data)))
+                    .on_hover_text(
+                        "how many nodes are in the quadtree. note that this can be expensive to compute, try collapsing the header.",
+                    );
 
-                // sizing pass example by hactar
-                // TODO: do this (i forgot .invisible() when i tried it earlier)
-                // fn show_centered_with_sizing_pass<R>(
-                //     ui: &mut egui::Ui,
-                //     horizontal: bool,
-                //     vertical: bool,
-                //     mut f: impl FnMut(&mut egui::Ui) -> R,
-                // ) -> egui::InnerResponse<R> {
-                //     let total_rect = ui.max_rect();
-                //     let mut r = ui.scope_builder(
-                //         egui::UiBuilder::new()
-                //             .layout(egui::Layout::top_down(egui::Align::LEFT))
-                //             .sizing_pass()
-                //             .invisible(),
-                //         &mut f,
-                //     );
-                //     let size = r.response.rect.size();
-                //     if !ui.is_sizing_pass() {
-                //         let mut desired_rect =
-                //             egui::Rect::from_center_size(total_rect.center(), size);
-                //         let go_back = total_rect.min - desired_rect.min;
-                //         if !horizontal {
-                //             desired_rect = desired_rect.translate(egui::vec2(go_back.x, 0.0));
-                //         }
-                //         if !vertical {
-                //             desired_rect = desired_rect.translate(egui::vec2(0.0, go_back.y));
-                //         }
-                //         r = ui.scope_builder(
-                //             egui::UiBuilder::new()
-                //                 .layout(egui::Layout::top_down(egui::Align::Center))
-                //                 .max_rect(desired_rect),
-                //             f,
-                //         );
-                //     }
-                //     r
-                // }
+                // min_height
+                ui.label(format!("min leaf depth: {}", tree.min_height()))
+                    .on_hover_text("the minimum depth of any leaf node.");
 
-                egui::CollapsingHeader::new("camera").show(ui, |ui| {
-                    let add_contents = |ui: &mut egui::Ui| {
-                        ui.label(format!(
-                            "metabrot real mid: {:12.09}",
-                            self.primary_camera.real_mid()
-                        ));
-                        ui.label(format!(
-                            "metabrot imag mid: {:12.09}",
-                            self.primary_camera.imag_mid()
-                        ));
-                        ui.label(format!(
-                            "metabrot real rad: {:12.09}",
-                            self.primary_camera.real_rad()
-                        ));
-
-                        // do this so the separator's size is the size of the content,
-                        // rather than the full width of the parent container.
-                        // TODO: the separator only gets sized to the content above it.
-                        ui.shrink_width_to_current();
-                        ui.separator();
-
-                        ui.label(format!(
-                            "mandelbrot real mid: {:12.09}",
-                            self.secondary_camera.real_mid()
-                        ));
-                        ui.label(format!(
-                            "mandelbrot imag mid: {:12.09}",
-                            self.secondary_camera.imag_mid()
-                        ));
-                        ui.label(format!(
-                            "mandelbrot real rad: {:12.09}",
-                            self.secondary_camera.real_rad()
-                        ));
-                    };
-                    add_contents(ui);
-
-                    // egui::Area::new("camera").
-                    // egui::Frame::
-                    // egui::UiBuilder::new()
-                    // ui.set_sizing_pass();
-                    // ui.allocate_exact_size(, egui::Sense::empty());
-                    // ui.scope_builder(egui::UiBuilder::, add_contents)
-                    // ui.scope(|ui| {});
-                    // ui.shrink_width_to_current();
-
-                    // ui.scope_builder(egui::UiBuilder::new(), |ui| {
-                    //     add_contents(ui);
-                    // });
-                    // egui::Area::new(egui::Id::new("camera")).show(ctx, |ui| {
-                    //     ui.scope_builder(egui::UiBuilder::new(), |ui| {
-                    //         add_contents(ui);
-                    //     });
-                    // });
-                    // let r = ui
-                    //     .scope_builder(egui::UiBuilder::new().sizing_pass(), |ui| {
-                    //         add_contents(ui);
-                    //     })
-                    //     .response;
-                    // ui.scope_builder(egui::UiBuilder::new(), |ui| {
-                    //     ui.set_max_size(r.rect.size());
-                    //     add_contents(ui);
-                    // });
-                });
-                // ui.shrink_width_to_current();
-
-                egui::CollapsingHeader::new("timers")
-                    .default_open(true)
-                    .show(ui, |ui| {
-                        let add_contents = |ui: &mut egui::Ui| {
-                            let timer = self
-                                .timers
-                                .values()
-                                .reduce(|lhs, rhs| lhs + rhs)
-                                .unwrap_or_default();
-
-                            ui.label(format!(
-                                "us per draw: {:.03}",
-                                timer
-                                    .draw
-                                    .div_count(timer.draw.count())
-                                    .unwrap_or_default()
-                                    .as_nanos() as f64
-                                    / 1000.0
-                            ));
-                            ui.label(format!(
-                                "us per reclaim: {:.03}",
-                                timer
-                                    .reclaim
-                                    .div_count(timer.reclaim.count())
-                                    .unwrap_or_default()
-                                    .as_nanos() as f64
-                                    / 1000.0
-                            ));
-                            ui.label(format!(
-                                "us per retire: {:.03}",
-                                timer
-                                    .retire
-                                    .div_count(timer.retire.count())
-                                    .unwrap_or_default()
-                                    .as_nanos() as f64
-                                    / 1000.0
-                            ));
-                            ui.label(format!(
-                                "us per sample: {:.03}",
-                                timer
-                                    .sample
-                                    .div_count(timer.sample.count())
-                                    .unwrap_or_default()
-                                    .as_nanos() as f64
-                                    / 1000.0
-                            ));
-                            ui.label(format!(
-                                "us per split: {:.03}",
-                                timer
-                                    .split
-                                    .div_count(timer.split.count())
-                                    .unwrap_or_default()
-                                    .as_nanos() as f64
-                                    / 1000.0
-                            ));
-                            ui.label(format!(
-                                "us per idle: {:.03}",
-                                timer
-                                    .idle
-                                    .div_count(timer.idle.count())
-                                    .unwrap_or_default()
-                                    .as_nanos() as f64
-                                    / 1000.0
-                            ));
-
-                            // do this so the separator's size is the size of the content,
-                            // rather than the full width of the parent container.
-                            // TODO: the separator only gets sized to the content above it.
-                            ui.shrink_width_to_current();
-                            ui.separator();
-                            // TODO: flamegraph
-                            let total_elapsed = timer.total().elapsed();
-
-                            ui.label(format!(
-                                "draw portion: {:.03}",
-                                timer.draw.div_elapsed(total_elapsed)
-                            ));
-                            ui.label(format!(
-                                "reclaim portion: {:.03}",
-                                timer.reclaim.div_elapsed(total_elapsed)
-                            ));
-                            ui.label(format!(
-                                "retire portion: {:.03}",
-                                timer.retire.div_elapsed(total_elapsed)
-                            ));
-                            ui.label(format!(
-                                "sample portion: {:.03}",
-                                timer.sample.div_elapsed(total_elapsed)
-                            ));
-                            ui.label(format!(
-                                "split portion: {:.03}",
-                                timer.split.div_elapsed(total_elapsed)
-                            ));
-                            ui.label(format!(
-                                "idle portion: {:.03}",
-                                timer.idle.div_elapsed(total_elapsed)
-                            ));
-                        };
-                        add_contents(ui);
-                        // // we don't want to inherit the min rect from our parent
-                        // // it should be even smaller
-                        // ui.scope_builder(egui::UiBuilder::new(), |ui| {
-                        //     add_contents(ui);
-                        // });
-                    });
-                // ui.shrink_width_to_current();
+                // max_height
+                ui.label(format!("max leaf depth: {}", tree.max_height()))
+                    .on_hover_text("the maximum depth of any leaf node.");
             });
+
+            egui::CollapsingHeader::new(
+                match self.current_fractal.other_if_control_other_camera(self.control_other_camera) {
+                    CurrentFractal::Metabrot => "metabrot camera",
+                    CurrentFractal::Mandelbrot => "mandelbrot camera",
+                },
+            )
+            .id_salt("camera")
+            .show(ui, |ui| {
+                let camera = match self.current_fractal.other_if_control_other_camera(self.control_other_camera) {
+                    CurrentFractal::Metabrot => &self.primary_camera,
+                    CurrentFractal::Mandelbrot => &self.secondary_camera,
+                };
+                ui.label(format!("real mid: {:12.09}", camera.real_mid()));
+                ui.label(format!("imag mid: {:12.09}", camera.imag_mid()));
+                ui.label(format!("real rad: {:12.09}", camera.real_rad()));
+            });
+
+            // sizing pass example by hactar
+            // TODO: do this (i forgot .invisible() when i tried it earlier)
+            // fn show_centered_with_sizing_pass<R>(
+            //     ui: &mut egui::Ui,
+            //     horizontal: bool,
+            //     vertical: bool,
+            //     mut f: impl FnMut(&mut egui::Ui) -> R,
+            // ) -> egui::InnerResponse<R> {
+            //     let total_rect = ui.max_rect();
+            //     let mut r = ui.scope_builder(
+            //         egui::UiBuilder::new()
+            //             .layout(egui::Layout::top_down(egui::Align::LEFT))
+            //             .sizing_pass()
+            //             .invisible(),
+            //         &mut f,
+            //     );
+            //     let size = r.response.rect.size();
+            //     if !ui.is_sizing_pass() {
+            //         let mut desired_rect =
+            //             egui::Rect::from_center_size(total_rect.center(), size);
+            //         let go_back = total_rect.min - desired_rect.min;
+            //         if !horizontal {
+            //             desired_rect = desired_rect.translate(egui::vec2(go_back.x, 0.0));
+            //         }
+            //         if !vertical {
+            //             desired_rect = desired_rect.translate(egui::vec2(0.0, go_back.y));
+            //         }
+            //         r = ui.scope_builder(
+            //             egui::UiBuilder::new()
+            //                 .layout(egui::Layout::top_down(egui::Align::Center))
+            //                 .max_rect(desired_rect),
+            //             f,
+            //         );
+            //     }
+            //     r
+            // }
+
+            egui::CollapsingHeader::new("timers").default_open(true).show(ui, |ui| {
+                let add_contents = |ui: &mut egui::Ui| {
+                    let timer = self.timers.values().reduce(|lhs, rhs| lhs + rhs).unwrap_or_default();
+
+                    ui.label(format!(
+                        "us per draw: {:.03}",
+                        timer.draw.div_count(timer.draw.count()).unwrap_or_default().as_nanos() as f64 / 1000.0
+                    ));
+                    ui.label(format!(
+                        "us per reclaim: {:.03}",
+                        timer.reclaim.div_count(timer.reclaim.count()).unwrap_or_default().as_nanos() as f64 / 1000.0
+                    ));
+                    ui.label(format!(
+                        "us per retire: {:.03}",
+                        timer.retire.div_count(timer.retire.count()).unwrap_or_default().as_nanos() as f64 / 1000.0
+                    ));
+                    ui.label(format!(
+                        "us per sample: {:.03}",
+                        timer.sample.div_count(timer.sample.count()).unwrap_or_default().as_nanos() as f64 / 1000.0
+                    ));
+                    ui.label(format!(
+                        "us per split: {:.03}",
+                        timer.split.div_count(timer.split.count()).unwrap_or_default().as_nanos() as f64 / 1000.0
+                    ));
+                    ui.label(format!(
+                        "us per idle: {:.03}",
+                        timer.idle.div_count(timer.idle.count()).unwrap_or_default().as_nanos() as f64 / 1000.0
+                    ));
+
+                    // do this so the separator's size is the size of the content,
+                    // rather than the full width of the parent container.
+                    // TODO: the separator only gets sized to the content above it.
+                    ui.shrink_width_to_current();
+                    ui.separator();
+                    // TODO: flamegraph
+                    let total_elapsed = timer.total().elapsed();
+
+                    ui.label(format!("draw portion: {:.03}", timer.draw.div_elapsed(total_elapsed)));
+                    ui.label(format!("reclaim portion: {:.03}", timer.reclaim.div_elapsed(total_elapsed)));
+                    ui.label(format!("retire portion: {:.03}", timer.retire.div_elapsed(total_elapsed)));
+                    ui.label(format!("sample portion: {:.03}", timer.sample.div_elapsed(total_elapsed)));
+                    ui.label(format!("split portion: {:.03}", timer.split.div_elapsed(total_elapsed)));
+                    ui.label(format!("idle portion: {:.03}", timer.idle.div_elapsed(total_elapsed)));
+                };
+                add_contents(ui);
+                // // we don't want to inherit the min rect from our parent
+                // // it should be even smaller
+                // ui.scope_builder(egui::UiBuilder::new(), |ui| {
+                //     add_contents(ui);
+                // });
+            });
+            // ui.shrink_width_to_current();
+        });
 
         egui::CollapsingHeader::new("settings").default_open(true).show(ui, |ui| {
-            // max fps
-            {
-                let mut target_fps = 1.0 / self.fractal_target_spf.as_secs_f64();
-                let r = ui
-                    .add(MyDragValue::new(egui::Label::new("max fps:"), egui::DragValue::new(&mut target_fps)))
-                    .on_hover_text(
-                        "the max fps at which we render the fractal. the ui is always rendered at max speed. this is overwritten when eg panning.",
-                    );
-                target_fps = target_fps.max(1.0);
-                if r.dragged() {
-                    target_fps = target_fps.min(240.0);
-                }
-                if r.changed() {
-                    self.fractal_target_spf = Duration::from_secs_f64(1.0 / target_fps);
-                }
-            }
+            egui::CollapsingHeader::new("both").default_open(true).show(ui, |ui| {
+                // current fractal
+                ui.horizontal(|ui| {
+                    if ui
+                        .add(egui::Button::new("metabrot").selected(self.current_fractal == CurrentFractal::Metabrot))
+                        .on_hover_text(
+                            "whether to render the metabrot (rather than the mandelbrot). this also triggers a full redraw. keybinding: ".to_owned()
+                                + &ctx.format_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::NONE, Key::N)),
+                        )
+                        .clicked()
+                    {
+                        self.current_fractal = CurrentFractal::Metabrot;
+                        self.needs_full_redraw = true;
+                    }
 
-            // metabrot stride
-            {
-                let mut stride = self.primary_camera_stride as f64;
-                let r = ui
-                    .add(MyDragValue::new(
-                        egui::Label::new("metabrot pixel size:"),
-                        egui::DragValue::new(&mut stride),
-                    ))
-                    .on_hover_text("how many pixels are in a pixel for the metabrot.");
-                let mut stride = stride.round() as usize;
-                stride = stride.max(1);
-                if r.dragged() {
-                    stride = stride.min(64);
-                }
-                if r.changed() {
-                    self.primary_camera_stride = stride;
-                    self.needs_full_redraw = true;
-                }
-            }
+                    if ui
+                        .add(egui::Button::new("mandelbrot").selected(self.current_fractal == CurrentFractal::Mandelbrot))
+                        .on_hover_text(
+                            "whether to render the mandelbrot (rather than the metabrot). keybinding: ".to_owned() + &ctx.format_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::NONE, Key::M)),
+                        )
+                        .clicked()
+                    {
+                        self.current_fractal = CurrentFractal::Mandelbrot;
+                    };
+                });
 
-            // mandelbrot stride
-            {
-                let mut stride = self.secondary_camera_stride as f64;
-                let r = ui
-                    .add(MyDragValue::new(
-                        egui::Label::new("mandelbrot pixel size:"),
-                        egui::DragValue::new(&mut stride),
-                    ))
-                    .on_hover_text("how many pixels are in a pixel for the mandelbrot.");
-                let mut stride = stride.round() as usize;
-                stride = stride.max(1);
-                if r.dragged() {
-                    stride = stride.min(64);
-                }
-                if r.changed() {
-                    self.secondary_camera_stride = stride;
-                    self.needs_full_redraw = true;
-                }
-            }
-
-            // sampling
-            {
-                ui.checkbox(&mut self.sampling, "sampling").on_hover_text(
-                    "whether to get new samples of the metabrot. keybinding: ".to_owned()
-                        + &ctx.format_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::NONE, egui::Key::X)),
-                );
-            }
-
-            // reclaiming
-            {
-                ui.checkbox(&mut self.reclaiming, "reclaiming").on_hover_text(
-                    "whether to reclaim/free/deallocate nodes. keybinding: ".to_owned()
-                        + &ctx.format_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::NONE, egui::Key::R)),
-                );
-            }
-
-            // crosshair
-            {
-                ui.checkbox(&mut self.draw_crosshair, "draw crosshair")
-                    .on_hover_text("draw a dot at the screen center.");
-            }
-
-            // current fractal
-            ui.horizontal(|ui| {
-                if ui
-                    .add(egui::Button::new("metabrot").selected(self.current_fractal == CurrentFractal::Metabrot))
-                    .on_hover_text(
-                        "whether to render the metabrot (rather than the mandelbrot). this also triggers a full redraw. keybinding: ".to_owned()
-                            + &ctx.format_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::NONE, Key::N)),
-                    )
-                    .clicked()
+                // max fps
                 {
-                    self.current_fractal = CurrentFractal::Metabrot;
-                    self.needs_full_redraw = true;
+                    let mut target_fps = 1.0 / self.fractal_target_spf.as_secs_f64();
+                    let r = ui
+                        .add(MyDragValue::new(egui::Label::new("max fps:"), egui::DragValue::new(&mut target_fps)))
+                        .on_hover_text("the max fps at which we render the fractal. the ui is always rendered at max speed. this is overwritten when panning or zooming.");
+                    target_fps = target_fps.max(1.0);
+                    if r.dragged() {
+                        target_fps = target_fps.min(240.0);
+                    }
+                    if r.changed() {
+                        self.fractal_target_spf = Duration::from_secs_f64(1.0 / target_fps);
+                    }
                 }
 
-                if ui
-                    .add(egui::Button::new("mandelbrot").selected(self.current_fractal == CurrentFractal::Mandelbrot))
-                    .on_hover_text(
-                        "whether to render the mandelbrot (rather than the metabrot). keybinding: ".to_owned()
-                            + &ctx.format_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::NONE, Key::M)),
-                    )
-                    .clicked()
+                // control other camera
                 {
-                    self.current_fractal = CurrentFractal::Mandelbrot;
-                };
+                    ui.checkbox(&mut self.control_other_camera, "control other camera")
+                        .on_hover_text("pan/zoom will affect the other fractal's camera. keybinding: ".to_owned() + &ctx.format_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::NONE, Key::C)));
+                }
+
+                // crosshair
+                {
+                    ui.checkbox(&mut self.draw_crosshair, "draw crosshair").on_hover_text("draw a dot at the screen center.");
+                }
             });
 
-            // control other camera
-            {
-                ui.checkbox(&mut self.control_other_camera, "control other fractal").on_hover_text(
-                    "pan/zoom will affect the other fractal's camera. keybinding: ".to_owned()
-                        + &ctx.format_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::NONE, Key::C)),
-                );
-            }
+            egui::CollapsingHeader::new("metabrot").default_open(true).show(ui, |ui| {
+                // metabrot stride
+                {
+                    let mut stride = self.primary_camera_stride as f64;
+                    let r = ui
+                        .add(MyDragValue::new(egui::Label::new("metabrot pixel size:"), egui::DragValue::new(&mut stride)))
+                        .on_hover_text("how many pixels are in a pixel for the metabrot.");
+                    let mut stride = stride.round() as usize;
+                    stride = stride.max(1);
+                    if r.dragged() {
+                        stride = stride.min(64);
+                    }
+                    if r.changed() {
+                        self.primary_camera_stride = stride;
+                        self.needs_full_redraw = true;
+                    }
+                }
+
+                // sampling
+                {
+                    ui.checkbox(&mut self.sampling, "sampling")
+                        .on_hover_text("whether to get new samples of the metabrot. keybinding: ".to_owned() + &ctx.format_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::NONE, egui::Key::S)));
+                }
+
+                // reclaiming
+                {
+                    ui.checkbox(&mut self.reclaiming, "reclaiming")
+                        .on_hover_text("whether to reclaim/free/deallocate nodes. keybinding: ".to_owned() + &ctx.format_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::NONE, egui::Key::R)));
+                }
+            });
 
             egui::CollapsingHeader::new("mandelbrot").show(ui, |ui| {
-                ui.checkbox(&mut self.draw_z0, "draw z0");                
+                // mandelbrot stride
+                {
+                    let mut stride = self.secondary_camera_stride as f64;
+                    let r = ui
+                        .add(MyDragValue::new(egui::Label::new("mandelbrot pixel size:"), egui::DragValue::new(&mut stride)))
+                        .on_hover_text("how many pixels are in a pixel for the mandelbrot.");
+                    let mut stride = stride.round() as usize;
+                    stride = stride.max(1);
+                    if r.dragged() {
+                        stride = stride.min(64);
+                    }
+                    if r.changed() {
+                        self.secondary_camera_stride = stride;
+                        self.needs_full_redraw = true;
+                    }
+                }
+
+                ui.checkbox(&mut self.draw_z0, "draw z0");
                 ui.checkbox(&mut self.draw_sample_log, "draw sample log");
                 ui.checkbox(&mut self.draw_sample_window, "draw sample window");
                 ui.checkbox(&mut self.draw_sample_grid_cloud, "draw sample grid cloud");
