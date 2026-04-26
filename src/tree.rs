@@ -1072,7 +1072,7 @@ impl Tree {
         fn distance((real_0, imag_0): (Real, Imag), (real_1, imag_1): (Real, Imag)) -> Fixed {
             let real_delta = real_0 - real_1;
             let imag_delta = imag_0 - imag_1;
-            // real_delta * real_delta + imag_delta * imag_delta
+            // real_delta.mul(real_delta) + imag_delta.mul(imag_delta)
 
             // i think they give the same result
             // except manhattan maybe gives weird lines
@@ -1496,12 +1496,6 @@ mod alloc {
     pub(super) struct Alloc {
         head: AtomicPtr<Block>,
         // last_len: AtomicUsize,
-        // TODO: use this caching thing
-        // /// if you allocate a block but the CAS fails
-        // /// (bc another thread already allocated a block),
-        // /// instead of deallocating, store it for the next time we need to allocate a block.
-        // /// null if there's no cached block.
-        // local_cache: Box<[*mut Block]>,
     }
     impl Default for Alloc {
         fn default() -> Self {
@@ -1568,9 +1562,9 @@ mod alloc {
             // we go to sleep and the new block fills up.
             loop {
                 let last = unsafe { self.head.load(Ordering::SeqCst).as_ref().unwrap() };
-                let len = last.foot.len.fetch_add(4, Ordering::SeqCst);
-                if len + 4 <= Block::CAPACITY {
-                    return NodeHandle::new(last.into(), len)
+                let i = last.foot.len.fetch_add(4, Ordering::SeqCst);
+                if i + 4 <= Block::CAPACITY {
+                    return NodeHandle::new(last.into(), i)
                         .try_into()
                         .expect("we just made sure it's aligned");
                 }

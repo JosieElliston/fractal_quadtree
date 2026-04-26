@@ -494,89 +494,101 @@ mod worker_thread {
             // find a line for us to render
             // by just trying to lock each line's texture lock
             // TODO: do this better
-            for (row, lock) in shared_texture.texture_lock_begin().iter().enumerate() {
-                if lock.load(Ordering::Relaxed) {
-                    continue;
-                }
-                if lock
-                    .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
-                    .is_err()
-                {
-                    continue;
-                }
-                // TODO: we don't need this mutex, replace with `UnsafeCell`
-                let mut l = shared_texture.texture()[row]
-                    .try_lock()
-                    .expect("we just locked it");
-                {
-                    let prev_frame_start = if shared_texture.needs_full_redraw {
-                        RenderMoment::MIN
-                    } else {
-                        self.shared.render_now.load(Ordering::SeqCst) - 1
+            // TODO: these should really be counters with fetch and add
+            let texture_lock_begin = shared_texture.texture_lock_begin();
+            if texture_lock_begin.load(Ordering::Relaxed) >= camera_map.pixels_height() {
+                return None;
+            }
+            let row = texture_lock_begin.fetch_add(1, Ordering::Acquire);
+            if row >= camera_map.pixels_height() {
+                return None;
+            }
+            // for (row, lock) in shared_texture.texture_lock_begin().iter().enumerate() {
+            //     if lock.load(Ordering::Relaxed) {
+            //         continue;
+            //     }
+            //     if lock
+            //         .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+            //         .is_err()
+            //     {
+            //         continue;
+            //     }
+            // TODO: we don't need this mutex, replace with `UnsafeCell`
+            let mut l = shared_texture.texture()[row]
+                .try_lock()
+                .expect("we just locked it");
+            {
+                let prev_frame_start = if shared_texture.needs_full_redraw {
+                    RenderMoment::MIN
+                } else {
+                    self.shared.render_now.load(Ordering::SeqCst) - 1
+                };
+
+                // TODO: do more of this, perhaps bisection bc that's easier than real spacial stuff
+                let line_needs_redraw = shared_texture.needs_full_redraw
+                    || 'line_needs_redraw: {
+                        let Some(first_pixel) = camera_map.pixel_at(row, 0) else {
+                            break 'line_needs_redraw true;
+                        };
+                        let Some(last_pixel) =
+                            camera_map.pixel_at(row, camera_map.pixels_width() - 1)
+                        else {
+                            break 'line_needs_redraw true;
+                        };
+                        debug_assert_eq!(first_pixel.imag_mid(), last_pixel.imag_mid());
+                        let imag = first_pixel.imag_mid();
+                        let real_lo = first_pixel.real_mid();
+                        let real_hi = last_pixel.real_mid();
+                        debug_assert_ne!(
+                            prev_frame_start,
+                            RenderMoment::MIN,
+                            "we should short circuit earlier"
+                        );
+                        self.shared.tree.any_on_line_needs_redraw(
+                            real_lo,
+                            real_hi,
+                            imag,
+                            prev_frame_start,
+                            &mut self.thread_data,
+                        )
                     };
 
-                    // TODO: do more of this, perhaps bisection bc that's easier than real spacial stuff
-                    let line_needs_redraw = shared_texture.needs_full_redraw
-                        || 'line_needs_redraw: {
-                            let Some(first_pixel) = camera_map.pixel_at(row, 0) else {
-                                break 'line_needs_redraw true;
-                            };
-                            let Some(last_pixel) =
-                                camera_map.pixel_at(row, camera_map.pixels_width() - 1)
-                            else {
-                                break 'line_needs_redraw true;
-                            };
-                            debug_assert_eq!(first_pixel.imag_mid(), last_pixel.imag_mid());
-                            let imag = first_pixel.imag_mid();
-                            let real_lo = first_pixel.real_mid();
-                            let real_hi = last_pixel.real_mid();
-                            debug_assert_ne!(
-                                prev_frame_start,
-                                RenderMoment::MIN,
-                                "we should short circuit earlier"
-                            );
-                            self.shared.tree.any_on_line_needs_redraw(
-                                real_lo,
-                                real_hi,
-                                imag,
-                                prev_frame_start,
-                                &mut self.thread_data,
-                            )
-                        };
-
-                    if !line_needs_redraw {
-                        // debug draw unchanged lines pink
-                        // l.iter_mut()
-                        //     .for_each(|pixel| *pixel = Color32::from_rgb(255, 50, 255));
-                    } else {
-                        for ((_rect, pixel), target) in
-                            camera_map.pixels().nth(row).unwrap().zip(l.iter_mut())
-                        {
-                            *target = if let Some(pixel) = pixel {
-                                if let Some(color) =
-                                    self.shared.tree.color_of_pixel(pixel, prev_frame_start)
-                                {
-                                    // i kinda with i could debug draw it red for a frame,
-                                    // but that's really hard.
-                                    color
-                                } else {
-                                    // we proved that the color hasn't changed
-                                    // debug draw unchanged pixels blue
-                                    // Color32::from_rgb(50, 50, 255)
-                                    continue;
-                                }
+                if !line_needs_redraw {
+                    // debug draw unchanged lines pink
+                    // l.iter_mut()
+                    //     .for_each(|pixel| *pixel = Color32::from_rgb(255, 50, 255));
+                } else {
+                    for ((_rect, pixel), target) in
+                        camera_map.pixels().nth(row).unwrap().zip(l.iter_mut())
+                    {
+                        *target = if let Some(pixel) = pixel {
+                            if let Some(color) =
+                                self.shared.tree.color_of_pixel(pixel, prev_frame_start)
+                            {
+                                // i kinda with i could debug draw it red for a frame,
+                                // but that's really hard.
+                                color
                             } else {
-                                Color32::MAGENTA
-                            };
-                        }
+                                // we proved that the color hasn't changed
+                                // debug draw unchanged pixels blue
+                                // Color32::from_rgb(50, 50, 255)
+                                continue;
+                            }
+                        } else {
+                            Color32::MAGENTA
+                        };
                     }
                 }
-                debug_assert!(!shared_texture.texture_lock_finish()[row].load(Ordering::SeqCst));
-                shared_texture.texture_lock_finish()[row].store(true, Ordering::SeqCst);
-                return Some(());
             }
-            // all locks have been set
-            None
+            // debug_assert!(!shared_texture.texture_lock_finish()[row].load(Ordering::SeqCst));
+            // shared_texture.texture_lock_finish()[row].store(true, Ordering::SeqCst);
+            shared_texture
+                .texture_lock_finish()
+                .fetch_add(1, Ordering::Release);
+            return Some(());
+            // }
+            // // all locks have been set
+            // None
         }
 
         #[cfg_attr(feature = "profiling", inline(never))]
@@ -844,6 +856,10 @@ mod timer {
 
 use shared_texture::*;
 mod shared_texture {
+    use std::sync::atomic::AtomicUsize;
+
+    use crate::log;
+
     use super::*;
 
     /// the main thread calls [`RwLock::write`] to resize the buffers.
@@ -868,10 +884,16 @@ mod shared_texture {
         /// *and* when workers check if they're finished,
         /// they only need to check one location and not all of the locks.
         camera_map: Option<CameraMap>,
-        /// these are set when a line begins rendering.
-        texture_lock_begin: Vec<AtomicBool>,
-        /// these are set when a line finishes rendering.
-        texture_lock_finish: Vec<AtomicBool>,
+        // /// these are set when a line begins rendering.
+        // texture_lock_begin: Vec<AtomicBool>,
+        // /// these are set when a line finishes rendering.
+        // texture_lock_finish: Vec<AtomicBool>,
+        /// these are incremented when a worker acquires a line to render.
+        /// may be greater than the height.
+        texture_lock_begin: AtomicUsize,
+        /// these are incremented when a worker finishes rendering a line.
+        /// must not be greater than the height.
+        texture_lock_finish: AtomicUsize,
         /// should never call `lock`, only `try_lock`.
         /// TODO: with the texture locks, maybe this doesn't need a `Mutex`, just an `UnsafeCell`.
         /// TODO: inner `Vec` should be a `Box<[Color32]>`.
@@ -882,8 +904,8 @@ mod shared_texture {
             Self {
                 needs_full_redraw: false,
                 camera_map: None,
-                texture_lock_begin: Vec::new(),
-                texture_lock_finish: Vec::new(),
+                texture_lock_begin: AtomicUsize::new(0),
+                texture_lock_finish: AtomicUsize::new(0),
                 texture: Vec::new(),
             }
         }
@@ -906,8 +928,8 @@ mod shared_texture {
         }
         fn height(&self) -> usize {
             let height = self.texture.len();
-            debug_assert_eq!(self.texture_lock_begin.len(), height);
-            debug_assert_eq!(self.texture_lock_finish.len(), height);
+            // debug_assert_eq!(self.texture_lock_begin.len(), height);
+            // debug_assert_eq!(self.texture_lock_finish.len(), height);
             height
         }
 
@@ -918,10 +940,10 @@ mod shared_texture {
             &mut self.camera_map
         }
 
-        pub(super) fn texture_lock_begin(&self) -> &Vec<AtomicBool> {
+        pub(super) fn texture_lock_begin(&self) -> &AtomicUsize {
             &self.texture_lock_begin
         }
-        pub(super) fn texture_lock_finish(&self) -> &Vec<AtomicBool> {
+        pub(super) fn texture_lock_finish(&self) -> &AtomicUsize {
             &self.texture_lock_finish
         }
         pub(super) fn texture(&self) -> &Vec<Mutex<Vec<Color32>>> {
@@ -938,15 +960,17 @@ mod shared_texture {
                 return;
             }
             self.needs_full_redraw = true;
-            self.texture_lock_begin.clear();
-            self.texture_lock_finish.clear();
+            // self.texture_lock_begin.clear();
+            // self.texture_lock_finish.clear();
             // TODO: is this correct with regard to the mutexes?
             self.texture.clear();
 
-            self.texture_lock_begin
-                .resize_with(height, || AtomicBool::new(true));
-            self.texture_lock_finish
-                .resize_with(height, || AtomicBool::new(true));
+            // self.texture_lock_begin
+            //     .resize_with(height, || AtomicBool::new(true));
+            // self.texture_lock_finish
+            //     .resize_with(height, || AtomicBool::new(true));
+            self.texture_lock_begin.store(height, Ordering::SeqCst);
+            self.texture_lock_finish.store(height, Ordering::SeqCst);
             self.texture
                 .resize_with(height, || Mutex::new(vec![Color32::MAGENTA; width]));
         }
@@ -959,27 +983,38 @@ mod shared_texture {
         #[cfg_attr(feature = "profiling", inline(never))]
         pub(super) fn reset_locks(&mut self, camera_map: &CameraMap) {
             assert!(self.camera_map.is_none(), "camera_map wasn't None");
+            // debug_assert!(
+            //     self.texture_lock_begin
+            //         .iter()
+            //         .all(|lock| lock.load(Ordering::SeqCst)),
+            //     "texture_lock_begin not all true"
+            // );
+            // debug_assert!(
+            //     self.texture_lock_finish
+            //         .iter()
+            //         .all(|lock| lock.load(Ordering::SeqCst)),
+            //     "texture_lock_finish not all true"
+            // );
             debug_assert!(
-                self.texture_lock_begin
-                    .iter()
-                    .all(|lock| lock.load(Ordering::SeqCst)),
-                "texture_lock_begin not all true"
+                self.texture_lock_begin.load(Ordering::SeqCst) >= self.texture.len(),
+                "texture_lock_begin not all started"
             );
-            debug_assert!(
-                self.texture_lock_finish
-                    .iter()
-                    .all(|lock| lock.load(Ordering::SeqCst)),
-                "texture_lock_finish not all true"
+            debug_assert_eq!(
+                self.texture_lock_finish.load(Ordering::SeqCst),
+                self.texture.len(),
+                "texture_lock_finish not all ended"
             );
 
-            // it's important to reset finish before begin
-            // at least if we aren't using `camera_map` as a lock
-            for lock in self.texture_lock_finish.iter() {
-                lock.store(false, Ordering::SeqCst);
-            }
-            for lock in self.texture_lock_begin.iter() {
-                lock.store(false, Ordering::SeqCst);
-            }
+            // // it's important to reset finish before begin
+            // // at least if we aren't using `camera_map` as a lock
+            // for lock in self.texture_lock_finish.iter() {
+            //     lock.store(false, Ordering::SeqCst);
+            // }
+            // for lock in self.texture_lock_begin.iter() {
+            //     lock.store(false, Ordering::SeqCst);
+            // }
+            self.texture_lock_finish.store(0, Ordering::SeqCst);
+            self.texture_lock_begin.store(0, Ordering::SeqCst);
 
             self.camera_map = Some(camera_map.clone());
         }
@@ -990,11 +1025,14 @@ mod shared_texture {
             //     std::thread::yield_now();
             // }
             // TODO: be better
-            while self
-                .texture_lock_finish
-                .iter()
-                .any(|lock| !lock.load(Ordering::SeqCst))
-            {
+            // while self
+            //     .texture_lock_finish
+            //     .iter()
+            //     .any(|lock| !lock.load(Ordering::SeqCst))
+            // {
+            //     std::thread::yield_now();
+            // }
+            while self.texture_lock_finish.load(Ordering::SeqCst) < self.texture.len() {
                 std::thread::yield_now();
             }
         }
@@ -1003,17 +1041,26 @@ mod shared_texture {
         #[cfg_attr(feature = "profiling", inline(never))]
         pub(super) fn set_texture(&self, handle: &mut egui::TextureHandle) {
             assert!(self.camera_map.is_none(), "camera_map wan't reset");
+            // debug_assert!(
+            //     self.texture_lock_begin
+            //         .iter()
+            //         .all(|lock| lock.load(Ordering::SeqCst)),
+            //     "texture_lock_begin not all true"
+            // );
+            // debug_assert!(
+            //     self.texture_lock_finish
+            //         .iter()
+            //         .all(|lock| lock.load(Ordering::SeqCst)),
+            //     "texture_lock_finish not all true"
+            // );
             debug_assert!(
-                self.texture_lock_begin
-                    .iter()
-                    .all(|lock| lock.load(Ordering::SeqCst)),
-                "texture_lock_begin not all true"
+                self.texture_lock_begin.load(Ordering::SeqCst) >= self.texture.len(),
+                "texture_lock_begin not all started"
             );
-            debug_assert!(
-                self.texture_lock_finish
-                    .iter()
-                    .all(|lock| lock.load(Ordering::SeqCst)),
-                "texture_lock_finish not all true"
+            debug_assert_eq!(
+                self.texture_lock_finish.load(Ordering::SeqCst),
+                self.texture.len(),
+                "texture_lock_finish not all ended"
             );
 
             let size = [self.width(), self.height()];
