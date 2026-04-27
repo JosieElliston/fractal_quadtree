@@ -1,19 +1,19 @@
 [package]
+authors = ["Josie Elliston"]
 name = "fractal_quadtree"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
 atomic = "0.6.1"
-bumpalo = "3.20.2"
 # version determined by atomic
 bytemuck = "*"
-eframe = { version = "0.32.3" }
+eframe = "0.34.1"
 # version determined by eframe
 egui = { version = "*", features = ["bytemuck"] }
-mimalloc = "0.1.48"
-rand = "0.9.2"
-rayon = "1.11.0"
+mimalloc = "0.1.50"
+rand = "0.10.1"
+rayon = "1.12.0"
 
 [features]
 # used for eg not inlining function so they show up when profiling

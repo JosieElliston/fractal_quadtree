@@ -1,5 +1,3 @@
-#[cfg(debug_assertions)]
-use std::hint;
 use std::{
     sync::{Arc, atomic::Ordering},
     time::{Duration, Instant},
@@ -796,8 +794,6 @@ impl App {
                     }
                     if r.changed() {
                         RECLAIM_MAX_WIDTH.store(reclaim_max_width, Ordering::Relaxed);
-                        // // hack bc i don't update render timestamps when reclaiming
-                        // self.needs_full_redraw = true;
                     }
                 }
             });
@@ -849,11 +845,12 @@ impl App {
     }
 }
 impl eframe::App for App {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
         ctx.request_repaint();
         egui::CentralPanel::default()
             .frame(egui::Frame::new())
-            .show(ctx, |ui| {
+            .show_inside(ui, |ui| {
                 {
                     // i don't trust `stable_dt`
                     let now = Instant::now();
@@ -876,7 +873,7 @@ impl eframe::App for App {
                 self.timers
                     .add(ctx.input(|i| i.time), self.metabrot.timer());
 
-                self.keybinds(ctx);
+                self.keybinds(&ctx);
 
                 // debug static counters
                 #[cfg(false)]
@@ -970,14 +967,14 @@ impl eframe::App for App {
                         != (self.current_fractal == CurrentFractal::Metabrot)
                     {
                         CameraMap::pan_zoom(
-                            ctx,
+                            &ctx,
                             ui,
                             &mut self.primary_camera,
                             &mut self.primary_camera_velocity,
                         )
                     } else {
                         CameraMap::pan_zoom(
-                            ctx,
+                            &ctx,
                             ui,
                             &mut self.secondary_camera,
                             &mut self.secondary_camera_velocity,
@@ -1138,8 +1135,8 @@ impl eframe::App for App {
                 //     }
                 // }
 
-                self.show_fractal(ctx, ui, &primary_camera_map, &secondary_camera_map);
-                self.show_fractal_debug(ctx, ui, &primary_camera_map, &secondary_camera_map);
+                self.show_fractal(&ctx, ui, &primary_camera_map, &secondary_camera_map);
+                self.show_fractal_debug(&ctx, ui, &primary_camera_map, &secondary_camera_map);
 
                 // area is to allow the frame to be drawn on top of the fractal
                 egui::Area::new(egui::Id::new("area"))
@@ -1165,14 +1162,14 @@ impl eframe::App for App {
                                 egui::CollapsingHeader::new("info")
                                     .default_open(true)
                                     .show_unindented(ui, |ui| {
-                                        self.show_ui(ctx, ui);
+                                        self.show_ui(&ctx, ui);
                                     });
                             });
                     });
             });
     }
 
-    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+    fn on_exit(&mut self) {
         self.metabrot.join();
     }
 }

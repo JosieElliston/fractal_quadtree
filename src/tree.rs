@@ -2,12 +2,11 @@ use std::{
     cell::UnsafeCell,
     num::NonZeroU32,
     ptr::NonNull,
-    sync::atomic::{AtomicU16, AtomicU32, AtomicUsize, Ordering},
+    sync::atomic::{AtomicU16, AtomicUsize, Ordering},
 };
 
 use atomic::Atomic;
 use egui::Color32;
-use rand::Rng;
 
 use crate::{
     complex::{Domain, Pixel, Window, fixed::*},
@@ -51,7 +50,6 @@ struct Node {
     /// distance to the closest descendant leaf.
     /// 0 if we're a leaf, else 1 + min(c.height for c in children).
     /// this is used in `refine` to find the shallowest leafs.
-    /// btw, this could be a u16 or maybe even a u8.
     min_height: AtomicU16,
     /// distance to the farthest descendant leaf.
     /// 0 if we're a leaf, else 1 + max(c.height for c in children).

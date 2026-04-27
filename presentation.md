@@ -186,46 +186,18 @@
             - we can just retire them, put them in the nursing home, and wait the grace period.
             - but do we actually need to wait or can we reclaim them now?
             - it turns out we can!
-                - the thing we're worried about is a double free
-                - any left_sibling in a free-list must have cleared its parent's child pointer.
-                - we have exclusive handles to the nodes we carry across ticks.
-                - 
-            <!-- - we need to wait, otherwise we may do a double free.
-                - let A be an ancestor of B.
-                -  -->
-
-    - but do threads ever smuggle handles to nodes across ticks?
-        - yes, but only for reclamation.
-        - we don't ever do a double free because we take the child pointer atomically.
-    - but what about the children of the siblings?
-        - we can't guarantee that the picture look like ☐ > ☐☐☐☐ (that's like the whole problem of non-blocking algorithms)
-        - **DRAW**: ☐ > ☐☐☐☐ > ☐☐☐☐
-        - we recurse, atomically retiring each sibling and sending their children to the thread's nursing home
-        - TODO: why can't we free them?
-        - and now we can reclaim the siblings, and say that they're deinitialized and reading them is UB
-    - problem
-        - or rather, no one can find them via following child pointers
-        - but you can find them via direct pointer.
-        - and who stores pointers across ticks?
-        - us! or rather, other retirement buffers.
-        - but actually, these nodes are only in our buffer,
-        - which guarantees no other pointers to them exist,
-        - it's only their children that might be in other buffers.
-        - so this just means we need to try to retire each node
-        - and their into our buffer to be reclaimed in another two ticks.
-    - problem with
-    - one problem
-        - suppose we've selected a node whose children we want to retire
-        - we erase the child pointer
-        - we have no way to guarantee that no one else is looking at one of the children
+                - the thing we're worried about is a double free.
+                <!-- - we have exclusive handles to the nodes we carry across ticks. -->
+                - any left_sibling in a free-list must have already cleared its parent's child pointer.
+                - so, if we can look through a child pointer, the children must not be in a free list.
+                - therefore, we can recursively reclaim the (accessible) children now.
+                - TODO: better proof
+        - so after you've stored their child pointers elsewhere (or just completely finished reclaiming their children), you can reclaim the siblings, declare that reading them is UB, push them onto your free-list
     - i have ideas about how to put them back into the global free-list (have each block store a bitset of free nodes), but right now they're put into a thread-local free-list for reuse before you request an allocation from the global free-list.
-- coloring pt 1: definition of color of pixel
-- proved that the color hasn't changed (implies each nodes has a color_modified timestamp)
-- prove a line hasn't changed
-- rendering
-    - like what the main thread does with the texture
-    - note the inversion of end then begin
 - refine (implies storing height)
+    <!-- - min_height: distance to the closest descendant leaf -->
+  - TODO
+        -
 
 ## slides for sampling
 
