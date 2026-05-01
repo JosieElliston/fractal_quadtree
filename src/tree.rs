@@ -25,7 +25,8 @@ use crate::{
 
 /// hack to make this easy to add to the UI.
 /// the min size of a node to reclaim is `window.real_rad() / RECLAIM_MAX_WIDTH`.
-pub(crate) static RECLAIM_MAX_WIDTH: AtomicUsize = AtomicUsize::new(100);
+// TODO: do this correctly
+pub(crate) static RECLAIM_MAX_WIDTH: AtomicUsize = AtomicUsize::new(1000);
 
 #[repr(C, align(64))]
 #[derive(Debug)]
@@ -48,11 +49,11 @@ struct Node {
     // this would also prevent us from splitting uncolored nodes.
     color: Atomic<Option<Rgb>>,
     /// distance to the closest descendant leaf.
-    /// 0 if we're a leaf, else 1 + min(c.height for c in children).
+    /// 0 if we're a leaf, else 1 + min(c.min_height for c in children).
     /// this is used in `refine` to find the shallowest leafs.
     min_height: AtomicU16,
     /// distance to the farthest descendant leaf.
-    /// 0 if we're a leaf, else 1 + max(c.height for c in children).
+    /// 0 if we're a leaf, else 1 + max(c.max_height for c in children).
     /// this is used in `reclaim` to find the deepest nodes.
     max_height: AtomicU16,
     /// timestamp of the last update to this node or any of its descendants.
@@ -503,19 +504,19 @@ impl Tree {
         Some(left_sibling)
     }
 
-    /// must be called on what you got from `retire` after a delay.
-    /// retires `left`'s siblings' children.
-    /// these children should be reclaimed after the delay.
-    #[cfg_attr(feature = "profiling", inline(never))]
-    pub(crate) fn retire_siblings_children(
-        &self,
-        left_sibling: NodeHandle4,
-    ) -> impl Iterator<Item = NodeHandle4> {
-        left_sibling
-            .siblings()
-            .into_iter()
-            .filter_map(|node_handle| self.retire_children_of_node(node_handle))
-    }
+    // /// must be called on what you got from `retire` after a delay.
+    // /// retires `left`'s siblings' children.
+    // /// these children should be reclaimed after the delay.
+    // #[cfg_attr(feature = "profiling", inline(never))]
+    // pub(crate) fn retire_siblings_children(
+    //     &self,
+    //     left_sibling: NodeHandle4,
+    // ) -> impl Iterator<Item = NodeHandle4> {
+    //     left_sibling
+    //         .siblings()
+    //         .into_iter()
+    //         .filter_map(|node_handle| self.retire_children_of_node(node_handle))
+    // }
 
     /// should be called soon after `retire_children`.
     /// but must be called after you've consumed the iterator `retire_children` returned.

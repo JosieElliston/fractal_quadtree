@@ -3,10 +3,7 @@
 ## uncategorized
 
 - computing each sample itself may seem embarrassingly parallel, but we might want to do things like blob detection for coloring, and we already have parallelism over sampling, so we don't have available threads to do parallelism inside sampling.
-- note that the target hardware is "my m1 mac", not a cluster or smt, tho my solution should be fine for any common consumer hardware. note that i didn't end up using the gpu.
-- maybe the presentation is building the quadtree and arena allocator and dynamic array from primitives
-- epistemic status
-- why i use AOS and not SOA (each struct is one cache line, SOA would get false sharing)
+- why i use AOS and not SOA (each struct is one cache line, SOA would get false sharing or take much more memory)
 
 ## speaker notes for datastructure
 
@@ -37,9 +34,11 @@
 - workers have a main loop, where they go though operations in a static order.
     - this order is chosen to not deadlock/livelock.
     - stuff like
-        - we don't get new nodes to sample before the queue is emptied.
         - rendering is highest priority, so the main thread can progress.
-- coloring
+        - we don't get new nodes to sample before the queue is emptied.
+        - we try to free nodes before retiring more.
+- rendering
+    - **DRAW**: texture with lines for begin_count and end_count
     - main thread rendering
         - resize the texture if needed
         - clears begin_count and finish_count
@@ -47,9 +46,10 @@
         - blocks until finish_count matches the texture height
         - give the texture to egui
     - worker threads rendering
-        - check if begin_lock is less than height, do a fetch_and_add, check again that its less than height
+        - check if begin_count is less than height, do a fetch_and_add, check again that its less than height
         - render a line to the texture
         - increment the finish_count
+- coloring
     - **DRAW**
         - 1d ~quadtree, binary tree but nodes as their doms which are horizontal lines
         - vertical line representing the path of the pixel, with the closest center not being a leaf
@@ -92,10 +92,6 @@
     - note that i don't every free `Block`s, or even have a shared free-list for reclaimed nodes.
     - note that nodes aren't atomic, only their fields.
     - the handle i give out is just a pointer, touches are just looking though the pointer to the fields.
-    <!-- - i made a concurrent linked list, but i don't use it.
-        - just storing a (shared) pointer to the current block we're allocating in is sufficient.
-        - for reclamation, i put the reclaimed node into a thread-local free-list.
-        - my idea for a global free-list via bitset -->
     - fn alloc
         - head_ptr := alloc.head.load()
         - i := head_ptr.len.fetch_add(1)
@@ -114,11 +110,11 @@
         - but this block isn't guaranteed to be immediate next block.
         - we could have gone to sleep, and many blocks could have been appended, and now we have two logically different pointers that are actually the same.
 - reclamation
-    - notation
+    <!-- - notation
         - i use "reclamation" to refer to both the entire process
             of retire + later reclaim,
             as well as just the latter step.
-        - whatever.
+        - whatever. -->
     - i have that handles don't live across subroutine calls, except for ones in the nursing_home (and the root)
     - epoch reclamation: why?
         - i already had a clock for the color pruning.
@@ -134,19 +130,19 @@
         - (attribution: this was the first thing i thought of and didn't look farther.)
         - in fact, we tick once per frame.
         - (ticking slower means that the buffers will grow larger,
-        - not that we can only reclaim once per tick.)
+        - not that we can only reclaim one node per tick.)
     - epoch reclamation: how?
-        - **DRAW**: nodes ☐ > ☐☐☐☐
+        - **DRAW**: tree triangle, bottom nodes ☐ > ☐☐☐☐
         - note that we're reclaiming the children, not the node itself.
         - erase the child pointer, push the children/siblings onto a queue with the timestamp.
-        - after a few ticks, reclaim the siblings.
+        - after a few ticks, free the siblings.
     - fn retire
         - select a node, which should be internal
         - do an atomic get-and-set on the child pointer to clear it
         - if the child pointer was `None`, someone else got there first, whatever
         - if it wasn't `None`, we put the siblings into the thread-local nursing home.
         - (we change to calling them siblings at this point)
-        - we are now responsible for reclaiming the siblings after some grace period.
+        - we are now responsible for freeing the siblings after some grace period.
     - how long a grace period? we need to wait two ticks from the end (or three ticks from the start).
     - lower bound on grace period
         - **DRAW**: timeline
@@ -165,7 +161,7 @@
         - first, the previous example doesn't disprove this.
             - **DRAW**: move └─f─┘ to the next tick.
             - we can't have that the touching subroutine lives long enough for the tick to happen, because the tick happening is dependent on the death of the the subroutine.
-        <!-- - we want to prove that between retiring and reclaiming,
+        <!-- - we want to prove that between retiring and freeing,
             all threads have ever not been inside a subroutine
             (because handles don't persist across subroutine calls). -->
         - what do we know?
@@ -174,30 +170,42 @@
         - what we we want?
             - we need an entire tick to elapse during which no one can look through the child pointer (bc it's None).
         - the tick after exiting retire is the start of this period, and the next tick ends it.
-    - ok so we've waited the grace period, can we now reclaim the nodes?
+    - ok so we've waited the grace period, can we now free the nodes?
         - are we sure no one has handles to them?
             - only reclamation stores handles across acks
             - we get our handles from an atomic get-and-set, so we're confident that no one has pointers to the siblings
         - but what about the siblings' children?
             - my picture is misleading, we can't guarantee that the picture look like ☐ > ☐☐☐☐
                 - like we could try to select a node with height one, but we can't guarantee that it remains height one, that's like the whole problem
-            - **DRAW**: ☐ > ☐☐☐☐ > ☐☐☐☐
+            - **DRAW**: tree triangle, bottom nodes ☐ > ☐☐☐☐ > ☐☐☐☐
             - obviously we shouldn't leak them.
             - we can just retire them, put them in the nursing home, and wait the grace period.
-            - but do we actually need to wait or can we reclaim them now?
+            - but do we actually need to wait or can we free them now?
             - it turns out we can!
                 - the thing we're worried about is a double free.
                 <!-- - we have exclusive handles to the nodes we carry across ticks. -->
                 - any left_sibling in a free-list must have already cleared its parent's child pointer.
                 - so, if we can look through a child pointer, the children must not be in a free list.
-                - therefore, we can recursively reclaim the (accessible) children now.
+                - therefore, we can recursively free the (accessible) children now.
                 - TODO: better proof
-        - so after you've stored their child pointers elsewhere (or just completely finished reclaiming their children), you can reclaim the siblings, declare that reading them is UB, push them onto your free-list
-    - i have ideas about how to put them back into the global free-list (have each block store a bitset of free nodes), but right now they're put into a thread-local free-list for reuse before you request an allocation from the global free-list.
-- refine (implies storing height)
-    <!-- - min_height: distance to the closest descendant leaf -->
-  - TODO
-        -
+        - so after you've stored their child pointers elsewhere (or just completely finished freeing their children), you can free the siblings, declare that reading them is UB, push them onto your free-list
+    - i have ideas about how to put them back into the global free-list (have each block store a bitset of free nodes), but right now they're put into a thread-local free-list for reuse before you request an allocation from the global free-list. currently, you can get something like one reclaims nodes and doesn't give them away, but that's unlikely.
+- refine
+    - **DRAW**: argmax_{leaf} depth st it intersects the window and wouldn't get reclaimed.
+    - we want split the shallowest leaf that intersect the window (and wouldn't get reclaimed).
+    - we first find the depth of such leaves,
+    - then iterate over such leaves.
+    - for each leaf:
+        - prep the prospective children.
+        - try to swap in the new child pointer.
+        - if we succeed, return the points we need to sample.
+        - if we fail, try the next leaf.
+        - if we fail to find any leaf, put the siblings back into the free-list and return.
+    - the slow part is finding such leaves, which we can optimize.
+        - each node store min_height: distance to the closest descendant leaf
+        - we use this in the searches to prune internal nodes that are guaranteed to not contain a shallowest leaf.
+        - (we also do something similar during retirement)
+- insert sample
 
 ## slides for sampling
 

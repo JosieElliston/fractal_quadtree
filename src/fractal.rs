@@ -2,7 +2,6 @@ use std::{
     sync::{
         Arc, Mutex, RwLock, TryLockError,
         atomic::{AtomicBool, AtomicU64, Ordering},
-        mpsc::{self, Receiver, SendError, Sender},
     },
     thread,
     time::{Duration, Instant},
@@ -13,8 +12,8 @@ use eframe::egui::{self, Color32};
 
 use crate::{
     complex::{CameraMap, Window, fixed::*},
-    sample,
-    tree::{NodeHandle, ReclaimMoment, RenderMoment, Tree},
+    log, sample,
+    tree::{ReclaimMoment, RenderMoment, Tree},
 };
 
 /// this mostly exists so i don't duplicate doc comments
@@ -591,7 +590,11 @@ mod worker_thread {
                 }
             };
             // dbg!("retire");
-            let left = self.shared.tree.retire(window, self.shared.render_now.load(Ordering::SeqCst), &mut self.thread_data)?;
+            let left = self.shared.tree.retire(
+                window,
+                self.shared.render_now.load(Ordering::SeqCst),
+                &mut self.thread_data,
+            )?;
             // dbg!("retired");
             self.nursing_home.push_back((self.local_reclaim_now, left));
             Some(())
@@ -848,8 +851,6 @@ mod timer {
 use shared_texture::*;
 mod shared_texture {
     use std::sync::atomic::AtomicUsize;
-
-    use crate::log;
 
     use super::*;
 

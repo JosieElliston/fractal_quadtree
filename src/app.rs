@@ -427,7 +427,8 @@ impl App {
                 painter.circle_filled(
                     secondary_camera_map.complex_to_pos(stepped_c),
                     dynamic_draw_size(secondary_camera_map, 5.0),
-                    Color32::from_gray(200),
+                    // Color32::from_gray(200),
+                    Color32::WHITE,
                 );
             }
         }
@@ -604,12 +605,16 @@ impl App {
             .id_salt("camera")
             .show(ui, |ui| {
                 let camera = match self.current_fractal.other_if_control_other_camera(self.control_other_camera) {
-                    CurrentFractal::Metabrot => &self.primary_camera,
-                    CurrentFractal::Mandelbrot => &self.secondary_camera,
+                    CurrentFractal::Metabrot => &mut self.primary_camera,
+                    CurrentFractal::Mandelbrot => &mut self.secondary_camera,
                 };
                 ui.label(format!("real mid: {:12.09}", camera.real_mid()));
                 ui.label(format!("imag mid: {:12.09}", camera.imag_mid()));
                 ui.label(format!("real rad: {:12.09}", camera.real_rad()));
+                if ui.button("reset").clicked() {
+                    *camera = Camera::default();
+                    self.needs_full_redraw = true;
+                }
             });
 
             // sizing pass example by hactar

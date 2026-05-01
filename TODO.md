@@ -23,6 +23,27 @@
 - bug report on `compare_exchange` returning `current` not `new`
 - pausing sampling is broken, also when the fractal is outside the window
 - why does lagging the main thread make sampling so much faster?
+- maybe only pointer swings need to have non-relaxed ordering, and the field only need to have atomic read / write?
+- bfs/ids for select in refine and reclaim? error types for AllInternal, NoNodesAtDepth
+- timer is really incorrect, we should have a start before we try, then have a time each for success and fail. currently it counts the fail time for all previous operations.
+- put mandelbrot into the worker cycle
+- current_fractal: None option for disabling rendering (give current_render_fractal to the workers)
+- debug assert timestamp isn't uninit in alloc::get
+- cfg for debug loading with relaxed vs seqcst
+- you can actually compute dom.rad from dom.mid
+- also can just remove dom
+- vector clocks for debugging (or even simpler lamport clocks)
+- alloc should have each thread gets a block that it allocs from
+- instead of each node holding one sample, it holds any many samples as possible while still being under 64 bytes. so maybe 4 or 16.
+- TODO: 16-ary tree rather than 4-ary (hextree)
+- make clocks a u8 / u7, but require acks to wrap?
+- instead of `timestamp: RenderMoment`, have nodes store a u8 with saturating_add(1) somehow?
+    - maybe we can have a `has_rendered: bool` and then have a pass after coloring that clears them?
+- render into squares of the texture instead of lines, recursively render a square at once
+- we could instead have the color be non-atomic, not insert uncolored children when splitting, and instead tag the left-child pointer as reserved.
+- TODO: when propagating updates for the cache fields, we need to be careful about stuff like the parent getting the max_across_children applied before the child get updated, even though that violates program order. so we should store more stuff on stack variables and not reload data. possibly i should do acquire/release on the field (rather than relaxed), but doesn't that only matter if you're trying to enforce happens-before on other variables? but i am: i'm trying to enforce happens-before with the same field but in a different struct.
+    - require that tree.timestamp is seqcst with itself?
+    - require that (node.timestamp, children.timestamp) is locally seqcst?
 
 ## optimization
 
@@ -114,6 +135,9 @@
 - rename node/leaf_id -> node_handle / handle
 - rename child_id -> left_child / child_handle
 - if let guards on match arms were recently stabilized
+- make {App, Fractal, Worker, Tree}::{DrawData, SampleData, ReclaimData}
+- Key::I to toggle info box
+- draw dot at z=0 for mandelbrot
 
 ## bugs
 
