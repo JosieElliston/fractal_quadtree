@@ -618,10 +618,6 @@ mod worker_thread {
                 return Err("nobody old enough");
             };
             // dbg!("reclaim");
-            // for left_child in self.shared.tree.retire_siblings_children(left_sibling) {
-            //     self.nursing_home
-            //         .push_back((self.local_reclaim_now, left_child));
-            // }
             self.shared
                 .tree
                 .reclaim(left_sibling, &mut self.thread_data);
@@ -906,12 +902,18 @@ mod timer {
         pub(crate) split_err: Timer,
         pub(crate) idle: Timer,
     }
+
+    const _: () =
+        assert!(std::mem::size_of::<MultiTimer>() == MultiTimer::N * std::mem::size_of::<Timer>());
+
     impl MultiTimer {
+        const N: usize = 11;
+
         pub(crate) fn reset(&mut self) {
             *self = Self::default();
         }
 
-        fn to_array(self) -> [Timer; 11] {
+        fn to_array(self) -> [Timer; MultiTimer::N] {
             [
                 self.draw_ok,
                 self.draw_err,
@@ -927,7 +929,7 @@ mod timer {
             ]
         }
 
-        fn from_array(arr: [Timer; 11]) -> Self {
+        fn from_array(arr: [Timer; MultiTimer::N]) -> Self {
             Self {
                 draw_ok: arr[0],
                 draw_err: arr[1],

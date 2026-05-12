@@ -14,19 +14,10 @@ use crate::{
     sample::metabrot_sample,
 };
 
-// pub(crate) static ELAPSED_NANOS: std::sync::atomic::AtomicU64 =
-//     std::sync::atomic::AtomicU64::new(0);
-// pub(crate) static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-// pub(crate) static PRUNED_ELAPSED: AtomicU64 = AtomicU64::new(0);
-// pub(crate) static PRUNED_COUNTER: AtomicU64 = AtomicU64::new(0);
-// pub(crate) static UNPRUNED_ELAPSED: AtomicU64 = AtomicU64::new(0);
-// pub(crate) static UNPRUNED_COUNTER: AtomicU64 = AtomicU64::new(0);
-
 /// hack to make this easy to add to the UI.
 /// the min size of a node to reclaim is `window.real_rad() / RECLAIM_MAX_WIDTH`.
 // TODO: do this correctly
-pub(crate) static RECLAIM_MAX_WIDTH: AtomicUsize = AtomicUsize::new(1000);
+pub(crate) static RECLAIM_MAX_WIDTH: AtomicUsize = AtomicUsize::new(100);
 
 #[repr(C, align(64))]
 #[derive(Debug)]
@@ -91,6 +82,7 @@ impl Node {
     unsafe fn dom(&self) -> Domain {
         unsafe { self.dom.get().read() }
     }
+
     /// SAFETY: the caller probably should ensure that no one is writing to the node.
     /// i could return a reference, but immediately reading the pointer is a bit safer.
     unsafe fn parent(&self) -> Option<NodeHandle> {
@@ -104,6 +96,7 @@ impl Node {
             self.dom.get().write(dom);
         }
     }
+
     /// SAFETY: the caller probably should ensure that we have exclusive access,
     /// tho maybe it's fine even without (like maybe we can't get partial writes bc it's small enough).
     unsafe fn write_parent(&self, parent: Option<NodeHandle>) {
@@ -128,24 +121,9 @@ impl Tree {
             .unwrap();
         let alloc = Alloc::default();
 
-        // we leave 3 nodes uninit
-        // i don't want to deal with a main thread `TreadData`, so just leak
+        // we leave the root's siblings uninit.
         let root_handle = alloc.alloc4(data).into();
         let root = alloc.get(root_handle);
-
-        // this is UB because `Node` isn't inside an `UnsafeCell`
-        // so we can't do the nice ~RAII thing
-        // unsafe {
-        //     (&raw const root as *mut Node).write(Node {
-        //         dom,
-        //         parent: None,
-        //         left_child: Atomic::new(None),
-        //         color: Atomic::new(Some(color)),
-        //         height: AtomicU32::new(0),
-        //         timestamp: Atomic::new(Moment::default()),
-        //         _pad: Default::default(),
-        //     });
-        // }
 
         unsafe {
             root.write_dom(dom);
@@ -242,10 +220,6 @@ impl Tree {
         self.alloc.get(self.root).max_height.load(Ordering::SeqCst)
     }
 
-    // pub(crate) fn mid_of_node_handle(&self, handle: NodeHandle) -> (Real, Imag) {
-    //     unsafe { self.alloc.get(handle).dom().mid() }
-    // }
-
     // /// maxes `handle` and all its ancestors timestamps with `now`.
     // #[cfg_attr(feature = "profiling", inline(never))]
     // fn update_ancestors_timestamp(&self, mut handle: NodeHandle, now: RenderMoment) {
@@ -263,40 +237,6 @@ impl Tree {
     //         } else {
     //             break;
     //         }
-    //     }
-    // }
-
-    // /// probably should have that `left_child` is a leaf.
-    // /// you can kinda merge this with `update_ancestors_timestamp`, but it's annoying
-    // #[cfg_attr(feature = "profiling", inline(never))]
-    // fn update_ancestors_height(&self, mut left_child: NodeHandle) {
-    //     while let Some(parent_handle) = unsafe { self.alloc.get(left_child).parent() } {
-    //         debug_assert_ne!(left_child, self.root);
-    //         let height = left_child
-    //             .siblings()
-    //             .map(|child_handle| self.alloc.get(child_handle).height.load(Ordering::SeqCst))
-    //             .iter()
-    //             .min()
-    //             .unwrap()
-    //             + 1;
-
-    //         let parent = self.alloc.get(parent_handle);
-    //         let old_height = parent.height.load(Ordering::SeqCst);
-
-    //         // see comment below for why this is >= and not ==
-    //         if old_height >= height {
-    //             return;
-    //         }
-
-    //         // we don't need to max, and can just store
-    //         // it's possible this lowers it (eg if we sleep between computing height and storing),
-    //         // but we don't actually rely on height being monotonically increasing,
-    //         // and it'll get fixed in the future.
-    //         parent.height.store(height, Ordering::SeqCst);
-
-    //         // if i ever move the root from being leftmost in its group,
-    //         // this will be UB.
-    //         left_child = parent_handle.left_sibling();
     //     }
     // }
 
@@ -421,41 +361,6 @@ impl Tree {
         }
     }
 
-    /// erase the child pointer and return the children.
-    /// we can't deinit the children's fields at this time
-    /// because other threads can still be looking at the children,
-    /// and we need their child pointers later.
-    #[cfg_attr(feature = "profiling", inline(never))]
-    fn retire_children_of_node(&self, node_handle: NodeHandle) -> Option<NodeHandle4> {
-        let node = self.alloc.get(node_handle);
-        let left_sibling = node.left_child.swap(None, Ordering::SeqCst)?;
-        Some(left_sibling)
-    }
-
-    /// deinits the fields for debugging.
-    /// any read of any sibling after this is UB.
-    #[cfg_attr(feature = "profiling", inline(never))]
-    fn reclaim_node(&self, left_sibling: NodeHandle4, data: &mut ThreadData) {
-        for node_handle in left_sibling.siblings() {
-            let node = self.alloc.get(node_handle);
-            unsafe {
-                node.write_dom(Domain::uninit());
-                node.write_parent(None);
-            }
-            node.left_child.store(None, Ordering::Relaxed);
-            node.color.store(None, Ordering::Relaxed);
-            node.min_height.store(0, Ordering::Relaxed);
-            node.max_height.store(0, Ordering::Relaxed);
-            debug_assert_ne!(
-                node.timestamp.load(Ordering::Relaxed),
-                RenderMoment::uninit()
-            );
-            node.timestamp
-                .store(RenderMoment::uninit(), Ordering::Relaxed);
-        }
-        data.free_list.push(left_sibling);
-    }
-
     // const RECLAIM_SCALE: Real = Real::try_from_f64(1.0 / 1000.0).unwrap();
     // const RECLAIM_SCALE: Real = Real::try_from_f64(1.0 / 100.0).unwrap();
 
@@ -481,85 +386,41 @@ impl Tree {
             depth
         }
 
-        // /// checks if max_height implies that we can't reclaim any node.
-        // fn can_retire_any(tree: &Tree, reclaim_rad: Real) -> bool {
-        //     // find the deepest leaf
-        //     let mut handle = tree.root;
-        //     while let Some(left_child) = tree.alloc.get(handle).left_child.load(Ordering::SeqCst) {
-        //         let node = tree.alloc.get(handle);
-        //         let dom = unsafe { node.dom() };
-        //         if dom.rad() <= reclaim_rad {
-        //             return false;
-        //         }
-        //         let best_offset = (0..4)
-        //             .max_by_key(|&i| {
-        //                 tree.alloc
-        //                     .get(left_child.siblings_offset(i))
-        //                     .max_height
-        //                     .load(Ordering::SeqCst)
-        //             })
-        //             .unwrap();
-        //         handle = left_child.siblings_offset(best_offset);
-        //     }
-
-        //     let node = tree.alloc.get(handle);
-        //     let dom = unsafe { node.dom() };
-        //     dom.rad() <= reclaim_rad
-        // }
-
-        // if !can_retire_any(self, reclaim_rad) {
-        //     return None;
-        // }
-
-        // /// returns the depth of the deepest leaf
-        // /// st
-        // /// returns `None` if there are no such leafs.
-        // #[cfg_attr(feature = "profiling", inline(never))]
-        // fn depth_of_deepest_leaf(
-        //     tree: &Tree,
-        //     window: Window,
-        //     reclaim_rad: Option<Real>,
-        //     data: &mut ThreadData,
-        // ) -> Option<u16> {
-        // }
-
         /// returns the parent of the sibling group to retire.
-        /// selects the deepest internal node.
-        /// must have radius smaller than `RECLAIM_SCALE * window.real_rad()`.
-        /// for now, select the first node we find that's small enough.
-        // for now just do the same thing as refine to detect bugs?
-        // TODO: return an iter over all such nodes
-        // TODO: max_height
+        /// must have depth at least `needed_depth`.
         #[cfg_attr(feature = "profiling", inline(never))]
-        fn select(tree: &Tree, needed_depth: u16, data: &mut ThreadData) -> Option<NodeHandle> {
+        fn select(
+            tree: &Tree,
+            needed_depth: u16,
+            data: &mut ThreadData,
+        ) -> impl Iterator<Item = NodeHandle> {
             let stack = &mut data.vec_handle_u16;
             stack.clear();
             stack.push((tree.root, 0));
-            while let Some((handle, depth)) = stack.pop() {
-                let node = tree.alloc.get(handle);
-                let max_height = node.max_height.load(Ordering::SeqCst);
-                let deepest_descendant_leaf_depth = max_height + depth;
-                if deepest_descendant_leaf_depth < needed_depth {
-                    continue;
-                }
+            std::iter::from_fn(move || {
+                while let Some((handle, depth)) = stack.pop() {
+                    let node = tree.alloc.get(handle);
 
-                // if node.max_height.load(Ordering::SeqCst) < needed_depth {
-                //     continue;
-                // }
-                if let Some(child_handle) = node.left_child.load(Ordering::SeqCst) {
-                    // let dom = unsafe { node.dom() };
-                    if depth >= needed_depth {
-                        return Some(handle);
-                        // if handle != tree.root {
-                        //     return Some(handle);
-                        // } else {
-                        //     continue;
-                        // }
+                    let max_height = node.max_height.load(Ordering::SeqCst);
+                    let deepest_descendant_leaf_depth = max_height + depth;
+                    if deepest_descendant_leaf_depth < needed_depth {
+                        continue;
                     }
-                    stack.extend(child_handle.siblings().map(|c| (c, depth + 1)));
+
+                    if let Some(child_handle) = node.left_child.load(Ordering::SeqCst) {
+                        if depth >= needed_depth {
+                            return Some(handle);
+                            // if we fail to retire this node,
+                            // don't explore its children
+                            // because those will get reclaimed with the node by a different thread.
+                            // it's still correct, but it's wasted work.
+                        } else {
+                            stack.extend(child_handle.siblings().map(|c| (c, depth + 1)));
+                        }
+                    }
                 }
-            }
-            None
+                None
+            })
         }
 
         #[cfg_attr(feature = "profiling", inline(never))]
@@ -567,7 +428,7 @@ impl Tree {
             // TODO: weaken orderings
             loop {
                 let node = tree.alloc.get(node_handle);
-                let old = node.timestamp.load(Ordering::SeqCst);
+                let mut old = node.timestamp.load(Ordering::SeqCst);
 
                 if old >= now {
                     // this node doesn't need to be updated.
@@ -576,7 +437,7 @@ impl Tree {
                     break;
                 }
 
-                // TODO: fetch_max?
+                // this is basically a fetch_max
                 loop {
                     match node.timestamp.compare_exchange_weak(
                         old,
@@ -598,6 +459,7 @@ impl Tree {
                                 // but their timestamp is older.
                                 // also `compare_exchange_weak` can spuriously fail.
                                 // in both cases, we should retry.
+                                old = current;
                             }
                         }
                     }
@@ -609,52 +471,6 @@ impl Tree {
                 node_handle = parent_handle;
             }
         }
-
-        // // at this point, the node is a leaf (unless someone split it in this small window)
-        // // update heights
-        // // TODO: don't use parent pointers
-        // #[cfg_attr(feature = "profiling", inline(never))]
-        // fn update_ancestors_height(tree: &Tree, mut node_handle: NodeHandle4) {
-        //     // let mut node_handle = node_handle.left_sibling();
-
-        //     loop {
-        //         let node = tree.alloc.get(node_handle.into());
-        //         let Some(parent) = (unsafe { node.parent() }) else {
-        //             break;
-        //         };
-        //         let parent_node = tree.alloc.get(parent);
-
-        //         let min_height = node_handle
-        //             .siblings()
-        //             .map(|sibling_handle| {
-        //                 tree.alloc
-        //                     .get(sibling_handle)
-        //                     .min_height
-        //                     .load(Ordering::SeqCst)
-        //             })
-        //             .iter()
-        //             .min()
-        //             .unwrap()
-        //             + 1;
-        //         parent_node.min_height.store(min_height, Ordering::SeqCst);
-
-        //         let max_height = node_handle
-        //             .siblings()
-        //             .map(|sibling_handle| {
-        //                 tree.alloc
-        //                     .get(sibling_handle)
-        //                     .max_height
-        //                     .load(Ordering::SeqCst)
-        //             })
-        //             .iter()
-        //             .max()
-        //             .unwrap()
-        //             + 1;
-        //         parent_node.max_height.store(max_height, Ordering::SeqCst);
-
-        //         node_handle = parent.left_sibling();
-        //     }
-        // }
 
         let Some(reclaim_scale) =
             Real::try_from_f64(1.0 / RECLAIM_MAX_WIDTH.load(Ordering::SeqCst) as f64)
@@ -673,73 +489,68 @@ impl Tree {
         let required_depth = depth_needed_for_rad(self, reclaim_rad);
         // let reclaim_rad = ();
 
-        // let node_handle = select(self, target_rad, data)?;
-        let Some(node_handle) = select(self, required_depth, data) else {
-            // log!("failed to find a node to retire");
-            return None;
-        };
-        debug_assert!(
-            unsafe { self.alloc.get(node_handle).dom() }.rad() <= reclaim_rad,
-            "dom isn't small enough"
-        );
-        let Some(left_sibling) = self.retire_children_of_node(node_handle) else {
-            // log!("someone else retired the node we selected");
-            return None;
-        };
-        // log!("successfully retired a node");
+        for node_handle in select(self, required_depth, data) {
+            debug_assert!(
+                unsafe { self.alloc.get(node_handle).dom() }.rad() <= reclaim_rad,
+                "dom isn't small enough"
+            );
+            // erase the child pointer.
+            // we can't deinit the children's fields at this time
+            // because other threads can still be looking at the children,
+            // and we need their child pointers later.
+            let node = self.alloc.get(node_handle);
+            let Some(left_sibling) = node.left_child.swap(None, Ordering::SeqCst) else {
+                // log!("someone else retired the node we selected");
+                continue;
+            };
+            self.update_ancestor_heights(node_handle);
 
-        // let node = self.alloc.get(node_handle);
-
-        // // update heights
-        // {
-        //     node.min_height.store(0, Ordering::SeqCst);
-        //     node.max_height.store(0, Ordering::SeqCst);
-        //     update_ancestors_height(self, node_handle.left_sibling());
-        // }
-        self.update_ancestor_heights(node_handle);
-
-        // update timestamps
-        {
-            // node.timestamp.store(now, Ordering::SeqCst);
             update_render_timestamp(self, node_handle, now);
+
+            return Some(left_sibling);
         }
 
-        Some(left_sibling)
+        None
     }
 
-    // /// must be called on what you got from `retire` after a delay.
-    // /// retires `left`'s siblings' children.
-    // /// these children should be reclaimed after the delay.
-    // #[cfg_attr(feature = "profiling", inline(never))]
-    // pub(crate) fn retire_siblings_children(
-    //     &self,
-    //     left_sibling: NodeHandle4,
-    // ) -> impl Iterator<Item = NodeHandle4> {
-    //     left_sibling
-    //         .siblings()
-    //         .into_iter()
-    //         .filter_map(|node_handle| self.retire_children_of_node(node_handle))
-    // }
-
-    /// should be called soon after `retire_children`.
-    /// but must be called after you've consumed the iterator `retire_children` returned.
-    /// free `left`'s siblings,
+    /// reclaims the siblings and all their (accessible) descendants.
     #[cfg_attr(feature = "profiling", inline(never))]
     pub(crate) fn reclaim(&self, left_sibling: NodeHandle4, data: &mut ThreadData) {
-        // // see if immediately reclaiming the children is bad
-        {
-            let mut stack = Vec::new();
-            stack.push(left_sibling);
-            while let Some(left_sibling) = stack.pop() {
-                for sibling in left_sibling.siblings() {
-                    if let Some(left_child) = self.retire_children_of_node(sibling) {
-                        stack.push(left_child);
-                    }
+        let mut stack = Vec::new();
+        stack.push(left_sibling);
+        while let Some(left_sibling) = stack.pop() {
+            for sibling_handle in left_sibling.siblings() {
+                let sibling = self.alloc.get(sibling_handle);
+                if let Some(left_child) = sibling.left_child.swap(None, Ordering::SeqCst) {
+                    stack.push(left_child);
                 }
-                self.reclaim_node(left_sibling, data);
             }
+            reclaim_node(self, left_sibling, data);
         }
-        // self.reclaim_node(left_sibling, data);
+
+        /// deinit the fields for debugging.
+        /// any read of any sibling after this is UB.
+        #[cfg_attr(feature = "profiling", inline(never))]
+        fn reclaim_node(tree: &Tree, left_sibling: NodeHandle4, data: &mut ThreadData) {
+            for node_handle in left_sibling.siblings() {
+                let node = tree.alloc.get(node_handle);
+                unsafe {
+                    node.write_dom(Domain::uninit());
+                    node.write_parent(None);
+                }
+                node.left_child.store(None, Ordering::Relaxed);
+                node.color.store(None, Ordering::Relaxed);
+                node.min_height.store(0, Ordering::Relaxed);
+                node.max_height.store(0, Ordering::Relaxed);
+                debug_assert_ne!(
+                    node.timestamp.load(Ordering::Relaxed),
+                    RenderMoment::uninit()
+                );
+                node.timestamp
+                    .store(RenderMoment::uninit(), Ordering::Relaxed);
+            }
+            data.free_list.push(left_sibling);
+        }
     }
 
     /// returns `None` if we shouldn't/can't refine.
@@ -951,20 +762,6 @@ impl Tree {
             let leaf = tree.alloc.get(leaf_handle);
 
             let leaf_dom = unsafe { leaf.dom() };
-            // #[cfg(debug_assertions)]
-            // {
-            //     let leaf_height = leaf.height.load(Ordering::SeqCst);
-            //     let leaf_color = leaf.color.load(Ordering::SeqCst);
-            //     let leaf_left_child = leaf.left_child.load(Ordering::SeqCst);
-            // }
-
-            // // if we do this, we can skip initializing the children's dom,
-            // // but this requires an additional atomic operation,
-            // // so it's probably not worth it.
-            // if leaf_left_child.is_some() {
-            //     log!("leaf_left_child.is_some()");
-            //     continue;
-            // }
 
             // initialize the children's dom and parent
             {
@@ -1004,34 +801,6 @@ impl Tree {
                 }
             }
 
-            // // wait do we actually need to update the timestamp at this point?
-            // // we haven't filled in a color.
-            // // also update the hight when inserting instead,
-            // // not now, which is a bit incorrect,
-            // // but still fine for the heuristic we need,
-            // // and then we can remove the parent pointer.
-            // // TODO: remove
-            // tree.update_ancestors_timestamp(leaf_handle, now);
-            // tree.update_ancestors_height(left_child);
-
-            // // at this point we know that we were the ones who succeeded,
-            // // so we get to do some fun checks
-            // #[cfg(debug_assertions)]
-            // {
-            //     debug_assert_eq!(leaf_height, 0);
-            //     debug_assert!(leaf_color.is_some());
-            //     debug_assert_eq!(leaf_left_child, None);
-            // }
-
-            // TODO: see if this helps?
-            // update leaf_height
-            {
-                // // this can fail if another thread updated the cache first
-                // debug_assert_eq!(leaf.height.load(Ordering::SeqCst), 0);
-                leaf.min_height.store(1, Ordering::SeqCst);
-                leaf.max_height.store(1, Ordering::SeqCst);
-            }
-
             Some(())
         }
 
@@ -1045,8 +814,8 @@ impl Tree {
             };
             reclaim_scale.mul_checked(w.real_rad())
         });
-        // debug disabled to make more races happen
-        let reclaim_rad = None;
+        // // debug disabled to make more races happen
+        // let reclaim_rad = None;
 
         let shallowest_depth = depth_of_shallowest_leaf(self, sample_window, reclaim_rad, data)?;
         // TODO: sometimes we get into a state where refine never succeeds.
@@ -1084,20 +853,8 @@ impl Tree {
         for leaf_handle in
             leafs_in_window_at_depth(self, sample_window, reclaim_rad, shallowest_depth, data)
         {
-            // debug_attempts += 1;
-            // // filter out leafs that would be immediately reclaimed.
-            // // TODO: put this in a better spot
-            // if let Some(reclaim_rad) = reclaim_rad {
-            //     let leaf = self.alloc.get(leaf_handle);
-            //     let leaf_dom = unsafe { leaf.dom() };
-            //     if leaf_dom.rad() <= reclaim_rad {
-            //         // log!("skipping a leaf that would be immediately reclaimed");
-            //         continue;
-            //     }
-            // }
             if let Some(()) = try_split(self, leaf_handle, left_child) {
                 self.update_ancestor_heights(leaf_handle);
-                // log!("successfully split");
                 return Some(
                     left_child
                         .siblings()
@@ -1106,29 +863,6 @@ impl Tree {
             }
         }
 
-        // log!(format!(
-        //     "shallowest_depth: {}, attempts: {}",
-        //     shallowest_depth, debug_attempts
-        // ));
-        // {
-        //     let shallowest_depth_oracle =
-        //         depth_of_shallowest_leaf_oracle(self, sample_window, data)?;
-        //     log!(format!(
-        //         "shallowest depth oracle: {}, actual: {}, attempts: {}",
-        //         shallowest_depth_oracle, shallowest_depth, debug_attempts
-        //     ));
-        // }
-
-        // dbg!("failed to split");
-        // if rand::rng().random_bool(0.0001) {
-        //     dbg!("failed to split");
-        //     let shallowest_depth_oracle = depth_of_shallowest_leaf_oracle(self, window, data)?;
-        //     log!(
-        //         "oracle: {}, actual: {}",
-        //         shallowest_depth_oracle, shallowest_depth
-        //     );
-        // }
-
         data.free_list.push(left_child);
 
         None
@@ -1136,11 +870,7 @@ impl Tree {
 
     /// inserts the previously reserved sample into the node.
     /// use a point rather than a node handle to make reclaiming work.
-    /// we also update the ancestors' timestamps and heights here,
-    /// where we're traversing down anyway,
-    /// so we don't need parent pointers as we would if we did it in `refine`.
-    /// updating the heights here and not earlier is slightly incorrect,
-    /// but fine for the way we use them as a heuristic.
+    /// also updates the render timestamps of the ancestors.
     #[cfg_attr(feature = "profiling", inline(never))]
     pub(crate) fn insert(
         &self,
@@ -1149,12 +879,7 @@ impl Tree {
         now: RenderMoment,
         data: &mut ThreadData,
     ) {
-        let stack = &mut data.vec_handle;
-        stack.clear();
-
         let mut node_handle = self.root;
-        // TODO: remove stack
-        stack.push(node_handle);
         // find the node, updating timestamps on the way down.
         loop {
             let node = self.alloc.get(node_handle);
@@ -1184,104 +909,7 @@ impl Tree {
                 return;
             };
             node_handle = left_child.siblings_offset(child_offset);
-            stack.push(node_handle);
         }
-
-        // // this first debug_assert will get removed once i remove parent pointers.
-        // debug_assert_eq!(
-        //     stack.last(),
-        //     unsafe { self.alloc.get(node_handle).parent() }.as_ref(),
-        //     "the top of stack should be the parent of the node we inserted into."
-        // );
-        // {
-        //     let last = stack
-        //         .last()
-        //         .expect("this only would only happen for the root, which we never insert into.");
-        //     let node = self.alloc.get(*last);
-        //     let child_offset = unsafe { node.dom().child_offset_containing((real, imag)) };
-        //     let child_handle = node
-        //         .left_child
-        //         .load(Ordering::SeqCst)
-        //         .expect("this really should not be a leaf.")
-        //         .siblings_offset(child_offset);
-        //     let child = self.alloc.get(child_handle);
-        //     debug_assert_eq!(
-        //         unsafe { child.dom().mid() },
-        //         (real, imag),
-        //         "the top of stack should be the parent of the node we inserted into."
-        //     );
-        // }
-        #[cfg(debug_assertions)]
-        {
-            let last = stack
-                .last()
-                .expect("this only would only happen for the root, which we never insert into.");
-            debug_assert_eq!(
-                unsafe { self.alloc.get(*last).dom().mid() },
-                (real, imag),
-                "the top of stack should be the node we inserted into."
-            );
-        }
-
-        // // the node we inserted into should have had its height updated (set to 0) by `split`.
-        // stack.pop();
-        // // try updating the height anyway
-        // // if let Some(node_handle) = stack.pop() {
-        // //     let node = self.alloc.get(node_handle);
-        // //     if let Some(left_child) = node.left_child.load(Ordering::SeqCst) {
-        // //         let height = left_child
-        // //             .siblings()
-        // //             .map(|child_handle| {
-        // //                 self.alloc
-        // //                     .get(child_handle)
-        // //                     .min_height
-        // //                     .load(Ordering::SeqCst)
-        // //             })
-        // //             .iter()
-        // //             .min()
-        // //             .unwrap()
-        // //             + 1;
-        // //         node.min_height.store(height, Ordering::SeqCst);
-        // //     }
-        // // }
-
-        // // TODO: this should be in `refine` not `insert`.
-        // // update ancestor's height.
-        // // note that even if we didn't insert into a leaf, everything is fine.
-        // while let Some(node_handle) = stack.pop() {
-        //     let node = self.alloc.get(node_handle);
-        //     let left_child = node
-        //         .left_child
-        //         .load(Ordering::SeqCst)
-        //         .expect("this really should not be a leaf.");
-        //     let min_height = left_child
-        //         .siblings()
-        //         .map(|child_handle| {
-        //             self.alloc
-        //                 .get(child_handle)
-        //                 .min_height
-        //                 .load(Ordering::SeqCst)
-        //         })
-        //         .iter()
-        //         .min()
-        //         .unwrap()
-        //         + 1;
-        //     node.min_height.store(min_height, Ordering::SeqCst);
-
-        //     let max_height = left_child
-        //         .siblings()
-        //         .map(|child_handle| {
-        //             self.alloc
-        //                 .get(child_handle)
-        //                 .max_height
-        //                 .load(Ordering::SeqCst)
-        //         })
-        //         .iter()
-        //         .max()
-        //         .unwrap()
-        //         + 1;
-        //     node.max_height.store(max_height, Ordering::SeqCst);
-        // }
     }
 
     #[cfg_attr(feature = "profiling", inline(never))]
@@ -1339,7 +967,7 @@ impl Tree {
     /// follow the path down to the leaf containing the center of the pixel,
     /// return the color of the sample closest to the center of the pixel.
     /// returns `None` if we prove that the color hasn't changed from the last frame.
-    /// returns white if not in the trees domain
+    /// returns white if not in the trees domain.
     #[cfg_attr(feature = "profiling", inline(never))]
     pub(crate) fn color_of_pixel(
         &self,
@@ -1381,46 +1009,6 @@ impl Tree {
             .color
             .load(Ordering::Relaxed)
             .expect("root must have a color");
-        // let mut debug_closest_sample_depth = 0;
-        // let mut debug_explored_depth = 0;
-
-        // // this is incorrect btw
-        // fn should_prune(tree: &Tree, center: (Real, Imag), prev_frame_start: Moment) -> bool {
-        //     let mut node_handle = tree.root;
-
-        //     loop {
-        //         let node = tree.alloc.get(node_handle);
-        //         let dom = unsafe { node.dom() };
-
-        //         // check whether the node's timestamp proves that the color hasn't changed since the last frame
-        //         {
-        //             let timestamp = node.timestamp.load(Ordering::Relaxed);
-        //             // TODO: <=?
-        //             if timestamp < prev_frame_start {
-        //                 return true;
-        //             }
-        //         }
-
-        //         // i++
-        //         {
-        //             let Some(left_child) = node.left_child.load(Ordering::Relaxed) else {
-        //                 break;
-        //             };
-        //             let child_offset = dom.child_offset_containing(center);
-        //             node_handle = left_child.siblings_offset(child_offset);
-        //             // debug_explored_depth += 1;
-        //         }
-        //     }
-
-        //     false
-        // }
-
-        // if should_prune(self, center, prev_frame_start) {
-        //     let elapsed = start.elapsed();
-        //     PRUNED_ELAPSED.fetch_add(elapsed.as_nanos() as u64, Ordering::Relaxed);
-        //     PRUNED_COUNTER.fetch_add(1, Ordering::Relaxed);
-        //     return None;
-        // }
 
         loop {
             let node = self.alloc.get(node_handle);
@@ -1432,8 +1020,6 @@ impl Tree {
                 // TODO: <=?
                 if timestamp < prev_frame_start {
                     // let elapsed = start.elapsed();
-                    // PRUNED_ELAPSED.fetch_add(elapsed.as_nanos() as u64, Ordering::Relaxed);
-                    // PRUNED_COUNTER.fetch_add(1, Ordering::Relaxed);
                     return None;
                 }
             }
@@ -1461,20 +1047,10 @@ impl Tree {
                 };
                 let child_offset = dom.child_offset_containing(center);
                 node_handle = left_child.siblings_offset(child_offset);
-                // debug_explored_depth += 1;
             }
         }
 
-        // let elapsed = start.elapsed();
-        // UNPRUNED_ELAPSED.fetch_add(elapsed.as_nanos() as u64, Ordering::Relaxed);
-        // UNPRUNED_COUNTER.fetch_add(1, Ordering::Relaxed);
-
         Some(closest_sample_color.into())
-        // if debug_closest_sample_depth == 32 {
-        //     Some(Color32::from_rgb(255, 0, 255))
-        // } else {
-        //     Some(closest_sample_color.into())
-        // }
     }
 }
 
@@ -1494,6 +1070,8 @@ pub(crate) struct ThreadData {
     /// for various stacks (and perhaps queues).
     /// should be cleared before use, but not when done.
     vec_handle_u16: Vec<(NodeHandle, u16)>,
+    // /// should be cleared before use, but not when done.
+    // deque_handle_u16: VecDeque<(NodeHandle, u16)>,
 }
 
 use rbg::*;
@@ -1746,19 +1324,15 @@ mod alloc {
     #[derive(Debug)]
     pub(super) struct Block {
         /// not wrapped in `UnsafeCell` because we don't actually write to the nodes, only their fields.
-        // TODO: this should be `[MaybeUninit<Node>; CAPACITY]`
-        // TODO: we should be able to free blocks so we can use caching on mandelbrots.
+        // TODO: maybe this should be `[MaybeUninit<Node>; CAPACITY]`
         // TODO: should i be using `Pin` somewhere?
+        // TODO: we should be able to free blocks so we can use caching on mandelbrots.
         mem: [Node; Self::CAPACITY],
         foot: BlockFooter,
     }
     const _: () = assert!(size_of::<Block>() == Block::SIZE);
     const _: () = assert!(align_of::<Block>() == Block::SIZE);
     impl Block {
-        // small size to force more reallocation for testing
-        // actually i also need to change the bitfield in `NodeHandle` for this
-        // const SIZE: usize = 128;
-        // const SIZE: usize = 256;
         const SIZE: usize = 4096;
         const CAPACITY: usize = (Self::SIZE - size_of::<BlockFooter>()) / size_of::<Node>();
 
@@ -1820,27 +1394,9 @@ mod alloc {
             }
         }
 
-        // #[cfg_attr(feature = "profiling", inline(never))]
-        // fn alloc<const N: usize>(&self, data: &mut ThreadData) -> NodeHandle {
-        //     // loop bc it's technically possible that after reallocating
-        //     // or during waiting for another thread to reallocate,
-        //     // we go to sleep and the new block fills up.
-        //     loop {
-        //         let last = unsafe { self.last.load(Ordering::SeqCst).as_ref().unwrap() };
-        //         let len = last.foot.len.fetch_add(N, Ordering::SeqCst);
-        //         if len + N <= Block::CAPACITY {
-        //             return NodeHandle::new(last.into(), len);
-        //         }
-        //         // we could say that whoever got len == Block::CAPACITY is responsible for reallocating,
-        //         // but what if that thread went to sleep during reallocation?
-        //         // so just have all the threads realloc
-        //         self.realloc(last.into(), data);
-        //     }
-        // }
-
         #[cfg_attr(feature = "profiling", inline(never))]
         pub(super) fn alloc4(&self, data: &mut ThreadData) -> NodeHandle4 {
-            // loop bc it's technically possible that after reallocating
+            // loop bc it's possible that after reallocating
             // or during waiting for another thread to reallocate,
             // we go to sleep and the new block fills up.
             loop {
@@ -1923,12 +1479,10 @@ mod moment {
     }
 }
 
-// // TODO: once we factor drawing into tree.rs, this should become private
 // /// represents the average of `count` colors
 // #[derive(Debug, Default, Clone)]
 // #[repr(align(32))]
 // pub(crate) struct ColorBuilder {
-//     // count: NonZero<u32>,
 //     count: u32,
 //     r: u32,
 //     g: u32,
@@ -1981,45 +1535,5 @@ mod moment {
 //             ret += c;
 //         }
 //         ret
-//     }
-// }
-
-// #[derive(Debug, Default, Clone, Copy)]
-// struct Trace {
-//     depth: u8,
-//     real_bits: u64,
-//     imag_bits: u64,
-// }
-// impl Trace {
-//     fn top_right(self) -> Self {
-//         Self {
-//             depth: self.depth + 1,
-//             real_bits: self.real_bits << 1,
-//             imag_bits: self.imag_bits << 1,
-//         }
-//     }
-
-//     fn top_left(self) -> Self {
-//         Self {
-//             depth: self.depth + 1,
-//             real_bits: self.real_bits << 1 | 1,
-//             imag_bits: self.imag_bits << 1,
-//         }
-//     }
-
-//     fn bot_right(self) -> Self {
-//         Self {
-//             depth: self.depth + 1,
-//             real_bits: self.real_bits << 1,
-//             imag_bits: self.imag_bits << 1 | 1,
-//         }
-//     }
-
-//     fn bot_left(self) -> Self {
-//         Self {
-//             depth: self.depth + 1,
-//             real_bits: self.real_bits << 1 | 1,
-//             imag_bits: self.imag_bits << 1 | 1,
-//         }
 //     }
 // }
