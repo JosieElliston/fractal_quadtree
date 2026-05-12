@@ -2,7 +2,7 @@ use std::{
     cell::UnsafeCell,
     num::NonZeroU32,
     ptr::NonNull,
-    sync::atomic::{AtomicU16, AtomicUsize, Ordering},
+    sync::atomic::{AtomicU16, AtomicUsize, Ordering, fence},
 };
 
 use atomic::Atomic;
@@ -47,7 +47,11 @@ struct Node {
     // we could avoid that by putting a tag on left_child that
     // prevents other threads from following it, but whatever.
     // this would also prevent us from splitting uncolored nodes.
+    /// this never participates in the synchronizes-with relation,
+    /// we only need atomicity for load/store,
+    /// and which are therefore `Relaxed`.
     color: Atomic<Option<Rgb>>,
+    // TODO: store depth instead of height?
     /// distance to the closest descendant leaf.
     /// 0 if we're a leaf, else 1 + min(c.min_height for c in children).
     /// this is used in `refine` to find the shallowest leafs.
@@ -154,6 +158,9 @@ impl Tree {
         root.timestamp
             .store(RenderMoment::default(), Ordering::Relaxed);
 
+        // TODO: do i need a fence?
+        // fence(Ordering::Release);
+
         Self {
             dom,
             alloc,
@@ -173,6 +180,53 @@ impl Tree {
             count += 1;
             if let Some(child_handle) = self.alloc.get(handle).left_child.load(Ordering::SeqCst) {
                 stack.extend(child_handle.siblings());
+                // debug heights
+                // min_height
+                #[cfg(false)]
+                {
+                    let min_height = self.alloc.get(handle).min_height.load(Ordering::SeqCst);
+                    let oracle_min_height = child_handle
+                        .siblings()
+                        .map(|child_handle| {
+                            self.alloc
+                                .get(child_handle)
+                                .min_height
+                                .load(Ordering::SeqCst)
+                        })
+                        .iter()
+                        .min()
+                        .unwrap()
+                        + 1;
+                    if min_height != oracle_min_height {
+                        log!(format!(
+                            "node {:?} has min_height {}, but oracle min_height is {}",
+                            handle, min_height, oracle_min_height
+                        ));
+                    }
+                }
+                // max_height
+                #[cfg(false)]
+                {
+                    let max_height = self.alloc.get(handle).max_height.load(Ordering::SeqCst);
+                    let oracle_max_height = child_handle
+                        .siblings()
+                        .map(|child_handle| {
+                            self.alloc
+                                .get(child_handle)
+                                .max_height
+                                .load(Ordering::SeqCst)
+                        })
+                        .iter()
+                        .max()
+                        .unwrap()
+                        + 1;
+                    if max_height != oracle_max_height {
+                        log!(format!(
+                            "node {:?} has max_height {}, but oracle max_height is {}",
+                            handle, max_height, oracle_max_height
+                        ));
+                    }
+                }
             }
         }
         count
@@ -246,6 +300,127 @@ impl Tree {
     //     }
     // }
 
+    /// updates the `min_height` and `max_height` of `node_handle` and all its ancestors.
+    fn update_ancestor_heights(&self, mut node_handle: NodeHandle) {
+        loop {
+            let node = self.alloc.get(node_handle);
+            update_min_height(self, node);
+            update_max_height(self, node);
+            let Some(parent_handle) = (unsafe { node.parent() }) else {
+                return;
+            };
+            node_handle = parent_handle;
+        }
+
+        fn update_min_height(tree: &Tree, node: &Node) {
+            loop {
+                let old_min_height = node.min_height.load(Ordering::SeqCst);
+
+                // ensure we see updates to node's heights before we look at whether we still have children.
+                // this allows us to (TODO: ) weaken orderings of the loads.
+                fence(Ordering::SeqCst);
+
+                let new_min_height = match node.left_child.load(Ordering::SeqCst) {
+                    Some(left_child) => {
+                        left_child
+                            .siblings()
+                            .into_iter()
+                            .map(|child_handle| {
+                                tree.alloc
+                                    .get(child_handle)
+                                    .min_height
+                                    .load(Ordering::SeqCst)
+                            })
+                            .min()
+                            .unwrap()
+                            + 1
+                    }
+                    None => {
+                        // our children got reclaimed,
+                        // but we still need to update the height.
+                        0
+                    }
+                };
+
+                match node.min_height.compare_exchange(
+                    old_min_height,
+                    new_min_height,
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                ) {
+                    Ok(current) => {
+                        assert_eq!(current, old_min_height);
+                        break;
+                    }
+                    Err(current) => {
+                        assert_ne!(
+                            current, old_min_height,
+                            "hopefully guaranteed by `compare_exchange` not being weak"
+                        );
+                        // someone else updated the height,
+                        // but they may have not seen our updates to the children,
+                        // so we must retry.
+                        continue;
+                    }
+                }
+            }
+        }
+
+        fn update_max_height(tree: &Tree, node: &Node) {
+            loop {
+                let old_max_height = node.max_height.load(Ordering::SeqCst);
+
+                // ensure we see updates to node's heights before we look at whether we still have children.
+                // this allows us to (TODO: ) weaken orderings of the loads.
+                fence(Ordering::SeqCst);
+
+                let new_max_height = match node.left_child.load(Ordering::SeqCst) {
+                    Some(left_child) => {
+                        left_child
+                            .siblings()
+                            .into_iter()
+                            .map(|child_handle| {
+                                tree.alloc
+                                    .get(child_handle)
+                                    .max_height
+                                    .load(Ordering::SeqCst)
+                            })
+                            .max()
+                            .unwrap()
+                            + 1
+                    }
+                    None => {
+                        // our children got reclaimed,
+                        // but we still need to update the height.
+                        0
+                    }
+                };
+
+                match node.max_height.compare_exchange(
+                    old_max_height,
+                    new_max_height,
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                ) {
+                    Ok(current) => {
+                        assert_eq!(current, old_max_height);
+                        break;
+                    }
+                    Err(current) => {
+                        assert_ne!(
+                            current, old_max_height,
+                            "hopefully guaranteed by `compare_exchange` not being weak"
+                        );
+                        // someone else updated the height,
+                        // but they may have not seen our updates to the children,
+                        // so we must retry.
+                        continue;
+                    }
+                }
+            }
+        }
+    }
+
     /// erase the child pointer and return the children.
     /// we can't deinit the children's fields at this time
     /// because other threads can still be looking at the children,
@@ -284,9 +459,10 @@ impl Tree {
     // const RECLAIM_SCALE: Real = Real::try_from_f64(1.0 / 1000.0).unwrap();
     // const RECLAIM_SCALE: Real = Real::try_from_f64(1.0 / 100.0).unwrap();
 
-    /// selects a node to retire, and retires its children.
+    /// selects and retires a group of siblings.
     /// returns `None` if we shouldn't/can't retire.
-    /// must not call `reclaim` on the returned children within two (or maybe three) frames/moments/epochs.
+    /// returns the left_sibling of the retired group, which should be eventually reclaimed.
+    /// you must not reclaim the returned siblings within two (or maybe three) frames/moments/epochs.
     /// note that we don't guarantee that the returned nodes are leafs.
     #[cfg_attr(feature = "profiling", inline(never))]
     pub(crate) fn retire(
@@ -347,10 +523,9 @@ impl Tree {
         // ) -> Option<u16> {
         // }
 
+        /// returns the parent of the sibling group to retire.
         /// selects the deepest internal node.
-        /// maybe the children should be leafs.
         /// must have radius smaller than `RECLAIM_SCALE * window.real_rad()`.
-        /// also can't be the root.
         /// for now, select the first node we find that's small enough.
         // for now just do the same thing as refine to detect bugs?
         // TODO: return an iter over all such nodes
@@ -363,8 +538,8 @@ impl Tree {
             while let Some((handle, depth)) = stack.pop() {
                 let node = tree.alloc.get(handle);
                 let max_height = node.max_height.load(Ordering::SeqCst);
-                let deepest_descended_leaf_depth = max_height + depth;
-                if deepest_descended_leaf_depth < needed_depth {
+                let deepest_descendant_leaf_depth = max_height + depth;
+                if deepest_descendant_leaf_depth < needed_depth {
                     continue;
                 }
 
@@ -374,11 +549,12 @@ impl Tree {
                 if let Some(child_handle) = node.left_child.load(Ordering::SeqCst) {
                     // let dom = unsafe { node.dom() };
                     if depth >= needed_depth {
-                        if handle != tree.root {
-                            return Some(handle);
-                        } else {
-                            continue;
-                        }
+                        return Some(handle);
+                        // if handle != tree.root {
+                        //     return Some(handle);
+                        // } else {
+                        //     continue;
+                        // }
                     }
                     stack.extend(child_handle.siblings().map(|c| (c, depth + 1)));
                 }
@@ -386,22 +562,47 @@ impl Tree {
             None
         }
 
-        // // TODO: maybe also update render timestamps?
-        // // but it just makes the image look worse.
-        // // it's still good for debugging.
         #[cfg_attr(feature = "profiling", inline(never))]
         fn update_render_timestamp(tree: &Tree, mut node_handle: NodeHandle, now: RenderMoment) {
+            // TODO: weaken orderings
             loop {
                 let node = tree.alloc.get(node_handle);
                 let old = node.timestamp.load(Ordering::SeqCst);
+
                 if old >= now {
+                    // this node doesn't need to be updated.
+                    // because timestamps are monotonically increasing as you go up the tree,
+                    // the ancestors also don't need to be updated.
                     break;
                 }
-                let _ = node
-                    .timestamp
-                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |old| {
-                        if old >= now { None } else { Some(now) }
-                    });
+
+                // TODO: fetch_max?
+                loop {
+                    match node.timestamp.compare_exchange_weak(
+                        old,
+                        now,
+                        Ordering::SeqCst,
+                        Ordering::SeqCst,
+                    ) {
+                        Ok(current) => {
+                            assert_eq!(current, old);
+                        }
+                        Err(current) => {
+                            assert!(current >= old, "timestamps are monotonically increasing");
+                            if current >= now {
+                                // someone else updated the timestamp,
+                                // and their timestamp is newer, so we should stop.
+                                break;
+                            } else {
+                                // someone else updated the timestamp,
+                                // but their timestamp is older.
+                                // also `compare_exchange_weak` can spuriously fail.
+                                // in both cases, we should retry.
+                            }
+                        }
+                    }
+                }
+
                 let Some(parent_handle) = (unsafe { node.parent() }) else {
                     break;
                 };
@@ -409,51 +610,51 @@ impl Tree {
             }
         }
 
-        // at this point, the node is a leaf (unless someone split it in this small window)
-        // update heights
-        // TODO: don't use parent pointers
-        #[cfg_attr(feature = "profiling", inline(never))]
-        fn update_ancestors_height(tree: &Tree, mut node_handle: NodeHandle4) {
-            // let mut node_handle = node_handle.left_sibling();
+        // // at this point, the node is a leaf (unless someone split it in this small window)
+        // // update heights
+        // // TODO: don't use parent pointers
+        // #[cfg_attr(feature = "profiling", inline(never))]
+        // fn update_ancestors_height(tree: &Tree, mut node_handle: NodeHandle4) {
+        //     // let mut node_handle = node_handle.left_sibling();
 
-            loop {
-                let node = tree.alloc.get(node_handle.into());
-                let Some(parent) = (unsafe { node.parent() }) else {
-                    break;
-                };
-                let parent_node = tree.alloc.get(parent);
+        //     loop {
+        //         let node = tree.alloc.get(node_handle.into());
+        //         let Some(parent) = (unsafe { node.parent() }) else {
+        //             break;
+        //         };
+        //         let parent_node = tree.alloc.get(parent);
 
-                let min_height = node_handle
-                    .siblings()
-                    .map(|sibling_handle| {
-                        tree.alloc
-                            .get(sibling_handle)
-                            .min_height
-                            .load(Ordering::SeqCst)
-                    })
-                    .iter()
-                    .min()
-                    .unwrap()
-                    + 1;
-                parent_node.min_height.store(min_height, Ordering::SeqCst);
+        //         let min_height = node_handle
+        //             .siblings()
+        //             .map(|sibling_handle| {
+        //                 tree.alloc
+        //                     .get(sibling_handle)
+        //                     .min_height
+        //                     .load(Ordering::SeqCst)
+        //             })
+        //             .iter()
+        //             .min()
+        //             .unwrap()
+        //             + 1;
+        //         parent_node.min_height.store(min_height, Ordering::SeqCst);
 
-                let max_height = node_handle
-                    .siblings()
-                    .map(|sibling_handle| {
-                        tree.alloc
-                            .get(sibling_handle)
-                            .max_height
-                            .load(Ordering::SeqCst)
-                    })
-                    .iter()
-                    .max()
-                    .unwrap()
-                    + 1;
-                parent_node.max_height.store(max_height, Ordering::SeqCst);
+        //         let max_height = node_handle
+        //             .siblings()
+        //             .map(|sibling_handle| {
+        //                 tree.alloc
+        //                     .get(sibling_handle)
+        //                     .max_height
+        //                     .load(Ordering::SeqCst)
+        //             })
+        //             .iter()
+        //             .max()
+        //             .unwrap()
+        //             + 1;
+        //         parent_node.max_height.store(max_height, Ordering::SeqCst);
 
-                node_handle = parent.left_sibling();
-            }
-        }
+        //         node_handle = parent.left_sibling();
+        //     }
+        // }
 
         let Some(reclaim_scale) =
             Real::try_from_f64(1.0 / RECLAIM_MAX_WIDTH.load(Ordering::SeqCst) as f64)
@@ -465,6 +666,7 @@ impl Tree {
             log!("window is too big/small to reclaim anything");
             return None;
         };
+        // let reclaim_rad = Fixed::from_f64(4.0);
 
         // the depth needed for a node to be small enough.
         // note that we're allowed to go deeper.
@@ -486,14 +688,15 @@ impl Tree {
         };
         // log!("successfully retired a node");
 
-        let node = self.alloc.get(node_handle);
+        // let node = self.alloc.get(node_handle);
 
-        // update heights
-        {
-            node.min_height.store(0, Ordering::SeqCst);
-            node.max_height.store(0, Ordering::SeqCst);
-            update_ancestors_height(self, node_handle.left_sibling());
-        }
+        // // update heights
+        // {
+        //     node.min_height.store(0, Ordering::SeqCst);
+        //     node.max_height.store(0, Ordering::SeqCst);
+        //     update_ancestors_height(self, node_handle.left_sibling());
+        // }
+        self.update_ancestor_heights(node_handle);
 
         // update timestamps
         {
@@ -560,6 +763,7 @@ impl Tree {
         /// returns `None` if there are no such leafs.
         /// oracle without using the cached height.
         #[cfg_attr(feature = "profiling", inline(never))]
+        #[cfg(false)]
         fn depth_of_shallowest_leaf_oracle(
             tree: &Tree,
             window: Window,
@@ -582,13 +786,13 @@ impl Tree {
                 }
                 if let Some(child_handle) = node.left_child.load(Ordering::SeqCst) {
                     // let height = node.height.load(Ordering::SeqCst);
-                    // let shallowest_descended_leaf_depth = height + depth;
-                    // if shallowest_descended_leaf_depth >= shallowest_depth {
+                    // let shallowest_descendant_leaf_depth = height + depth;
+                    // if shallowest_descendant_leaf_depth >= shallowest_depth {
                     //     continue;
                     // }
                     // if window.contains(dom) {
-                    //     if shallowest_descended_leaf_depth < shallowest_depth {
-                    //         shallowest_depth = shallowest_descended_leaf_depth;
+                    //     if shallowest_descendant_leaf_depth < shallowest_depth {
+                    //         shallowest_depth = shallowest_descendant_leaf_depth;
                     //     }
                     //     // we don't need to explore the children
                     //     continue;
@@ -668,13 +872,13 @@ impl Tree {
                             ));
                         }
                     }
-                    let shallowest_descended_leaf_depth = min_height + depth;
-                    if shallowest_descended_leaf_depth >= shallowest_depth {
+                    let shallowest_descendant_leaf_depth = min_height + depth;
+                    if shallowest_descendant_leaf_depth >= shallowest_depth {
                         continue;
                     }
                     if window.contains(dom) {
-                        if shallowest_descended_leaf_depth < shallowest_depth {
-                            shallowest_depth = shallowest_descended_leaf_depth;
+                        if shallowest_descendant_leaf_depth < shallowest_depth {
+                            shallowest_depth = shallowest_descendant_leaf_depth;
                         }
                         // we don't need to explore the children
                         continue;
@@ -787,14 +991,14 @@ impl Tree {
                 Ordering::SeqCst,
                 Ordering::SeqCst,
             ) {
-                Ok(old_left_child) => {
+                Ok(current_left_child) => {
                     // log!("swap succeeded");
-                    debug_assert_eq!(
-                        old_left_child, None,
+                    assert_eq!(
+                        current_left_child, None,
                         "this is guaranteed by compare_exchange_weak, despite it being documented incorrectly"
                     );
                 }
-                Err(_old_left_child) => {
+                Err(_current_left_child) => {
                     // log!("left_child was already `None`");
                     return None;
                 }
@@ -841,6 +1045,8 @@ impl Tree {
             };
             reclaim_scale.mul_checked(w.real_rad())
         });
+        // debug disabled to make more races happen
+        let reclaim_rad = None;
 
         let shallowest_depth = depth_of_shallowest_leaf(self, sample_window, reclaim_rad, data)?;
         // TODO: sometimes we get into a state where refine never succeeds.
@@ -890,6 +1096,7 @@ impl Tree {
             //     }
             // }
             if let Some(()) = try_split(self, leaf_handle, left_child) {
+                self.update_ancestor_heights(leaf_handle);
                 // log!("successfully split");
                 return Some(
                     left_child
@@ -946,7 +1153,9 @@ impl Tree {
         stack.clear();
 
         let mut node_handle = self.root;
+        // TODO: remove stack
         stack.push(node_handle);
+        // find the node, updating timestamps on the way down.
         loop {
             let node = self.alloc.get(node_handle);
 
@@ -958,7 +1167,7 @@ impl Tree {
                     if old >= now { None } else { Some(now) }
                 });
 
-            // break if we found it.
+            // break if we found the node.
             let dom = unsafe { node.dom() };
             if dom.mid() == (real, imag) {
                 node.color
@@ -1014,64 +1223,65 @@ impl Tree {
             );
         }
 
-        // the node we inserted into should have had its height updated (set to 0) by `split`.
-        stack.pop();
-        // try updating the height anyway
-        // if let Some(node_handle) = stack.pop() {
+        // // the node we inserted into should have had its height updated (set to 0) by `split`.
+        // stack.pop();
+        // // try updating the height anyway
+        // // if let Some(node_handle) = stack.pop() {
+        // //     let node = self.alloc.get(node_handle);
+        // //     if let Some(left_child) = node.left_child.load(Ordering::SeqCst) {
+        // //         let height = left_child
+        // //             .siblings()
+        // //             .map(|child_handle| {
+        // //                 self.alloc
+        // //                     .get(child_handle)
+        // //                     .min_height
+        // //                     .load(Ordering::SeqCst)
+        // //             })
+        // //             .iter()
+        // //             .min()
+        // //             .unwrap()
+        // //             + 1;
+        // //         node.min_height.store(height, Ordering::SeqCst);
+        // //     }
+        // // }
+
+        // // TODO: this should be in `refine` not `insert`.
+        // // update ancestor's height.
+        // // note that even if we didn't insert into a leaf, everything is fine.
+        // while let Some(node_handle) = stack.pop() {
         //     let node = self.alloc.get(node_handle);
-        //     if let Some(left_child) = node.left_child.load(Ordering::SeqCst) {
-        //         let height = left_child
-        //             .siblings()
-        //             .map(|child_handle| {
-        //                 self.alloc
-        //                     .get(child_handle)
-        //                     .min_height
-        //                     .load(Ordering::SeqCst)
-        //             })
-        //             .iter()
-        //             .min()
-        //             .unwrap()
-        //             + 1;
-        //         node.min_height.store(height, Ordering::SeqCst);
-        //     }
+        //     let left_child = node
+        //         .left_child
+        //         .load(Ordering::SeqCst)
+        //         .expect("this really should not be a leaf.");
+        //     let min_height = left_child
+        //         .siblings()
+        //         .map(|child_handle| {
+        //             self.alloc
+        //                 .get(child_handle)
+        //                 .min_height
+        //                 .load(Ordering::SeqCst)
+        //         })
+        //         .iter()
+        //         .min()
+        //         .unwrap()
+        //         + 1;
+        //     node.min_height.store(min_height, Ordering::SeqCst);
+
+        //     let max_height = left_child
+        //         .siblings()
+        //         .map(|child_handle| {
+        //             self.alloc
+        //                 .get(child_handle)
+        //                 .max_height
+        //                 .load(Ordering::SeqCst)
+        //         })
+        //         .iter()
+        //         .max()
+        //         .unwrap()
+        //         + 1;
+        //     node.max_height.store(max_height, Ordering::SeqCst);
         // }
-
-        // update ancestor's height.
-        // note that even if we didn't insert into a leaf, everything is fine.
-        while let Some(node_handle) = stack.pop() {
-            let node = self.alloc.get(node_handle);
-            let left_child = node
-                .left_child
-                .load(Ordering::SeqCst)
-                .expect("this really should not be a leaf.");
-            let min_height = left_child
-                .siblings()
-                .map(|child_handle| {
-                    self.alloc
-                        .get(child_handle)
-                        .min_height
-                        .load(Ordering::SeqCst)
-                })
-                .iter()
-                .min()
-                .unwrap()
-                + 1;
-            node.min_height.store(min_height, Ordering::SeqCst);
-
-            let max_height = left_child
-                .siblings()
-                .map(|child_handle| {
-                    self.alloc
-                        .get(child_handle)
-                        .max_height
-                        .load(Ordering::SeqCst)
-                })
-                .iter()
-                .max()
-                .unwrap()
-                + 1;
-            node.max_height.store(max_height, Ordering::SeqCst);
-        }
     }
 
     #[cfg_attr(feature = "profiling", inline(never))]
@@ -1531,11 +1741,14 @@ mod alloc {
         len: AtomicUsize,
     }
 
-    // align requires an integer literal
+    // align requires a literal, otherwise i would use `Block::SIZE`
     #[repr(C, align(4096))]
     #[derive(Debug)]
     pub(super) struct Block {
         /// not wrapped in `UnsafeCell` because we don't actually write to the nodes, only their fields.
+        // TODO: this should be `[MaybeUninit<Node>; CAPACITY]`
+        // TODO: we should be able to free blocks so we can use caching on mandelbrots.
+        // TODO: should i be using `Pin` somewhere?
         mem: [Node; Self::CAPACITY],
         foot: BlockFooter,
     }
@@ -1593,12 +1806,14 @@ mod alloc {
                 Ordering::SeqCst,
                 Ordering::SeqCst,
             ) {
-                Ok(_) => {
+                Ok(current) => {
+                    assert_eq!(current, old_last.as_ptr());
                     // successfully swapped in the new block, so we can just use it
                     // self.local_cache[thread_i] = std::ptr::null_mut();
                 }
-                Err(_actual) => {
-                    // another thread already swapped in a new block.
+                Err(_current) => {
+                    // another thread already swapped in a new block,
+                    // or we had a spurious failure.
                     // reuse the block we allocated for next time.
                     data.block = Some(NonNull::new(new_block).unwrap());
                 }

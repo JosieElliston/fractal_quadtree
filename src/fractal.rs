@@ -726,6 +726,7 @@ mod worker_thread {
                     // weird workaround, but it fixing freezing
                     // for when pausing sampling or the fractal is outside the window.
                     // except it doesn't work in release mode.
+                    // TODO: std::hint::spin_loop()
                     thread::sleep(Duration::from_millis(10));
 
                     self.local_timer.idle.insert(start.elapsed());
@@ -1024,6 +1025,7 @@ mod shared_texture {
             // {
             //     std::thread::yield_now();
             // }
+            // TODO: std::hint::spin_loop()
             while self.finish_count.load(Ordering::SeqCst) < self.texture.len() {
                 std::thread::yield_now();
             }

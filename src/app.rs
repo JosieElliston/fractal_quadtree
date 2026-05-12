@@ -703,7 +703,7 @@ impl App {
         });
 
         egui::CollapsingHeader::new("settings").default_open(true).show(ui, |ui| {
-            egui::CollapsingHeader::new("both").default_open(true).show(ui, |ui| {
+            egui::CollapsingHeader::new("both").default_open(false).show(ui, |ui| {
                 // current fractal
                 ui.horizontal(|ui| {
                     if ui
