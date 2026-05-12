@@ -430,15 +430,9 @@ mod worker_thread {
         /// alias: `to_be_reclaimed`,
         /// but this is sufficiently funnier that the unclarity is worth is.
         nursing_home: VecDeque<(ReclaimMoment, NodeHandle4)>,
-        /// accumulate updates here.
-        local_timer: MultiTimer,
-        /// use batched updates.
-        shared_timer: Arc<Mutex<MultiTimer>>,
-        last_sent: Instant,
+        timer: TimerData,
     }
     impl WorkerLocal {
-        const SHARED_TIMER_UPDATE_INTERVAL: Duration = Duration::from_millis(5);
-
         pub(super) fn new(
             shared: Shared,
             thread_i: usize,
@@ -453,9 +447,7 @@ mod worker_thread {
                 shared_reclaim_now,
                 to_be_colored: Vec::with_capacity(4),
                 nursing_home: VecDeque::new(),
-                local_timer: MultiTimer::default(),
-                shared_timer,
-                last_sent: Instant::now(),
+                timer: TimerData::new(shared_timer),
             }
         }
 
@@ -475,17 +467,26 @@ mod worker_thread {
         }
 
         #[cfg_attr(feature = "profiling", inline(never))]
-        fn try_draw(&mut self) -> Option<()> {
+        fn try_draw(&mut self) -> Result<(), &'static str> {
+            // pub(crate) struct DrawTimer {
+            //     pub(crate) would_block: Timer,
+            //     pub(crate) no_camera_map: Timer,
+            // }
+            // let start = Instant::now();
             let shared_texture = match self.shared.shared_texture.try_read() {
                 Ok(shared_texture) => shared_texture,
                 Err(TryLockError::Poisoned(_)) => panic!("shared_texture poisoned"),
                 Err(TryLockError::WouldBlock) => {
                     // the main thread is rendering
-                    return None;
+                    // self.timer.local.draw_would_block.insert(start.elapsed());
+                    return Err("shared_texture would block");
                 }
             };
             // shared_texture.camera_map() is `None` if the main thread has started but not finished rendering
-            let camera_map = shared_texture.camera_map().as_ref()?;
+            let Some(camera_map) = shared_texture.camera_map().as_ref() else {
+                // self.timer.local.draw_no_camera_map.insert(start.elapsed());
+                return Err("shared_texture.camera_map is None");
+            };
 
             // let prev_frame_start = self.shared.now.load(Ordering::SeqCst) - 1;
             // let prev_frame_start = shared_texture.prev_frame_start;
@@ -496,11 +497,11 @@ mod worker_thread {
             // TODO: these should really be counters with fetch and add
             let texture_lock_begin = shared_texture.begin_count();
             if texture_lock_begin.load(Ordering::Relaxed) >= camera_map.pixels_height() {
-                return None;
+                return Err("texture_lock_begin >= camera_map.pixels_height()");
             }
             let row = texture_lock_begin.fetch_add(1, Ordering::Acquire);
             if row >= camera_map.pixels_height() {
-                return None;
+                return Err("row >= camera_map.pixels_height()");
             }
 
             // TODO: we don't need this mutex, replace with `UnsafeCell`
@@ -576,36 +577,46 @@ mod worker_thread {
             shared_texture
                 .finish_count()
                 .fetch_add(1, Ordering::Release);
-            Some(())
+            Ok(())
         }
 
         #[cfg_attr(feature = "profiling", inline(never))]
-        fn try_retire(&mut self) -> Option<()> {
+        fn try_retire(&mut self) -> Result<(), &'static str> {
             let window = match self.shared.reclaim_window.try_read() {
-                Ok(window) => *window.as_ref()?,
+                Ok(window) => match window.as_ref() {
+                    Some(window) => *window,
+                    None => {
+                        return Err("reclaim_window is None");
+                    }
+                },
                 Err(TryLockError::Poisoned(_)) => panic!("window poisoned"),
                 Err(TryLockError::WouldBlock) => {
                     // the main thread is updating the window
-                    return None;
+                    return Err("reclaim_window would block");
                 }
             };
             // dbg!("retire");
-            let left = self.shared.tree.retire(
+            let Some(left) = self.shared.tree.retire(
                 window,
                 self.shared.render_now.load(Ordering::SeqCst),
                 &mut self.thread_data,
-            )?;
+            ) else {
+                return Err("nothing to retire");
+            };
             // dbg!("retired");
             self.nursing_home.push_back((self.local_reclaim_now, left));
-            Some(())
+            Ok(())
         }
 
         #[cfg_attr(feature = "profiling", inline(never))]
-        fn try_reclaim(&mut self) -> Option<()> {
+        fn try_reclaim(&mut self) -> Result<(), &'static str> {
             // + 3 instead of + 2 because the reclaim_moment is from the start of retire, rather than the end
-            let (_, left_sibling) = self.nursing_home.pop_front_if(|(reclaim_moment, _)| {
-                *reclaim_moment <= self.local_reclaim_now + 3
-            })?;
+            let Some((_, left_sibling)) = self
+                .nursing_home
+                .pop_front_if(|(reclaim_moment, _)| *reclaim_moment <= self.local_reclaim_now + 3)
+            else {
+                return Err("nobody old enough");
+            };
             // dbg!("reclaim");
             // for left_child in self.shared.tree.retire_siblings_children(left_sibling) {
             //     self.nursing_home
@@ -615,18 +626,23 @@ mod worker_thread {
                 .tree
                 .reclaim(left_sibling, &mut self.thread_data);
             self.shared.reclaim_counter.fetch_add(1, Ordering::Relaxed);
-            Some(())
+            Ok(())
         }
 
         // TODO: rename to try_refine
         #[cfg_attr(feature = "profiling", inline(never))]
-        fn try_split(&mut self) -> Option<()> {
+        fn try_split(&mut self) -> Result<(), &'static str> {
             let sample_window = match self.shared.sample_window.try_read() {
-                Ok(window) => *window.as_ref()?,
+                Ok(window) => match window.as_ref() {
+                    Some(window) => *window,
+                    None => {
+                        return Err("sample_window is None");
+                    }
+                },
                 Err(TryLockError::Poisoned(_)) => panic!("sample_window poisoned"),
                 Err(TryLockError::WouldBlock) => {
                     // the main thread is updating the window
-                    return None;
+                    return Err("sample_window would block");
                 }
             };
 
@@ -649,15 +665,17 @@ mod worker_thread {
             ) {
                 // dbg!("refined");
                 self.to_be_colored.extend(handles);
-                Some(())
+                Ok(())
             } else {
-                None
+                Err("nothing to refine")
             }
         }
 
         #[cfg_attr(feature = "profiling", inline(never))]
-        fn try_sample(&mut self) -> Option<()> {
-            let (real, imag) = self.to_be_colored.pop()?;
+        fn try_sample(&mut self) -> Result<(), &'static str> {
+            let Some((real, imag)) = self.to_be_colored.pop() else {
+                return Err("nothing in sample queue");
+            };
 
             // dbg!("sample");
             let color = sample::metabrot_sample::<false>(&mut None, (real, imag)).color();
@@ -669,7 +687,7 @@ mod worker_thread {
             );
             self.shared.sample_counter.fetch_add(1, Ordering::Relaxed);
 
-            Some(())
+            Ok(())
         }
 
         #[cfg_attr(feature = "profiling", inline(never))]
@@ -684,43 +702,92 @@ mod worker_thread {
                 // bc draw uses the cached value too.
                 self.update_reclaim_now();
 
-                // rendering is highest priority
-                // followed by reclaiming
-                // followed by sampling
-                // followed by retiring
-                // followed by splitting
+                // update the shared timer rarely for performance
+                if self.timer.last_sent.elapsed() >= TimerData::UPDATE_INTERVAL {
+                    self.timer.send();
+                }
 
                 // we need get an ack from each thread that they recognize the current moment for the correctness of reclaim.
                 // workers read main thread's now,
                 // if it's incremented compared to the local cache,
                 // they increment the main thread's knowledge of them.
 
-                // TODO: we also need to ensure that the stuff in `to_be_colored` hasn't been reclaimed
-                // idea: get_non_silent that's slow and increments something
-                // or maybe on insert we traverse the point?
-                // oh we could replace the handles with points and then we don't have to worry.
-                // also we can update the timestamps on the way down.
-
-                // ok what about double free?
-                // we definitely own the first level, but need to defer reclaiming their children?
-                //
-
-                let start = Instant::now();
-
                 // TODO: for debugging, do these in a random order.
                 // TODO: put functions and ui in a consistent order.
 
-                if self.try_draw().is_some() {
-                    self.local_timer.draw.insert(start.elapsed());
-                } else if self.try_sample().is_some() {
-                    self.local_timer.sample.insert(start.elapsed());
-                } else if self.try_reclaim().is_some() {
-                    self.local_timer.reclaim.insert(start.elapsed());
-                } else if self.try_retire().is_some() {
-                    self.local_timer.retire.insert(start.elapsed());
-                } else if self.try_split().is_some() {
-                    self.local_timer.split.insert(start.elapsed());
-                } else {
+                // rendering is highest priority
+                // followed by reclaiming
+                // followed by sampling
+                // followed by retiring
+                // followed by splitting
+
+                {
+                    let start = Instant::now();
+                    match self.try_draw() {
+                        Ok(_) => {
+                            self.timer.local.draw_ok.insert(start.elapsed());
+                            continue;
+                        }
+                        Err(_) => {
+                            self.timer.local.draw_err.insert(start.elapsed());
+                        }
+                    }
+                }
+
+                {
+                    let start = Instant::now();
+                    match self.try_sample() {
+                        Ok(_) => {
+                            self.timer.local.sample_ok.insert(start.elapsed());
+                            continue;
+                        }
+                        Err(_) => {
+                            self.timer.local.sample_err.insert(start.elapsed());
+                        }
+                    }
+                }
+
+                {
+                    let start = Instant::now();
+                    match self.try_reclaim() {
+                        Ok(_) => {
+                            self.timer.local.reclaim_ok.insert(start.elapsed());
+                            continue;
+                        }
+                        Err(_) => {
+                            self.timer.local.reclaim_err.insert(start.elapsed());
+                        }
+                    }
+                }
+
+                {
+                    let start = Instant::now();
+                    match self.try_retire() {
+                        Ok(_) => {
+                            self.timer.local.retire_ok.insert(start.elapsed());
+                            continue;
+                        }
+                        Err(_) => {
+                            self.timer.local.retire_err.insert(start.elapsed());
+                        }
+                    }
+                }
+
+                {
+                    let start = Instant::now();
+                    match self.try_split() {
+                        Ok(_) => {
+                            self.timer.local.split_ok.insert(start.elapsed());
+                            continue;
+                        }
+                        Err(_) => {
+                            self.timer.local.split_err.insert(start.elapsed());
+                        }
+                    }
+                }
+
+                {
+                    let start = Instant::now();
                     // dbg!("idle");
                     // thread::yield_now();
                     // weird workaround, but it fixing freezing
@@ -729,19 +796,36 @@ mod worker_thread {
                     // TODO: std::hint::spin_loop()
                     thread::sleep(Duration::from_millis(10));
 
-                    self.local_timer.idle.insert(start.elapsed());
-                }
-
-                // update the shared timer rarely for performance
-                if self.last_sent.elapsed() >= Self::SHARED_TIMER_UPDATE_INTERVAL {
-                    {
-                        let mut guard = self.shared_timer.lock().expect("shared_timer poisoned");
-                        *guard += self.local_timer;
-                    }
-                    self.local_timer.reset();
-                    self.last_sent = Instant::now();
+                    self.timer.local.idle.insert(start.elapsed());
                 }
             }
+        }
+    }
+
+    struct TimerData {
+        /// accumulate updates here.
+        local: MultiTimer,
+        /// use batched updates.
+        shared: Arc<Mutex<MultiTimer>>,
+        /// when have we last sent an update to the main thread?
+        last_sent: Instant,
+    }
+    impl TimerData {
+        const UPDATE_INTERVAL: Duration = Duration::from_millis(5);
+
+        fn new(shared: Arc<Mutex<MultiTimer>>) -> Self {
+            Self {
+                local: MultiTimer::default(),
+                shared,
+                last_sent: Instant::now(),
+            }
+        }
+
+        fn send(&mut self) {
+            let mut guard = self.shared.lock().expect("shared_timer poisoned");
+            *guard += self.local;
+            self.local.reset();
+            self.last_sent = Instant::now();
         }
     }
 }
@@ -781,9 +865,12 @@ mod timer {
                 .map(Duration::from_nanos)
         }
 
-        // pub(crate) fn time_per_iter(&self) -> Option<Duration> {
-        //     self.div(self.count)
-        // }
+        pub(crate) fn us_per_iter(&self) -> f64 {
+            match self.div_count(self.count) {
+                Some(elapsed) => elapsed.as_nanos() as f64 / 1000.0,
+                None => f64::NAN,
+            }
+        }
     }
     impl ops::AddAssign for Timer {
         fn add_assign(&mut self, rhs: Self) {
@@ -807,11 +894,16 @@ mod timer {
     /// it needs to be `Copy` for [`egui::util::History`].
     #[derive(Debug, Clone, Copy, Default)]
     pub(crate) struct MultiTimer {
-        pub(crate) draw: Timer,
-        pub(crate) sample: Timer,
-        pub(crate) reclaim: Timer,
-        pub(crate) retire: Timer,
-        pub(crate) split: Timer,
+        pub(crate) draw_ok: Timer,
+        pub(crate) draw_err: Timer,
+        pub(crate) sample_ok: Timer,
+        pub(crate) sample_err: Timer,
+        pub(crate) reclaim_ok: Timer,
+        pub(crate) reclaim_err: Timer,
+        pub(crate) retire_ok: Timer,
+        pub(crate) retire_err: Timer,
+        pub(crate) split_ok: Timer,
+        pub(crate) split_err: Timer,
         pub(crate) idle: Timer,
     }
     impl MultiTimer {
@@ -819,32 +911,54 @@ mod timer {
             *self = Self::default();
         }
 
+        fn to_array(self) -> [Timer; 11] {
+            [
+                self.draw_ok,
+                self.draw_err,
+                self.sample_ok,
+                self.sample_err,
+                self.reclaim_ok,
+                self.reclaim_err,
+                self.retire_ok,
+                self.retire_err,
+                self.split_ok,
+                self.split_err,
+                self.idle,
+            ]
+        }
+
+        fn from_array(arr: [Timer; 11]) -> Self {
+            Self {
+                draw_ok: arr[0],
+                draw_err: arr[1],
+                sample_ok: arr[2],
+                sample_err: arr[3],
+                reclaim_ok: arr[4],
+                reclaim_err: arr[5],
+                retire_ok: arr[6],
+                retire_err: arr[7],
+                split_ok: arr[8],
+                split_err: arr[9],
+                idle: arr[10],
+            }
+        }
+
         pub(crate) fn total(&self) -> Timer {
-            self.draw + self.sample + self.reclaim + self.retire + self.split + self.idle
+            self.to_array().into_iter().reduce(|a, b| a + b).unwrap()
         }
     }
     impl ops::AddAssign for MultiTimer {
         fn add_assign(&mut self, rhs: Self) {
-            self.draw += rhs.draw;
-            self.sample += rhs.sample;
-            self.reclaim += rhs.reclaim;
-            self.retire += rhs.retire;
-            self.split += rhs.split;
-            self.idle += rhs.idle;
+            *self = *self + rhs;
         }
     }
     impl ops::Add for MultiTimer {
         type Output = Self;
 
         fn add(self, rhs: Self) -> Self::Output {
-            Self {
-                draw: self.draw + rhs.draw,
-                sample: self.sample + rhs.sample,
-                reclaim: self.reclaim + rhs.reclaim,
-                retire: self.retire + rhs.retire,
-                split: self.split + rhs.split,
-                idle: self.idle + rhs.idle,
-            }
+            let lhs = self.to_array();
+            let rhs = rhs.to_array();
+            Self::from_array(std::array::from_fn(|i| lhs[i] + rhs[i]))
         }
     }
 }

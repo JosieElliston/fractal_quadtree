@@ -658,24 +658,47 @@ impl App {
                 let add_contents = |ui: &mut egui::Ui| {
                     let timer = self.timers.values().reduce(|lhs, rhs| lhs + rhs).unwrap_or_default();
 
-                    ui.label(format!("us per draw: {:.03}", timer.draw.div_count(timer.draw.count()).unwrap_or_default().as_nanos() as f64 / 1000.0));
                     ui.label(format!(
-                        "us per reclaim: {:.03}",
-                        timer.reclaim.div_count(timer.reclaim.count()).unwrap_or_default().as_nanos() as f64 / 1000.0
+                        "us per draw_ok: {:.03}",
+                        timer.draw_ok.us_per_iter(),
                     ));
                     ui.label(format!(
-                        "us per retire: {:.03}",
-                        timer.retire.div_count(timer.retire.count()).unwrap_or_default().as_nanos() as f64 / 1000.0
+                        "us per draw_err: {:.03}",
+                        timer.draw_err.us_per_iter(),
+                    ));
+                       ui.label(format!(
+                        "us per sample_ok: {:.03}",
+                        timer.sample_ok.us_per_iter(),
                     ));
                     ui.label(format!(
-                        "us per sample: {:.03}",
-                        timer.sample.div_count(timer.sample.count()).unwrap_or_default().as_nanos() as f64 / 1000.0
+                        "us per sample_err: {:.03}",
+                        timer.sample_err.us_per_iter(),
                     ));
                     ui.label(format!(
-                        "us per split: {:.03}",
-                        timer.split.div_count(timer.split.count()).unwrap_or_default().as_nanos() as f64 / 1000.0
+                        "us per reclaim_ok: {:.03}",
+                        timer.reclaim_ok.us_per_iter(),
                     ));
-                    ui.label(format!("us per idle: {:.03}", timer.idle.div_count(timer.idle.count()).unwrap_or_default().as_nanos() as f64 / 1000.0));
+                    ui.label(format!(
+                        "us per reclaim_err: {:.03}",
+                        timer.reclaim_err.us_per_iter(),
+                    ));
+                    ui.label(format!(
+                        "us per retire_ok: {:.03}",
+                        timer.retire_ok.us_per_iter(),
+                    ));
+                    ui.label(format!(
+                        "us per retire_err: {:.03}",
+                        timer.retire_err.us_per_iter(),
+                    ));
+                    ui.label(format!(
+                        "us per split_ok: {:.03}",
+                        timer.split_ok.us_per_iter(),
+                    ));
+                    ui.label(format!(
+                        "us per split_err: {:.03}",
+                        timer.split_err.us_per_iter(),
+                    ));
+                    ui.label(format!("us per idle: {:.03}", timer.idle.us_per_iter()));
 
                     // do this so the separator's size is the size of the content,
                     // rather than the full width of the parent container.
@@ -683,14 +706,14 @@ impl App {
                     ui.shrink_width_to_current();
                     ui.separator();
                     // TODO: flamegraph
-                    let total_elapsed = timer.total().elapsed();
+                    // let total_elapsed = timer.total().elapsed();
 
-                    ui.label(format!("draw portion: {:.03}", timer.draw.div_elapsed(total_elapsed)));
-                    ui.label(format!("reclaim portion: {:.03}", timer.reclaim.div_elapsed(total_elapsed)));
-                    ui.label(format!("retire portion: {:.03}", timer.retire.div_elapsed(total_elapsed)));
-                    ui.label(format!("sample portion: {:.03}", timer.sample.div_elapsed(total_elapsed)));
-                    ui.label(format!("split portion: {:.03}", timer.split.div_elapsed(total_elapsed)));
-                    ui.label(format!("idle portion: {:.03}", timer.idle.div_elapsed(total_elapsed)));
+                    // ui.label(format!("draw portion: {:.03}", timer.draw.div_elapsed(total_elapsed)));
+                    // ui.label(format!("reclaim portion: {:.03}", timer.reclaim.div_elapsed(total_elapsed)));
+                    // ui.label(format!("retire portion: {:.03}", timer.retire.div_elapsed(total_elapsed)));
+                    // ui.label(format!("sample portion: {:.03}", timer.sample.div_elapsed(total_elapsed)));
+                    // ui.label(format!("split portion: {:.03}", timer.split.div_elapsed(total_elapsed)));
+                    // ui.label(format!("idle portion: {:.03}", timer.idle.div_elapsed(total_elapsed)));
                 };
                 add_contents(ui);
                 // // we don't want to inherit the min rect from our parent
