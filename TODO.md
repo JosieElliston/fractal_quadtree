@@ -140,6 +140,8 @@
 - make {App, Fractal, Worker, Tree}::{DrawData, SampleData, ReclaimData}
 - Key::I to toggle info box
 - draw dot at z=0 for mandelbrot
+- bc this isn't a library, change `pub(crate)` -> `pub`
+- rename `node_handle` -> `handle`
 
 ## bugs
 

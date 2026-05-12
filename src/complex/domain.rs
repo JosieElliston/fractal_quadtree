@@ -1,10 +1,14 @@
 use std::fmt;
 
+use crate::tree::Offset;
+
 use super::fixed::*;
 
 /// this is not just any square,
 /// a `Domain` must be derived by splitting the default domain into four children,
 /// which ensures no rounding occurs.
+///
+/// `[real_mid - rad, real_mid + rad) x [imag_mid - rad, imag_mid + rad)`
 ///
 /// must have that rad > 0.
 // TODO: possibly we can have rad >= 0, but whatever
@@ -17,6 +21,7 @@ pub(crate) struct Domain {
 }
 impl Default for Domain {
     /// [-4, 4] x [-4, 4]
+    /// or maybe (-4, 4) x (-4, 4)
     fn default() -> Self {
         Self {
             real_mid: Fixed::ZERO,
@@ -95,8 +100,6 @@ impl Domain {
         self.rad
     }
 
-    // pub(crate) fn contains_point(self, (real, imag): (ExactReal, ExactImag)) -> bool {
-    // pub(crate) fn contains_point(self, (real, imag): (Real, Imag)) -> bool {
     #[cfg_attr(feature = "profiling", inline(never))]
     pub(crate) fn contains_point(self, (real, imag): (Real, Imag)) -> bool {
         (self.real_lo()..self.real_hi()).contains(&real)
@@ -110,11 +113,21 @@ impl Domain {
         // ) <= self.rad()
     }
 
-    /// the point must be inside the domain
+    /// the point must be inside the domain.
+    // TODO: should this fail if the child would be too small?
     #[cfg_attr(feature = "profiling", inline(never))]
-    pub(crate) fn child_offset_containing(&self, (real, imag): (Real, Imag)) -> usize {
+    pub(crate) fn child_offset_containing(&self, (real, imag): (Real, Imag)) -> Offset {
         debug_assert!(self.contains_point((real, imag)));
-        (if real < self.real_mid() { 0 } else { 1 }) + (if imag >= self.imag_mid() { 0 } else { 2 })
+
+        let ret = (if real < self.real_mid() { 0 } else { 1 })
+            + (if imag >= self.imag_mid() { 0 } else { 2 });
+
+        #[cfg(debug_assertions)]
+        if let Some(children) = self.split() {
+            debug_assert!(children[ret].contains_point((real, imag)))
+        }
+
+        ret
     }
 }
 impl fmt::Display for Domain {
