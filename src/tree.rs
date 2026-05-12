@@ -315,36 +315,6 @@ impl Tree {
         }
     }
 
-    //     /// stops if we hit a node whose `dom.mid()` is the point,
-    //     /// or if it's a leaf.
-    //     ///
-    //     /// we guarantee that `ret.first() == self.root`.
-    //     fn path_down_to(
-    //         &self,
-    //         (real, imag): (Real, Imag),
-    //     ) -> impl Iterator<Item = NodeHandle> {
-    //         let mut handle = self.root;
-    //         // std::iter::once(self.root).chain
-    //         std::iter::from_fn(move ||{
-    // loop {
-    //             let node = self.alloc.get(handle);
-    //             let dom = unsafe { node.dom() };
-    //             if dom.mid() == (real, imag) {
-    //                 return None;
-    //             }
-    //             match node.left_child.load(Ordering::SeqCst) {
-    //                 Some(left_child) => {
-    //                     let child_offset = dom.child_offset_containing((real, imag));
-    //                     let child_handle = left_child.siblings_offset(child_offset);
-    //                     handle = child_handle;
-    //                 }
-    //                 None => return None,
-    //             }
-    //             return Some(handle);
-    //         }
-    //         })
-    //     }
-
     /// updates the `min_height` and `max_height` of `node_handle` and all its ancestors.
     /// accept a node handle and not just its dom.mid()
     /// bc its semantically incorrect that we should/can do this for any point.
@@ -562,32 +532,36 @@ impl Tree {
         // note we also do this in `insert`,
         // but there we're already going down the path to the node.
         #[cfg_attr(feature = "profiling", inline(never))]
-        fn update_ancestors_timestamp(
-            tree: &Tree,
-            stack: &mut Vec<NodeHandle>,
-            handle: NodeHandle,
-            now: RenderMoment,
-        ) {
-            stack.clear();
-            let _ = tree.path_down_to_point(stack, unsafe { tree.alloc.get(handle).dom().mid() });
-
-            // go bottom up so avoid trying to update our ancestors' timestamp
+        fn update_ancestors_timestamp(tree: &Tree, target_handle: NodeHandle, now: RenderMoment) {
+            // if we go bottom up, avoid trying to update our ancestors' timestamp
             // if we find out we are up to date.
+            // but this isn't faster bc you need to need to fetch the ancestors anyway
+            // when we construct the path down.
+            // so just go top down.
 
-            // TODO
-            // it's not faster to go bottom up bc then we need to fetch each node twice,
-            // but if we go top down we only need to do it once.
+            let target_mid = unsafe { tree.alloc.get(target_handle).dom().mid() };
+            let mut handle = tree.root;
+            loop {
+                let node = tree.alloc.get(handle);
 
-            for handle in stack.iter().rev() {
-                let node = tree.alloc.get(*handle);
-                match update_timestamp(node, now) {
-                    Ok(()) => continue,
-                    Err(()) => return,
+                let _ = update_timestamp(node, now);
+
+                let dom = unsafe { node.dom() };
+                if dom.mid() == target_mid {
+                    return;
+                }
+                match node.left_child.load(Ordering::SeqCst) {
+                    Some(left_child) => {
+                        let child_offset = dom.child_offset_containing(target_mid);
+                        let child_handle = left_child.siblings_offset(child_offset);
+                        handle = child_handle;
+                    }
+                    None => return,
                 }
             }
 
             // everything below this is helper function definitions
-            return;
+            // unreachable!();
 
             /// `Ok` if we updated the timestamp,
             /// in which case we should terminate.
@@ -659,7 +633,7 @@ impl Tree {
             };
 
             self.update_ancestor_heights(vec_handle, node_handle);
-            update_ancestors_timestamp(self, vec_handle, node_handle, now);
+            update_ancestors_timestamp(self, node_handle, now);
 
             return Some(left_sibling);
         }
