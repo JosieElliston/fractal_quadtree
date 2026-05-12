@@ -16,19 +16,22 @@ use crate::{
 
 /// hack to make this easy to add to the UI.
 /// the min size of a node to reclaim is `window.real_rad() / RECLAIM_MAX_WIDTH`.
-// TODO: do this correctly
-pub(crate) static RECLAIM_MAX_WIDTH: AtomicUsize = AtomicUsize::new(100);
+// TODO: do this correctly, or use a better heuristic.
+pub(crate) static RECLAIM_MAX_WIDTH: AtomicUsize = AtomicUsize::new(1000);
 
 #[repr(C, align(64))]
 #[derive(Debug)]
 struct Node {
+    /// the domain of the node.
+    /// all descendants of the node have a domain contained in this domain.
+    /// `color` is sampled at the center of the domain.
     /// `dom` doesn't need to be atomic because it's never modified after being shown to the other threads.
     /// also `Domain` too big to fit in a u64 (or u128),
     /// so `Atomic` falls back to a global lock array, which is really slow.
     dom: UnsafeCell<Domain>,
-    /// `parent` doesn't need to be atomic because it's never modified after being shown to the other threads.
     /// `None` iff we're the root.
-    // TODO: remove maybe
+    /// `parent` doesn't need to be atomic because it's never modified after being shown to the other threads.
+    // TODO: remove maybe. actually i think i need either dom or parent.
     parent: UnsafeCell<Option<NodeHandle>>,
     /// `None` iff we're a leaf.
     /// if `Some`, then we have 4 children, who are `left_child.siblings()`.
@@ -46,16 +49,19 @@ struct Node {
     /// distance to the closest descendant leaf.
     /// 0 if we're a leaf, else 1 + min(c.min_height for c in children).
     /// this is used in `refine` to find the shallowest leafs.
+    /// this is updated in `refine` and `retire`.
     min_height: AtomicU16,
     /// distance to the farthest descendant leaf.
     /// 0 if we're a leaf, else 1 + max(c.max_height for c in children).
-    /// this is used in `reclaim` to find the deepest nodes.
+    /// this is used in `retire` to find the deepest nodes.
+    /// this is updated in `refine` and `retire`.
     max_height: AtomicU16,
-    /// timestamp of the last update to this node or any of its descendants.
-    /// "update" in the sense that we need to redraw.
-    /// monotonically increasing.
-    /// parents should have a timestamp of at least their children.
-    /// and possibly parents should not have a timestamp strictly greater than any child.
+    /// timestamp of the last update to color of this node or any descendant.
+    /// monotonically increasing over (real, objective) time.
+    /// parents have a timestamp of at least their children.
+    /// this is used in `color_of_pixel` and `any_on_line_needs_redraw`
+    /// to prove that a node hasn't had its color changed since we last drew it.
+    /// this is updated in `insert` and `retire`.
     timestamp: Atomic<RenderMoment>,
     _pad: [u8; 8],
 }
@@ -401,22 +407,24 @@ impl Tree {
                 while let Some((handle, depth)) = stack.pop() {
                     let node = tree.alloc.get(handle);
 
-                    let max_height = node.max_height.load(Ordering::SeqCst);
-                    let deepest_descendant_leaf_depth = max_height + depth;
-                    if deepest_descendant_leaf_depth < needed_depth {
+                    let Some(child_handle) = node.left_child.load(Ordering::SeqCst) else {
+                        // don't explore or select leafs
                         continue;
+                    };
+
+                    if depth >= needed_depth {
+                        // if we fail to retire this node,
+                        // don't explore its children
+                        // because those will get reclaimed with the node by a different thread.
+                        // (it would still be correct, but it's wasted work)
+                        return Some(handle);
                     }
 
-                    if let Some(child_handle) = node.left_child.load(Ordering::SeqCst) {
-                        if depth >= needed_depth {
-                            return Some(handle);
-                            // if we fail to retire this node,
-                            // don't explore its children
-                            // because those will get reclaimed with the node by a different thread.
-                            // it's still correct, but it's wasted work.
-                        } else {
-                            stack.extend(child_handle.siblings().map(|c| (c, depth + 1)));
-                        }
+                    let max_height = node.max_height.load(Ordering::SeqCst);
+                    // - 1 bc it's for internal nodes, not leafs.
+                    let deepest_descendant_internal_depth = max_height + depth - 1;
+                    if deepest_descendant_internal_depth >= needed_depth {
+                        stack.extend(child_handle.siblings().map(|c| (c, depth + 1)));
                     }
                 }
                 None
@@ -424,7 +432,7 @@ impl Tree {
         }
 
         #[cfg_attr(feature = "profiling", inline(never))]
-        fn update_render_timestamp(tree: &Tree, mut node_handle: NodeHandle, now: RenderMoment) {
+        fn update_ancestors_timestamp(tree: &Tree, mut node_handle: NodeHandle, now: RenderMoment) {
             // TODO: weaken orderings
             loop {
                 let node = tree.alloc.get(node_handle);
@@ -494,6 +502,7 @@ impl Tree {
                 unsafe { self.alloc.get(node_handle).dom() }.rad() <= reclaim_rad,
                 "dom isn't small enough"
             );
+
             // erase the child pointer.
             // we can't deinit the children's fields at this time
             // because other threads can still be looking at the children,
@@ -503,9 +512,9 @@ impl Tree {
                 // log!("someone else retired the node we selected");
                 continue;
             };
-            self.update_ancestor_heights(node_handle);
 
-            update_render_timestamp(self, node_handle, now);
+            self.update_ancestor_heights(node_handle);
+            update_ancestors_timestamp(self, node_handle, now);
 
             return Some(left_sibling);
         }
@@ -1080,7 +1089,8 @@ mod rbg {
 
     use super::*;
 
-    /// basically a [`egui::Color32`] with max alpha.
+    /// basically a [`egui::Color32`] with max alpha,
+    /// so we can use `Option` niche optimization.
     /// layout is 0xFFbbggrr, ie little endian [r, g, b, 255].
     /// we could allow any nonzero alpha, but i don't use this.
     #[repr(transparent)]
@@ -1137,13 +1147,13 @@ mod alloc {
 
     const _: () = assert!(size_of::<Node>() == 64);
     const _: () = assert!(align_of::<Node>() == 64);
-    /// bits 0..6: unused (for epoch stuff maybe?)
+    /// bits 0..6: unused (for epoch stuff maybe?).
     ///
-    /// bits 6..12: index of node within the block
+    /// bits 6..12: index of node within the block.
     ///
-    /// bits 12..: block pointer (the lower bits are 0 because of alignment)
+    /// bits 12..: `Block` pointer.
     ///
-    /// bits 6..: `Node` pointer
+    /// bits 6..: `Node` pointer (due to the high alignment of `Block`).
     // TODO: we can store [Node; 4] and get two more bits in the pointer
     #[repr(transparent)]
     #[derive(Clone, Copy, PartialEq, Eq, bytemuck::NoUninit)]
@@ -1181,21 +1191,12 @@ mod alloc {
             index
         }
 
-        fn to_ptr(self) -> *mut Node {
+        fn to_ptr(self) -> NonNull<Node> {
             let ptr = self.0.get() as *mut Node;
+            debug_assert_ne!(ptr, std::ptr::null_mut());
             debug_assert_eq!(ptr as usize % size_of::<Node>(), 0);
-            ptr
+            unsafe { NonNull::new_unchecked(ptr) }
         }
-
-        // /// offsets the node index within the block by `offset`.
-        // /// should have that self is the first node in a group of 4,
-        // /// ie has greater alignment.
-        // fn offset(self, offset: usize) -> Self {
-        //     debug_assert!(offset < 4);
-        //     debug_assert_eq!(self.to_index() % 4, 0);
-        //     // could just add offset * size_of::<Node>(), but this is a bit safer
-        //     Self::new(self.to_block(), self.to_index() + offset)
-        // }
 
         /// because the root is leftmost in its group,
         /// this is actually fine to call on the root.
@@ -1252,8 +1253,7 @@ mod alloc {
             ret
         }
 
-        /// must have that self is the first node in a group of 4, ie has greater alignment.
-        /// also note that it's probably bad to call this on the root.
+        /// note that if you call this on the root, you'll get handles to uninitialized nodes.
         #[cfg_attr(feature = "profiling", inline(never))]
         pub(super) fn siblings(self) -> [NodeHandle; 4] {
             let block = self.0.to_block();
@@ -1416,7 +1416,7 @@ mod alloc {
 
         #[cfg_attr(feature = "profiling", inline(never))]
         pub(super) fn get(&self, handle: NodeHandle) -> &Node {
-            let ret = unsafe { handle.to_ptr().as_ref().unwrap() };
+            let ret = unsafe { handle.to_ptr().as_ref() };
 
             #[cfg(debug_assertions)]
             {
