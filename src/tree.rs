@@ -15,9 +15,9 @@ use crate::{
 };
 
 /// hack to make this easy to add to the UI.
-/// the min size of a node to reclaim is `window.real_rad() / RECLAIM_MAX_WIDTH`.
+/// the min size of a node to retire is `window.real_rad() / RETIRE_MAX_WIDTH`.
 // TODO: do this correctly, or use a better heuristic.
-pub(crate) static RECLAIM_MAX_WIDTH: AtomicUsize = AtomicUsize::new(1000);
+pub(crate) static RETIRE_MAX_WIDTH: AtomicUsize = AtomicUsize::new(1000);
 
 #[repr(C, align(64))]
 #[derive(Debug)]
@@ -45,7 +45,7 @@ struct Node {
     /// we only need atomicity for load/store,
     /// and which are therefore `Relaxed`.
     color: Atomic<Option<Rgb>>,
-    // TODO: store depth instead of height?
+    // TODO: store depth instead of height? tho that's annoying for splitting.
     /// distance to the closest descendant leaf.
     /// 0 if we're a leaf, else 1 + min(c.min_height for c in children).
     /// this is used in `refine` to find the shallowest leafs.
@@ -367,8 +367,17 @@ impl Tree {
         }
     }
 
-    // const RECLAIM_SCALE: Real = Real::try_from_f64(1.0 / 1000.0).unwrap();
-    // const RECLAIM_SCALE: Real = Real::try_from_f64(1.0 / 100.0).unwrap();
+    /// for a node to have rad <= reclaim_rad,
+    /// it must have depth >= ret.
+    fn depth_needed_for_rad(&self, reclaim_rad: Real) -> u16 {
+        let mut depth = 0;
+        let mut rad = self.dom.rad();
+        while rad > reclaim_rad {
+            depth += 1;
+            rad = rad.div2_exact();
+        }
+        depth
+    }
 
     /// selects and retires a group of siblings.
     /// returns `None` if we shouldn't/can't retire.
@@ -382,22 +391,12 @@ impl Tree {
         now: RenderMoment,
         data: &mut ThreadData,
     ) -> Option<NodeHandle4> {
-        fn depth_needed_for_rad(tree: &Tree, reclaim_rad: Real) -> u16 {
-            let mut depth = 0;
-            let mut rad = tree.dom.rad();
-            while rad > reclaim_rad {
-                depth += 1;
-                rad = rad.div2_exact();
-            }
-            depth
-        }
-
         /// returns the parent of the sibling group to retire.
-        /// must have depth at least `needed_depth`.
+        /// must have depth >= `retire_depth`.
         #[cfg_attr(feature = "profiling", inline(never))]
         fn select(
             tree: &Tree,
-            needed_depth: u16,
+            retire_depth: u16,
             data: &mut ThreadData,
         ) -> impl Iterator<Item = NodeHandle> {
             let stack = &mut data.vec_handle_u16;
@@ -412,7 +411,7 @@ impl Tree {
                         continue;
                     };
 
-                    if depth >= needed_depth {
+                    if depth >= retire_depth {
                         // if we fail to retire this node,
                         // don't explore its children
                         // because those will get reclaimed with the node by a different thread.
@@ -421,9 +420,9 @@ impl Tree {
                     }
 
                     let max_height = node.max_height.load(Ordering::SeqCst);
-                    // - 1 bc it's for internal nodes, not leafs.
-                    let deepest_descendant_internal_depth = max_height + depth - 1;
-                    if deepest_descendant_internal_depth >= needed_depth {
+                    let deepest_descendant_leaf_depth = max_height + depth;
+                    // > bc we need internal nodes, not leafs.
+                    if deepest_descendant_leaf_depth > retire_depth {
                         stack.extend(child_handle.siblings().map(|c| (c, depth + 1)));
                     }
                 }
@@ -481,7 +480,7 @@ impl Tree {
         }
 
         let Some(reclaim_scale) =
-            Real::try_from_f64(1.0 / RECLAIM_MAX_WIDTH.load(Ordering::SeqCst) as f64)
+            Real::try_from_f64(1.0 / RETIRE_MAX_WIDTH.load(Ordering::SeqCst) as f64)
         else {
             log!("failed to compute reclaim scale");
             return None;
@@ -494,10 +493,10 @@ impl Tree {
 
         // the depth needed for a node to be small enough.
         // note that we're allowed to go deeper.
-        let required_depth = depth_needed_for_rad(self, reclaim_rad);
+        let retire_depth = self.depth_needed_for_rad(reclaim_rad);
         // let reclaim_rad = ();
 
-        for node_handle in select(self, required_depth, data) {
+        for node_handle in select(self, retire_depth, data) {
             debug_assert!(
                 unsafe { self.alloc.get(node_handle).dom() }.rad() <= reclaim_rad,
                 "dom isn't small enough"
@@ -566,7 +565,7 @@ impl Tree {
     /// returns handles to nodes who we need to sample.
     ///
     /// to select the node, we require that it
-    /// - intersects the window
+    /// - overlaps the window
     /// - is among the shallowest such leafs
     ///
     /// we need `now` in order to initialize the timestamps of the new nodes,
@@ -579,7 +578,7 @@ impl Tree {
         now: RenderMoment,
         data: &mut ThreadData,
     ) -> Option<[(Real, Imag); 4]> {
-        /// returns the depth of the shallowest leaf that intersects the window.
+        /// returns the depth of the shallowest leaf that overlaps the window.
         /// returns `None` if there are no such leafs.
         /// oracle without using the cached height.
         #[cfg_attr(feature = "profiling", inline(never))]
@@ -640,95 +639,106 @@ impl Tree {
             }
         }
 
-        /// returns the depth of the shallowest leaf that intersects the window.
+        /// returns the depth of the shallowest leaf that overlaps the window.
         /// returns `None` if there are no such leafs.
         #[cfg_attr(feature = "profiling", inline(never))]
-        fn depth_of_shallowest_leaf(
+        fn depth_of_shallowest_leaf_overlapping_window(
             tree: &Tree,
             window: Window,
-            reclaim_rad: Option<Real>,
+            retire_depth: Option<u16>,
             data: &mut ThreadData,
         ) -> Option<u16> {
             let stack = &mut data.vec_handle_u16;
             stack.clear();
             stack.push((tree.root, 0));
-            let mut shallowest_depth = u16::MAX;
+            // this makes checks for retire_depth get subsumed by checks for shallowest_depth.
+            let initial_bound = retire_depth.unwrap_or(u16::MAX);
+            let mut shallowest_depth = initial_bound;
             while let Some((handle, depth)) = stack.pop() {
+                // quick check bc the bound may have improved since we pushed this node.
                 if depth >= shallowest_depth {
                     continue;
                 }
+
                 let node = tree.alloc.get(handle);
                 let dom = unsafe { node.dom() };
-                // TODO: instead of doing this check on pop, do it on push
-                // this also lets us do less work in the case where the domain is contained inside the window
+
+                // if we don't overlap the window,
+                // then none of our descendants can overlap the window.
                 if !window.overlaps(dom) {
                     continue;
                 }
-                if let Some(reclaim_rad) = reclaim_rad
-                    && dom.rad() <= reclaim_rad
-                {
-                    continue;
-                }
-                if let Some(child_handle) = node.left_child.load(Ordering::SeqCst) {
-                    let min_height = node.min_height.load(Ordering::SeqCst);
-                    #[cfg(false)]
-                    {
-                        let better_height = child_handle
-                            .siblings()
-                            .map(|child_handle| {
-                                tree.alloc
-                                    .get(child_handle)
-                                    .min_height
-                                    .load(Ordering::SeqCst)
-                            })
-                            .iter()
-                            .min()
-                            .unwrap()
-                            + 1;
-                        if height != better_height {
-                            log!(format!(
-                                "cached height was {}, but actual height is {}",
-                                height, better_height
-                            ));
-                        }
-                    }
-                    let shallowest_descendant_leaf_depth = min_height + depth;
-                    if shallowest_descendant_leaf_depth >= shallowest_depth {
-                        continue;
-                    }
-                    if window.contains(dom) {
-                        if shallowest_descendant_leaf_depth < shallowest_depth {
-                            shallowest_depth = shallowest_descendant_leaf_depth;
-                        }
-                        // we don't need to explore the children
-                        continue;
-                    }
 
-                    // TODO: sort to do principal variation search,
-                    // so we can find a shallow leaf faster, which lets us pune more.
-                    // we should look at the child closest to the center of the window first.
-                    // or maybe look at the child with the shallowest height.
-                    stack.extend(child_handle.siblings().map(|c| (c, depth + 1)));
-                } else {
-                    if depth < shallowest_depth {
-                        shallowest_depth = depth;
+                match node.left_child.load(Ordering::SeqCst) {
+                    Some(child_handle) => {
+                        let min_height = node.min_height.load(Ordering::SeqCst);
+                        let shallowest_descendant_leaf_depth = min_height + depth;
+
+                        // prune if no descendant leaf can improve the bound
+                        // (also subsumes the retire_depth prune since shallowest_depth <= retire_depth).
+                        if shallowest_descendant_leaf_depth >= shallowest_depth {
+                            continue;
+                        }
+
+                        // if the domain is contained in the window,
+                        // then all descendant leaves are also contained in (and therefore overlapping) the window,
+                        // so we can just used the cached depth,
+                        // and not explore the children (if any).
+                        if window.contains(dom) {
+                            if shallowest_descendant_leaf_depth < shallowest_depth {
+                                shallowest_depth = shallowest_descendant_leaf_depth;
+                            }
+                            continue;
+                        }
+
+                        #[cfg(false)]
+                        {
+                            let oracle_height = child_handle
+                                .siblings()
+                                .map(|child_handle| {
+                                    tree.alloc
+                                        .get(child_handle)
+                                        .min_height
+                                        .load(Ordering::SeqCst)
+                                })
+                                .iter()
+                                .min()
+                                .unwrap()
+                                + 1;
+                            if min_height != oracle_height {
+                                log!(format!(
+                                    "cached height was {}, but actual height is {}",
+                                    min_height, oracle_height
+                                ));
+                            }
+                        }
+
+                        // TODO: sort to do principal variation search,
+                        // so we can find a shallow leaf faster, which lets us pune more.
+                        // we should look at the child closest to the center of the window first.
+                        // or maybe look at the child with the shallowest height.
+                        stack.extend(child_handle.siblings().map(|c| (c, depth + 1)));                        
+                    }
+                    None => {
+                        if depth < shallowest_depth {
+                            shallowest_depth = depth;
+                        }
                     }
                 }
             }
 
-            if shallowest_depth == u16::MAX {
+            if shallowest_depth == initial_bound {
                 None
             } else {
                 Some(shallowest_depth)
             }
         }
 
-        /// returns an iterator over the leaves that intersect the window with the target depth.
+        /// returns an iterator over the leaves that overlap the window with the target depth.
         #[cfg_attr(feature = "profiling", inline(never))]
-        fn leafs_in_window_at_depth(
+        fn select(
             tree: &Tree,
             window: Window,
-            reclaim_rad: Option<Real>,
             shallowest_depth: u16,
             data: &mut ThreadData,
         ) -> impl Iterator<Item = NodeHandle> {
@@ -737,29 +747,40 @@ impl Tree {
             stack.push((tree.root, 0));
             std::iter::from_fn(move || {
                 while let Some((handle, depth)) = stack.pop() {
-                    if depth > shallowest_depth {
-                        continue;
-                    }
+                    debug_assert!(depth <= shallowest_depth);
+
                     let node = tree.alloc.get(handle);
                     let dom = unsafe { node.dom() };
+
+                    // if we don't overlap the window,
+                    // then none of our descendants can overlap the window.
                     if !window.overlaps(dom) {
                         continue;
                     }
-                    if let Some(reclaim_rad) = reclaim_rad
-                        && dom.rad() <= reclaim_rad
-                    {
-                        continue;
-                    }
-                    if let Some(child_handle) = node.left_child.load(Ordering::SeqCst) {
-                        let height = node.min_height.load(Ordering::SeqCst);
-                        if height + depth > shallowest_depth {
-                            continue;
+
+                    match node.left_child.load(Ordering::SeqCst) {
+                        Some(child_handle) => {
+                            let min_height = node.min_height.load(Ordering::SeqCst);
+                            // do this in case min_height is stale,
+                            // to make debug_assert!(depth <= shallowest_depth); pass.
+                            let min_height = min_height.max(1);
+                            let shallowest_descendant_leaf_depth = min_height + depth;
+
+                            // prune if no descendant leaf can have the target depth.
+                            if shallowest_descendant_leaf_depth > shallowest_depth {
+                                continue;
+                            }
+
+                            // TODO: sort to do principal variation search,
+                            // so we can find a shallow leaf faster, which lets us pune more.
+                            // we should look at the child closest to the center of the window first.
+                            // or maybe look at the child with the shallowest height.
+                            stack.extend(child_handle.siblings().map(|c| (c, depth + 1)));
                         }
-                        stack.extend(child_handle.siblings().map(|c| (c, depth + 1)));
-                    } else {
-                        if depth == shallowest_depth {
-                            // log!("found a leaf at the target depth");
-                            return Some(handle);
+                        None => {
+                            if depth == shallowest_depth {
+                                return Some(handle);
+                            }
                         }
                     }
                 }
@@ -814,19 +835,22 @@ impl Tree {
         }
 
         // used for filtering out leafs that would be immediately reclaimed.
-        let reclaim_rad = reclaim_window.and_then(|w| {
-            let Some(reclaim_scale) =
-                Real::try_from_f64(1.0 / RECLAIM_MAX_WIDTH.load(Ordering::SeqCst) as f64)
-            else {
-                log!("failed to compute reclaim scale");
-                return None;
-            };
-            reclaim_scale.mul_checked(w.real_rad())
-        });
+        let retire_depth = reclaim_window
+            .and_then(|w| {
+                let Some(reclaim_scale) =
+                    Real::try_from_f64(1.0 / RETIRE_MAX_WIDTH.load(Ordering::SeqCst) as f64)
+                else {
+                    log!("failed to compute reclaim scale");
+                    return None;
+                };
+                reclaim_scale.mul_checked(w.real_rad())
+            })
+            .map(|reclaim_rad| self.depth_needed_for_rad(reclaim_rad));
         // // debug disabled to make more races happen
         // let reclaim_rad = None;
 
-        let shallowest_depth = depth_of_shallowest_leaf(self, sample_window, reclaim_rad, data)?;
+        let shallowest_depth =
+            depth_of_shallowest_leaf_overlapping_window(self, sample_window, retire_depth, data)?;
         // TODO: sometimes we get into a state where refine never succeeds.
 
         // #[cfg(false)]
@@ -859,9 +883,7 @@ impl Tree {
         // reuse the memory we allocated for the children for the next iteration.
         // if we go through all the leafs at this depth, don't bother retrying, just return `None`.
         // let mut debug_attempts = 0;
-        for leaf_handle in
-            leafs_in_window_at_depth(self, sample_window, reclaim_rad, shallowest_depth, data)
-        {
+        for leaf_handle in select(self, sample_window, shallowest_depth, data) {
             if let Some(()) = try_split(self, leaf_handle, left_child) {
                 self.update_ancestor_heights(leaf_handle);
                 return Some(
@@ -1537,3 +1559,20 @@ mod moment {
 //         ret
 //     }
 // }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_depth_needed_for_rad() {
+        let tree = Tree::new(&mut ThreadData::default());
+        assert_eq!(tree.dom.rad(), Real::from_f64(4.0));
+        assert_eq!(tree.depth_needed_for_rad(Real::from_f64(6.0)), 0);
+        assert_eq!(tree.depth_needed_for_rad(Real::from_f64(5.0)), 0);
+        assert_eq!(tree.depth_needed_for_rad(Real::from_f64(4.0)), 0);
+        assert_eq!(tree.depth_needed_for_rad(Real::from_f64(3.0)), 1);
+        assert_eq!(tree.depth_needed_for_rad(Real::from_f64(2.0)), 1);
+        assert_eq!(tree.depth_needed_for_rad(Real::from_f64(1.0)), 2);
+    }
+}

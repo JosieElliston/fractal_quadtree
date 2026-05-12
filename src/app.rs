@@ -10,7 +10,7 @@ use crate::{
     fractal::{self, Fractal},
     log,
     sample::{self, SampleDistanceGradient, SampleLog, SampleMaybeDistance},
-    tree::RECLAIM_MAX_WIDTH,
+    tree::RETIRE_MAX_WIDTH,
 };
 
 /// fancy dynamic radius based on zoom,
@@ -58,6 +58,7 @@ pub(crate) struct App {
     global_dts: egui::util::History<f32>,
     fractal_dts: egui::util::History<f32>,
     /// the last successful reclaim tick.
+    // TODO: should this be called `retire`?
     last_reclaim_tick: Instant,
     reclaim_dts: egui::util::History<f32>,
     reclaim_counts: egui::util::History<u64>,
@@ -70,7 +71,7 @@ pub(crate) struct App {
     texture: egui::TextureHandle,
     needs_full_redraw: bool,
     sampling: bool,
-    reclaiming: bool,
+    retiring: bool,
     draw_crosshair: bool,
     current_fractal: CurrentFractal,
     control_other_camera: bool,
@@ -115,7 +116,7 @@ impl App {
             ),
             needs_full_redraw: true,
             sampling: true,
-            reclaiming: true,
+            retiring: true,
             draw_crosshair: false,
             current_fractal: CurrentFractal::Metabrot,
             control_other_camera: false,
@@ -132,7 +133,7 @@ impl App {
     /// this can't be in `show_ui` bc it needs to run even when the stats/settings panels are collapsed
     fn keybinds(&mut self, ctx: &egui::Context) {
         self.sampling ^= ctx.input(|i| i.key_pressed(Key::S));
-        self.reclaiming ^= ctx.input(|i| i.key_pressed(Key::R));
+        self.retiring ^= ctx.input(|i| i.key_pressed(Key::R));
         if ctx.input(|i| i.key_pressed(Key::N)) {
             self.current_fractal = CurrentFractal::Metabrot;
             self.needs_full_redraw = true;
@@ -803,25 +804,25 @@ impl App {
                         .on_hover_text("whether to get new samples of the metabrot. keybinding: ".to_owned() + &ctx.format_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::NONE, egui::Key::S)));
                 }
 
-                // reclaiming
+                // retiring
                 {
-                    ui.checkbox(&mut self.reclaiming, "reclaiming")
-                        .on_hover_text("whether to reclaim/free/deallocate nodes. keybinding: ".to_owned() + &ctx.format_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::NONE, egui::Key::R)));
+                    ui.checkbox(&mut self.retiring, "retiring")
+                        .on_hover_text("whether to retire/reclaim/free/deallocate nodes. keybinding: ".to_owned() + &ctx.format_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::NONE, egui::Key::R)));
                 }
 
-                // reclaim max width
+                // retire max width
                 {
-                    let mut reclaim_max_width = RECLAIM_MAX_WIDTH.load(Ordering::Relaxed) as f64;
+                    let mut retire_max_width = RETIRE_MAX_WIDTH.load(Ordering::Relaxed) as f64;
                     let r = ui
-                        .add(MyDragValue::new(egui::Label::new("reclaim max width:"), egui::DragValue::new(&mut reclaim_max_width)))
-                        .on_hover_text("nodes get reclaimed if they're smaller than window.rad / reclaim_max_width");
-                    let mut reclaim_max_width = reclaim_max_width.round() as usize;
-                    reclaim_max_width = reclaim_max_width.max(1);
+                        .add(MyDragValue::new(egui::Label::new("retire max width:"), egui::DragValue::new(&mut retire_max_width)))
+                        .on_hover_text("nodes get retired if they're smaller than window.rad / retire_max_width");
+                    let mut retire_max_width = retire_max_width.round() as usize;
+                    retire_max_width = retire_max_width.max(1);
                     if r.dragged() {
-                        reclaim_max_width = reclaim_max_width.min(10000);
+                        retire_max_width = retire_max_width.min(10000);
                     }
                     if r.changed() {
-                        RECLAIM_MAX_WIDTH.store(reclaim_max_width, Ordering::Relaxed);
+                        RETIRE_MAX_WIDTH.store(retire_max_width, Ordering::Relaxed);
                     }
                 }
             });
@@ -1024,7 +1025,7 @@ impl eframe::App for App {
                 );
 
                 // reclaiming
-                if self.reclaiming {
+                if self.retiring {
                     let window = primary_camera_map.window().unwrap_or_default();
                     let reclaim_count = self.metabrot.enable_reclaiming(window);
                     self.reclaim_counts
