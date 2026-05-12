@@ -536,11 +536,11 @@ mod worker_thread {
                             "we should short circuit earlier"
                         );
                         self.shared.tree.any_on_line_needs_redraw(
+                            &mut self.thread_data,
                             real_lo,
                             real_hi,
                             imag,
                             prev_frame_start,
-                            &mut self.thread_data,
                         )
                     };
 
@@ -553,9 +553,11 @@ mod worker_thread {
                         camera_map.pixels().nth(row).unwrap().zip(l.iter_mut())
                     {
                         *target = if let Some(pixel) = pixel {
-                            if let Some(color) =
-                                self.shared.tree.color_of_pixel(pixel, prev_frame_start)
-                            {
+                            if let Some(color) = self.shared.tree.color_of_pixel(
+                                &mut self.thread_data,
+                                pixel,
+                                prev_frame_start,
+                            ) {
                                 // i kinda with i could debug draw it red for a frame,
                                 // but that's really hard.
                                 color
@@ -595,32 +597,51 @@ mod worker_thread {
                     return Err("reclaim_window would block");
                 }
             };
-            // dbg!("retire");
             let Some(left) = self.shared.tree.retire(
+                &mut self.thread_data,
                 window,
                 self.shared.render_now.load(Ordering::SeqCst),
-                &mut self.thread_data,
             ) else {
                 return Err("nothing to retire");
             };
-            // dbg!("retired");
             self.nursing_home.push_back((self.local_reclaim_now, left));
             Ok(())
         }
 
         #[cfg_attr(feature = "profiling", inline(never))]
         fn try_reclaim(&mut self) -> Result<(), &'static str> {
+            // if !self.nursing_home.is_empty() {
+            //     dbg!(&self.nursing_home.len());
+            // }
+
+            debug_assert!(
+                self.nursing_home
+                    .iter()
+                    .zip(self.nursing_home.iter().skip(1))
+                    .all(|((moment_a, _), (moment_b, _))| moment_a <= moment_b),
+                "nursing_home should have increasing timestamps"
+            );
+
+            #[cfg(debug_assertions)]
+            if let Some((moment, _)) = self.nursing_home.front() {
+                debug_assert!(
+                    *moment <= self.local_reclaim_now,
+                    "local_reclaim_now should be increasing"
+                );
+            }
+
             // + 3 instead of + 2 because the reclaim_moment is from the start of retire, rather than the end
             let Some((_, left_sibling)) = self
                 .nursing_home
-                .pop_front_if(|(reclaim_moment, _)| *reclaim_moment <= self.local_reclaim_now + 3)
+                .pop_front_if(|(reclaim_moment, _)| *reclaim_moment + 3 <= self.local_reclaim_now)
             else {
                 return Err("nobody old enough");
             };
-            // dbg!("reclaim");
-            self.shared
-                .tree
-                .reclaim(left_sibling, &mut self.thread_data);
+            unsafe {
+                self.shared
+                    .tree
+                    .reclaim(&mut self.thread_data, left_sibling);
+            }
             self.shared.reclaim_counter.fetch_add(1, Ordering::Relaxed);
             Ok(())
         }
@@ -651,15 +672,13 @@ mod worker_thread {
                 }
             };
 
-            // dbg!("split");
             debug_assert!(self.to_be_colored.is_empty());
             if let Some(handles) = self.shared.tree.refine(
+                &mut self.thread_data,
                 sample_window,
                 reclaim_window,
                 self.shared.render_now.load(Ordering::SeqCst),
-                &mut self.thread_data,
             ) {
-                // dbg!("refined");
                 self.to_be_colored.extend(handles);
                 Ok(())
             } else {
@@ -673,13 +692,12 @@ mod worker_thread {
                 return Err("nothing in sample queue");
             };
 
-            // dbg!("sample");
             let color = sample::metabrot_sample::<false>(&mut None, (real, imag)).color();
             self.shared.tree.insert(
+                &mut self.thread_data,
                 (real, imag),
                 color,
                 self.shared.render_now.load(Ordering::SeqCst),
-                &mut self.thread_data,
             );
             self.shared.sample_counter.fetch_add(1, Ordering::Relaxed);
 
@@ -784,7 +802,6 @@ mod worker_thread {
 
                 {
                     let start = Instant::now();
-                    // dbg!("idle");
                     // thread::yield_now();
                     // weird workaround, but it fixing freezing
                     // for when pausing sampling or the fractal is outside the window.

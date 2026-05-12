@@ -44,7 +44,8 @@
 - TODO: when propagating updates for the cache fields, we need to be careful about stuff like the parent getting the max_across_children applied before the child get updated, even though that violates program order. so we should store more stuff on stack variables and not reload data. possibly i should do acquire/release on the field (rather than relaxed), but doesn't that only matter if you're trying to enforce happens-before on other variables? but i am: i'm trying to enforce happens-before with the same field but in a different struct.
     - require that tree.timestamp is seqcst with itself?
     - require that (node.timestamp, children.timestamp) is locally seqcst?
-- https://docs.rs/loom/latest/loom/
+- <https://docs.rs/loom/latest/loom/>
+- rename reclaim -> free
 
 ## optimization
 

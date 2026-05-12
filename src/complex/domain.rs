@@ -2,8 +2,11 @@ use std::fmt;
 
 use super::fixed::*;
 
-/// must have that rad > 0
-/// this is not any square, a `Domain` comes from splitting the default domain into four children
+/// this is not just any square,
+/// a `Domain` must be derived by splitting the default domain into four children,
+/// which ensures no rounding occurs.
+///
+/// must have that rad > 0.
 // TODO: possibly we can have rad >= 0, but whatever
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, bytemuck::NoUninit)]
@@ -27,45 +30,15 @@ impl Domain {
         unsafe { std::mem::zeroed() }
     }
 
-    // /// returns `None` if the radius is too small
-    // /// the caller must ensure that the stuff will maintain the invariant
-    // fn from_mid_rad(real_mid: Real, imag_mid: Imag, rad: Fixed) -> Option<Self> {
-    //     if !(rad > Fixed::ZERO) {
-    //         return None;
-    //     }
-    //     Some(Self {
-    //         real_mid,
-    //         imag_mid,
-    //         rad,
-    //     })
-    // }
-
-    // /// returns `None` if the radius would be too small
-    // /// panics if real_hi - real_lo != imag_hi - imag_lo
-    // pub(crate) fn from_lo_hi(
-    //     real_lo: ExactReal,
-    //     real_hi: ExactReal,
-    //     imag_lo: ExactImag,
-    //     imag_hi: ExactImag,
-    // ) -> Option<Self> {
-    //     if !(real_lo < real_hi && imag_lo < imag_hi) {
-    //         return None;
-    //     }
-    //     if real_hi - real_lo != imag_hi - imag_lo {
-    //         return None;
-    //     }
-    //     Some(Self {
-    //         real_mid: (real_lo + real_hi).div2_exact_checked()?,
-    //         imag_mid: (imag_lo + imag_hi).div2_exact_checked()?,
-    //         rad: (real_hi - real_lo).div2_exact_checked()?,
-    //     })
-    // }
-
-    /// returns `None` if the radius would be too small
+    /// splits the domain into four equal squares.
     ///
+    /// returns `None` if the radius would be too small.
+    ///
+    /// in the order:
+    /// ```
     /// 0 1
-    ///
     /// 2 3
+    /// ```
     pub(crate) fn split(self) -> Option<[Self; 4]> {
         let rad = self.rad().div2_exact_checked()?;
         if rad <= Fixed::ZERO {

@@ -104,7 +104,7 @@ impl App {
             global_dts: egui::util::History::new(2..1000, 0.2),
             fractal_dts: egui::util::History::new(2..1000, 0.2),
             last_reclaim_tick: Instant::now(),
-            reclaim_dts: egui::util::History::new(10..1000, 1.0),
+            reclaim_dts: egui::util::History::new(2..1000, 0.2),
             reclaim_counts: egui::util::History::new(10..1000, 1.0),
             sample_counts: egui::util::History::new(10..1000, 1.0),
             timers: egui::util::History::new(10..1000, 1.0),
