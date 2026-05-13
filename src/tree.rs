@@ -3,7 +3,7 @@ use std::{
     collections::VecDeque,
     num::NonZeroU32,
     ptr::NonNull,
-    sync::atomic::{AtomicU16, AtomicUsize, Ordering, fence},
+    sync::atomic::{AtomicBool, AtomicU16, AtomicUsize, Ordering, fence},
 };
 
 use atomic::Atomic;
@@ -19,6 +19,12 @@ use crate::{
 /// the min size of a node to retire is `window.real_rad() / RETIRE_MAX_WIDTH`.
 // TODO: do this correctly, or use a better heuristic.
 pub(crate) static RETIRE_MAX_WIDTH: AtomicUsize = AtomicUsize::new(1000);
+
+/// hack to make this easy to add to the UI.
+/// draw the uncolored nodes a special color,
+/// rather than just skipping them.
+// TODO: do this correctly
+pub(crate) static DRAW_UNCOLORED_NODES: AtomicBool = AtomicBool::new(true);
 
 #[repr(C, align(64))]
 #[derive(Debug)]
@@ -290,6 +296,7 @@ impl Tree {
     //     point: (Real, Imag),
     // ) -> Result<Vec<NodeHandle>, Vec<NodeHandle>> {
     // TODO: should accept a `NodeHandle` and not a `Complex` bc it's more semantic?
+    #[cfg_attr(feature = "profiling", inline(never))]
     fn path_down_to_point(
         &self,
         stack: &mut Vec<NodeHandle>,
@@ -318,6 +325,7 @@ impl Tree {
     /// updates the `min_height` and `max_height` of `node_handle` and all its ancestors.
     /// accept a node handle and not just its dom.mid()
     /// bc its semantically incorrect that we should/can do this for any point.
+    #[cfg_attr(feature = "profiling", inline(never))]
     fn update_ancestor_heights(&self, stack: &mut Vec<NodeHandle>, handle: NodeHandle) {
         // we must go bottom up for correctness.
         let _ = self.path_down_to_point(stack, unsafe { self.alloc.get(handle).dom().mid() });
@@ -331,6 +339,7 @@ impl Tree {
         // everything below this is helper function definitions
         return;
 
+        #[cfg_attr(feature = "profiling", inline(never))]
         fn update_min_height(tree: &Tree, node: &Node) {
             loop {
                 let old_min_height = node.min_height.load(Ordering::SeqCst);
@@ -385,6 +394,7 @@ impl Tree {
             }
         }
 
+        #[cfg_attr(feature = "profiling", inline(never))]
         fn update_max_height(tree: &Tree, node: &Node) {
             loop {
                 let old_max_height = node.max_height.load(Ordering::SeqCst);
@@ -440,8 +450,91 @@ impl Tree {
         }
     }
 
+    // note we also update timestamps in `insert`,
+    // but there we're already going down the path to the node.
+    #[cfg_attr(feature = "profiling", inline(never))]
+    fn update_ancestors_timestamp(&self, target_handle: NodeHandle, now: RenderMoment) {
+        // if we go bottom up, avoid trying to update our ancestors' timestamp
+        // if we find out we are up to date.
+        // but this isn't faster bc you need to need to fetch the ancestors anyway
+        // when we construct the path down.
+        // so just go top down.
+
+        let target_mid = unsafe { self.alloc.get(target_handle).dom().mid() };
+        let mut handle = self.root;
+        loop {
+            let node = self.alloc.get(handle);
+
+            let _ = update_timestamp(node, now);
+
+            let dom = unsafe { node.dom() };
+            if dom.mid() == target_mid {
+                return;
+            }
+            match node.left_child.load(Ordering::SeqCst) {
+                Some(left_child) => {
+                    let child_offset = dom.child_offset_containing(target_mid);
+                    let child_handle = left_child.siblings_offset(child_offset);
+                    handle = child_handle;
+                }
+                None => return,
+            }
+        }
+
+        // everything below this is helper function definitions
+        // unreachable!();
+
+        /// `Ok` if we updated the timestamp,
+        /// in which case we should terminate.
+        ///
+        /// `Err` if the timestamp was already up to date,
+        /// in which case we should continue.
+        // TODO: weaken orderings
+        #[cfg_attr(feature = "profiling", inline(never))]
+        fn update_timestamp(node: &Node, now: RenderMoment) -> Result<(), ()> {
+            let mut old = node.timestamp.load(Ordering::SeqCst);
+
+            if old >= now {
+                // this node doesn't need to be updated.
+                // because timestamps are monotonically increasing as you go up the tree,
+                // the ancestors also don't need to be updated.
+                return Err(());
+            }
+
+            // this is basically a fetch_max
+            loop {
+                match node.timestamp.compare_exchange_weak(
+                    old,
+                    now,
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                ) {
+                    Ok(current) => {
+                        assert_eq!(current, old);
+                        return Ok(());
+                    }
+                    Err(current) => {
+                        assert!(current >= old, "timestamps are monotonically increasing");
+                        if current >= now {
+                            // someone else updated the timestamp,
+                            // and their timestamp is newer, so we should stop.
+                            return Err(());
+                        } else {
+                            // someone else updated the timestamp,
+                            // but their timestamp is older.
+                            // also `compare_exchange_weak` can spuriously fail.
+                            // in both cases, we should retry.
+                            old = current;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// for a node to have rad <= retire_rad,
     /// it must have depth >= ret.
+    #[cfg_attr(feature = "profiling", inline(never))]
     fn depth_needed_for_rad(&self, retire_rad: Real) -> u16 {
         let mut depth = 0;
         let mut rad = self.dom.rad();
@@ -453,6 +546,7 @@ impl Tree {
     }
 
     /// we're allowed to retire a node if it has depth >= ret.
+    #[cfg_attr(feature = "profiling", inline(never))]
     fn depth_needed_for_window(&self, retire_window: Window) -> Result<u16, &'static str> {
         let Some(retire_scale) =
             Real::try_from_f64(1.0 / RETIRE_MAX_WIDTH.load(Ordering::SeqCst) as f64)
@@ -529,87 +623,6 @@ impl Tree {
             })
         }
 
-        // note we also do this in `insert`,
-        // but there we're already going down the path to the node.
-        #[cfg_attr(feature = "profiling", inline(never))]
-        fn update_ancestors_timestamp(tree: &Tree, target_handle: NodeHandle, now: RenderMoment) {
-            // if we go bottom up, avoid trying to update our ancestors' timestamp
-            // if we find out we are up to date.
-            // but this isn't faster bc you need to need to fetch the ancestors anyway
-            // when we construct the path down.
-            // so just go top down.
-
-            let target_mid = unsafe { tree.alloc.get(target_handle).dom().mid() };
-            let mut handle = tree.root;
-            loop {
-                let node = tree.alloc.get(handle);
-
-                let _ = update_timestamp(node, now);
-
-                let dom = unsafe { node.dom() };
-                if dom.mid() == target_mid {
-                    return;
-                }
-                match node.left_child.load(Ordering::SeqCst) {
-                    Some(left_child) => {
-                        let child_offset = dom.child_offset_containing(target_mid);
-                        let child_handle = left_child.siblings_offset(child_offset);
-                        handle = child_handle;
-                    }
-                    None => return,
-                }
-            }
-
-            // everything below this is helper function definitions
-            // unreachable!();
-
-            /// `Ok` if we updated the timestamp,
-            /// in which case we should terminate.
-            ///
-            /// `Err` if the timestamp was already up to date,
-            /// in which case we should continue.
-            // TODO: weaken orderings
-            fn update_timestamp(node: &Node, now: RenderMoment) -> Result<(), ()> {
-                let mut old = node.timestamp.load(Ordering::SeqCst);
-
-                if old >= now {
-                    // this node doesn't need to be updated.
-                    // because timestamps are monotonically increasing as you go up the tree,
-                    // the ancestors also don't need to be updated.
-                    return Err(());
-                }
-
-                // this is basically a fetch_max
-                loop {
-                    match node.timestamp.compare_exchange_weak(
-                        old,
-                        now,
-                        Ordering::SeqCst,
-                        Ordering::SeqCst,
-                    ) {
-                        Ok(current) => {
-                            assert_eq!(current, old);
-                            return Ok(());
-                        }
-                        Err(current) => {
-                            assert!(current >= old, "timestamps are monotonically increasing");
-                            if current >= now {
-                                // someone else updated the timestamp,
-                                // and their timestamp is newer, so we should stop.
-                                return Err(());
-                            } else {
-                                // someone else updated the timestamp,
-                                // but their timestamp is older.
-                                // also `compare_exchange_weak` can spuriously fail.
-                                // in both cases, we should retry.
-                                old = current;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
         let retire_depth = match self.depth_needed_for_window(window) {
             Ok(depth) => depth,
             Err(err) => {
@@ -633,7 +646,7 @@ impl Tree {
             };
 
             self.update_ancestor_heights(vec_handle, node_handle);
-            update_ancestors_timestamp(self, node_handle, now);
+            self.update_ancestors_timestamp(node_handle, now);
 
             return Some(left_sibling);
         }
@@ -928,6 +941,7 @@ impl Tree {
             })
         }
 
+        #[cfg_attr(feature = "profiling", inline(never))]
         fn try_split(tree: &Tree, leaf_handle: NodeHandle, left_child: NodeHandle4) -> Option<()> {
             let leaf = tree.alloc.get(leaf_handle);
 
@@ -1029,10 +1043,18 @@ impl Tree {
         let vec_handle = &mut data.vec_handle;
 
         let mut debug_attempts = 0;
+        let draw_uncolored_nodes = DRAW_UNCOLORED_NODES.load(Ordering::Relaxed);
         for leaf_handle in select(self, vec_handle_u16, sample_window, shallowest_depth) {
             debug_attempts += 1;
             if let Some(()) = try_split(self, leaf_handle, left_child) {
                 self.update_ancestor_heights(vec_handle, leaf_handle);
+                // this should be done in insert,
+                // but this allows us to debug draw uncolored nodes.
+                // (uncolored nodes would still sometimes get drawn,
+                // but that's just bc their timestamp got updated by someone else.)
+                if draw_uncolored_nodes {
+                    self.update_ancestors_timestamp(leaf_handle, now);
+                }
                 return Some(
                     left_child
                         .siblings()
@@ -1218,6 +1240,11 @@ impl Tree {
             .load(Ordering::Relaxed)
             .expect("root must have a color");
 
+        let uncolored_node_color = if DRAW_UNCOLORED_NODES.load(Ordering::Relaxed) {
+            Some(Rgb::new(255, 255, 0))
+        } else {
+            None
+        };
         loop {
             let node = self.alloc.get(node_handle);
             let dom = unsafe { node.dom() };
@@ -1236,11 +1263,9 @@ impl Tree {
             {
                 let dist = distance(pixel_mid, dom.mid());
                 let color = node.color.load(Ordering::Relaxed);
-                // debug color the uncolored nodes
-                const UNCOLORED_NODE_COLOR: Option<Rgb> = Some(Rgb::new(255, 255, 0));
-                // const UNCOLORED_NODE_COLOR: Option<RGB> = None;
+
                 if dist < closest_sample_dist
-                    && let Some(color) = color.or(UNCOLORED_NODE_COLOR)
+                    && let Some(color) = color.or(uncolored_node_color)
                 {
                     closest_sample_dist = dist;
                     closest_sample_color = color;

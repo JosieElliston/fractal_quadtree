@@ -10,7 +10,7 @@ use crate::{
     fractal::{self, Fractal},
     log,
     sample::{self, SampleDistanceGradient, SampleLog, SampleMaybeDistance},
-    tree::RETIRE_MAX_WIDTH,
+    tree,
 };
 
 /// fancy dynamic radius based on zoom,
@@ -774,9 +774,17 @@ impl App {
                         .on_hover_text("pan/zoom will affect the other fractal's camera. keybinding: ".to_owned() + &ctx.format_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::NONE, Key::C)));
                 }
 
-                // crosshair
+                // draw crosshair
                 {
                     ui.checkbox(&mut self.draw_crosshair, "draw crosshair").on_hover_text("draw a dot at the screen center.");
+                }
+
+                // draw uncolored nodes
+                {
+                    let mut draw_uncolored_nodes = tree::DRAW_UNCOLORED_NODES.load(Ordering::Relaxed);
+                    if ui.checkbox(&mut draw_uncolored_nodes, "draw uncolored nodes").on_hover_text("draw nodes that have been split but haven't yet been sampled in yellow. enabling this slows down refining.").changed() {
+                        tree::DRAW_UNCOLORED_NODES.store(draw_uncolored_nodes, Ordering::Relaxed);
+                    }
                 }
             });
 
@@ -812,7 +820,7 @@ impl App {
 
                 // retire max width
                 {
-                    let mut retire_max_width = RETIRE_MAX_WIDTH.load(Ordering::Relaxed) as f64;
+                    let mut retire_max_width = tree::RETIRE_MAX_WIDTH.load(Ordering::Relaxed) as f64;
                     let r = ui
                         .add(MyDragValue::new(egui::Label::new("retire max width:"), egui::DragValue::new(&mut retire_max_width)))
                         .on_hover_text("nodes get retired if they're smaller than window.rad / retire_max_width");
@@ -822,7 +830,7 @@ impl App {
                         retire_max_width = retire_max_width.min(10000);
                     }
                     if r.changed() {
-                        RETIRE_MAX_WIDTH.store(retire_max_width, Ordering::Relaxed);
+                        tree::RETIRE_MAX_WIDTH.store(retire_max_width, Ordering::Relaxed);
                     }
                 }
             });
@@ -1169,7 +1177,7 @@ impl eframe::App for App {
 
                 // area is to allow the frame to be drawn on top of the fractal
                 egui::Area::new(egui::Id::new("area"))
-                    .constrain_to(ctx.screen_rect())
+                    .constrain_to(ctx.content_rect())
                     .anchor(egui::Align2::LEFT_TOP, egui::Vec2::ZERO)
                     .show(ui.ctx(), |ui| {
                         // frame is for background

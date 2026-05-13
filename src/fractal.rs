@@ -749,6 +749,7 @@ mod worker_thread {
                 }
 
                 {
+                    // TODO: would be nice to have the timer distinguish between sampling and inserting time.
                     let start = Instant::now();
                     match self.try_sample() {
                         Ok(_) => {
