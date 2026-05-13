@@ -16,8 +16,11 @@ use crate::{
     tree::{ReclaimMoment, RenderMoment, Tree},
 };
 
+/// whether to draw pixel that weren't cached from the last frame for a frame.
+pub(crate) static DRAW_COLOR_DIFF: AtomicBool = AtomicBool::new(false);
+const DRAW_COLOR_DIFF_COLOR: Color32 = Color32::from_rgb(50, 50, 255);
+
 /// stuff shared between the main and worker threads.
-///
 pub(crate) struct Shared {
     pub(crate) tree: Tree,
     /// the main thread's current moment.
@@ -49,7 +52,7 @@ pub(crate) struct Shared {
     /// how many samples were taken since we last cleared this?
     /// for debugging / UX, not needed for the main algorithm.
     sample_counter: AtomicU64,
-    shared_texture: RwLock<SharedTexture>,
+    shared_texture_data: RwLock<SharedTextureData>,
     /// set by the main thread to ask worker threads to exit.
     kill: AtomicBool,
 }
@@ -74,10 +77,12 @@ mod main_thread {
 
     /// the main thread data.
     pub(crate) struct Fractal {
-        /// `pub` so we can use `thread_data` and `&mut tree`
+        /// `pub` so we can use `thread_data` and `&mut shared.tree`
+        pub(crate) thread_data: ThreadData,
         pub(crate) shared: Arc<Shared>,
         workers: Vec<WorkerHandle>,
-        pub(crate) thread_data: ThreadData,
+        /// we apply diffs the worker threads compute.
+        local_texture: Vec<Box<[Color32]>>,
     }
     impl Fractal {
         pub(crate) fn new() -> Self {
@@ -95,7 +100,7 @@ mod main_thread {
                 reclaim_counter: AtomicU64::new(0),
                 sample_window: RwLock::new(None),
                 sample_counter: AtomicU64::new(0),
-                shared_texture: RwLock::new(SharedTexture::default()),
+                shared_texture_data: RwLock::new(SharedTextureData::default()),
                 kill: AtomicBool::new(false),
             });
             let workers = (0..thread_count)
@@ -126,9 +131,10 @@ mod main_thread {
                 })
                 .collect();
             Self {
+                thread_data,
                 shared,
                 workers,
-                thread_data,
+                local_texture: Vec::new(),
             }
         }
 
@@ -253,9 +259,9 @@ mod main_thread {
             // acquire exclusive access to shared_texture
             // do it now instead of at each access
             // TODO: we shouldn't need to block here once i've gotten rid of `RwLock`
-            let mut shared_texture = self
+            let mut shared_texture_data = self
                 .shared
-                .shared_texture
+                .shared_texture_data
                 .write()
                 .expect("shared_texture poisoned");
             // let mut shared_texture = match self.shared_texture.try_write() {
@@ -264,7 +270,7 @@ mod main_thread {
             //     Err(TryLockError::WouldBlock) => panic!("we should have exclusive access"),
             // };
 
-            shared_texture.needs_full_redraw = needs_full_redraw;
+            shared_texture_data.needs_full_redraw = needs_full_redraw;
 
             // update render now
             {
@@ -279,14 +285,31 @@ mod main_thread {
                     .expect("we should never fail to update `now`");
             }
 
-            // resize self.texture if needed
+            // resize the textures if needed
             {
-                shared_texture.resize_if_needed(camera_map);
+                let width = camera_map.pixels_width();
+                let height = camera_map.pixels_height();
+
+                if shared_texture_data.width() != width || shared_texture_data.height() != height {
+                    shared_texture_data.resize(width, height);
+                    self.local_texture.clear();
+                    self.local_texture
+                        .resize(height, vec![Color32::MAGENTA; width].into_boxed_slice());
+                }
+            }
+
+            // reset the diff
+            {
+                for line in shared_texture_data.diff().iter() {
+                    for c in line.try_lock().unwrap().iter_mut() {
+                        *c = None;
+                    }
+                }
             }
 
             // reset the texture locks
             {
-                shared_texture.reset_locks(camera_map);
+                shared_texture_data.reset_locks(camera_map);
             }
         }
 
@@ -296,44 +319,79 @@ mod main_thread {
             // wait for all lines to finish
             {
                 self.shared
-                    .shared_texture
+                    .shared_texture_data
                     .try_read()
                     .expect("no one should be writing")
                     .block_until_finished();
             }
-            // {
-            //     // TODO: do this better
-            //     while self
-            //         .texture_lock_finish
-            //         .iter()
-            //         .find(|lock| !lock.load(Ordering::Relaxed))
-            //         .is_some()
-            //     {
-            //         std::thread::yield_now();
-            //     }
-            // }
 
-            // write to assert that we have exclusive access
+            // write to assert that we have exclusive access.
+            // this can't be `try_write` bc workers read to check if they need to render.
             // TODO: we shouldn't need to block here once i've gotten rid of `RwLock`
-            let mut shared_texture = self
+            let mut shared_texture_data = self
                 .shared
-                .shared_texture
+                .shared_texture_data
                 .write()
                 .expect("shared_texture poisoned");
-            // let mut shared_texture = match self.shared_texture.try_write() {
-            //     Ok(shared_texture) => shared_texture,
-            //     Err(TryLockError::Poisoned(_)) => panic!("shared_texture poisoned"),
-            //     Err(TryLockError::WouldBlock) => panic!("we should have exclusive access"),
-            // };
+
+            shared_texture_data.assert_finished_rendering();
 
             assert!(
-                shared_texture.camera_map().is_some(),
+                shared_texture_data.camera_map().is_some(),
                 "i should change this in the future so that a worker resets the camera, but right now that's the main thread's job"
             );
-            *shared_texture.camera_map_mut() = None;
+            *shared_texture_data.camera_map_mut() = None;
+
+            // update local_texture from the diff
+            for (texture_line, diff_line) in self
+                .local_texture
+                .iter_mut()
+                .zip(shared_texture_data.diff().iter())
+            {
+                for (texture_color, diff_color) in texture_line
+                    .iter_mut()
+                    .zip(diff_line.try_lock().unwrap().iter())
+                {
+                    if let Some(diff_color) = diff_color {
+                        *texture_color = *diff_color;
+                    }
+                }
+            }
 
             // write to the texture handle
-            shared_texture.set_texture(handle);
+            {
+                let width = shared_texture_data.width();
+                let height = shared_texture_data.height();
+                let colors = if DRAW_COLOR_DIFF.load(Ordering::Relaxed) {
+                    // map is annoying bc of the mutex,
+                    // so don't bother with iterators.
+                    let mut ret = Vec::with_capacity(width * height);
+                    for (texture_line, diff_line) in self
+                        .local_texture
+                        .iter_mut()
+                        .zip(shared_texture_data.diff().iter())
+                    {
+                        for (texture_color, diff_color) in texture_line
+                            .iter_mut()
+                            .zip(diff_line.try_lock().unwrap().iter())
+                        {
+                            ret.push(if diff_color.is_none() {
+                                *texture_color
+                            } else {
+                                DRAW_COLOR_DIFF_COLOR
+                            });
+                        }
+                    }
+                    ret
+                } else {
+                    self.local_texture
+                        .iter()
+                        .flat_map(|line| line.clone().into_vec())
+                        .collect()
+                };
+
+                set_texture(handle, [width, height], colors);
+            }
         }
     }
 
@@ -404,10 +462,10 @@ mod worker_thread {
 
     /// owned by the worker thread
     pub(super) struct WorkerData {
+        thread_data: ThreadData,
         shared: Arc<Shared>,
         /// `usize` bc [`thread::available_parallelism`] returns a `usize`.
         thread_i: usize,
-        thread_data: ThreadData,
         /// our belief of the current moment.
         /// we could instead have only `shared_now`,
         /// but then you need an extra atomic load to check if our belief is up to date.
@@ -433,9 +491,9 @@ mod worker_thread {
             shared_timer: Arc<Mutex<MultiTimer>>,
         ) -> Self {
             Self {
+                thread_data: ThreadData::default(),
                 shared,
                 thread_i,
-                thread_data: ThreadData::default(),
                 local_reclaim_now: shared_reclaim_now.load(Ordering::SeqCst),
                 shared_reclaim_now,
                 to_be_colored: Vec::with_capacity(4),
@@ -466,7 +524,7 @@ mod worker_thread {
             //     pub(crate) no_camera_map: Timer,
             // }
             // let start = Instant::now();
-            let shared_texture = match self.shared.shared_texture.try_read() {
+            let shared_texture = match self.shared.shared_texture_data.try_read() {
                 Ok(shared_texture) => shared_texture,
                 Err(TryLockError::Poisoned(_)) => panic!("shared_texture poisoned"),
                 Err(TryLockError::WouldBlock) => {
@@ -498,7 +556,7 @@ mod worker_thread {
             }
 
             // TODO: we don't need this mutex, replace with `UnsafeCell`
-            let mut l = shared_texture.texture()[row]
+            let mut l = shared_texture.diff()[row]
                 .try_lock()
                 .expect("we just locked it");
             {
@@ -553,15 +611,16 @@ mod worker_thread {
                             ) {
                                 // i kinda with i could debug draw it red for a frame,
                                 // but that's really hard.
-                                color
+                                Some(color)
                             } else {
                                 // we proved that the color hasn't changed
-                                // debug draw unchanged pixels blue
+                                // // debug draw unchanged pixels blue
                                 // Color32::from_rgb(50, 50, 255)
                                 continue;
                             }
                         } else {
-                            Color32::MAGENTA
+                            // probably we're zoomed in too far
+                            Some(Color32::MAGENTA)
                         };
                     }
                 }
@@ -987,7 +1046,7 @@ mod shared_texture {
     /// probably should never call read/write,
     /// instead only call `try_read` or `try_write`,
     /// bc those invariants are maintained manually.
-    pub(super) struct SharedTexture {
+    pub(super) struct SharedTextureData {
         pub(super) needs_full_redraw: bool,
         /// the `CameraMap` where we're rendering.
         /// `Some` iff we're between rendering begin and finish.
@@ -1012,31 +1071,32 @@ mod shared_texture {
         /// these are incremented when a worker finishes rendering a line.
         /// must not be greater than the height.
         finish_count: AtomicUsize,
+        /// the diff the main thread should apply to its local texture.
+        /// a color is `None` if the color hasn't changed.
         /// should never call `lock`, only `try_lock`.
-        /// TODO: with the texture locks, maybe this doesn't need a `Mutex`, just an `UnsafeCell`.
-        /// TODO: inner `Vec` should be a `Box<[Color32]>`.
-        texture: Vec<Mutex<Vec<Color32>>>,
+        // TODO: with the texture locks, maybe this doesn't need a `Mutex`, just an `UnsafeCell`.
+        diff: Vec<Mutex<Box<[Option<Color32>]>>>,
     }
-    impl Default for SharedTexture {
+    impl Default for SharedTextureData {
         fn default() -> Self {
             Self {
                 needs_full_redraw: false,
                 camera_map: None,
                 begin_count: AtomicUsize::new(0),
                 finish_count: AtomicUsize::new(0),
-                texture: Vec::new(),
+                diff: Vec::new(),
             }
         }
     }
-    impl SharedTexture {
-        fn width(&self) -> usize {
+    impl SharedTextureData {
+        pub(super) fn width(&self) -> usize {
             let width = self
-                .texture
+                .diff
                 .first()
                 .map(|line| line.try_lock().expect("no one should be writing").len())
                 .unwrap_or(0);
             debug_assert!(
-                self.texture.iter().all(|line| line
+                self.diff.iter().all(|line| line
                     .try_lock()
                     .expect("no one should be writing")
                     .len()
@@ -1044,8 +1104,8 @@ mod shared_texture {
             );
             width
         }
-        fn height(&self) -> usize {
-            let height = self.texture.len();
+        pub(super) fn height(&self) -> usize {
+            let height = self.diff.len();
             // debug_assert_eq!(self.texture_lock_begin.len(), height);
             // debug_assert_eq!(self.texture_lock_finish.len(), height);
             height
@@ -1064,33 +1124,33 @@ mod shared_texture {
         pub(super) fn finish_count(&self) -> &AtomicUsize {
             &self.finish_count
         }
-        pub(super) fn texture(&self) -> &Vec<Mutex<Vec<Color32>>> {
-            &self.texture
+        pub(super) fn diff(&self) -> &Vec<Mutex<Box<[Option<Color32>]>>> {
+            &self.diff
+        }
+
+        pub(super) fn assert_finished_rendering(&self) {
+            assert!(
+                self.begin_count.load(Ordering::SeqCst) >= self.diff.len(),
+                "texture_lock_begin not all started"
+            );
+            assert_eq!(
+                self.finish_count.load(Ordering::SeqCst),
+                self.diff.len(),
+                "texture_lock_finish not all ended"
+            );
         }
 
         /// also sets `needs_full_redraw` to `true`.
         #[cfg_attr(feature = "profiling", inline(never))]
-        pub(super) fn resize_if_needed(&mut self, camera_map: &CameraMap) {
-            let width = camera_map.pixels_width();
-            let height = camera_map.pixels_height();
-
-            if self.width() == width && self.height() == height {
-                return;
-            }
+        pub(super) fn resize(&mut self, width: usize, height: usize) {
             self.needs_full_redraw = true;
-            // self.texture_lock_begin.clear();
-            // self.texture_lock_finish.clear();
-            // TODO: is this correct with regard to the mutexes?
-            self.texture.clear();
 
-            // self.texture_lock_begin
-            //     .resize_with(height, || AtomicBool::new(true));
-            // self.texture_lock_finish
-            //     .resize_with(height, || AtomicBool::new(true));
             self.begin_count.store(height, Ordering::SeqCst);
             self.finish_count.store(height, Ordering::SeqCst);
-            self.texture
-                .resize_with(height, || Mutex::new(vec![Color32::MAGENTA; width]));
+
+            self.diff.clear();
+            self.diff
+                .resize_with(height, || Mutex::new(vec![None; width].into_boxed_slice()));
         }
 
         /// for when we want to start rendering.
@@ -1113,15 +1173,8 @@ mod shared_texture {
             //         .all(|lock| lock.load(Ordering::SeqCst)),
             //     "texture_lock_finish not all true"
             // );
-            debug_assert!(
-                self.begin_count.load(Ordering::SeqCst) >= self.texture.len(),
-                "texture_lock_begin not all started"
-            );
-            debug_assert_eq!(
-                self.finish_count.load(Ordering::SeqCst),
-                self.texture.len(),
-                "texture_lock_finish not all ended"
-            );
+            #[cfg(debug_assertions)]
+            self.assert_finished_rendering();
 
             // // it's important to reset finish before begin
             // // at least if we aren't using `camera_map` as a lock
@@ -1142,54 +1195,49 @@ mod shared_texture {
             // while self.camera_map.is_some() {
             //     std::thread::yield_now();
             // }
-            // TODO: be better
-            // while self
-            //     .texture_lock_finish
-            //     .iter()
-            //     .any(|lock| !lock.load(Ordering::SeqCst))
-            // {
-            //     std::thread::yield_now();
-            // }
+
             // TODO: std::hint::spin_loop()
-            while self.finish_count.load(Ordering::SeqCst) < self.texture.len() {
-                std::thread::yield_now();
+            while self.finish_count.load(Ordering::SeqCst) < self.diff.len() {
+                std::hint::spin_loop();
             }
+
+            self.assert_finished_rendering();
         }
 
-        /// this allocates btw.
-        #[cfg_attr(feature = "profiling", inline(never))]
-        pub(super) fn set_texture(&self, handle: &mut egui::TextureHandle) {
-            assert!(self.camera_map.is_none(), "camera_map wan't reset");
-            // debug_assert!(
-            //     self.texture_lock_begin
-            //         .iter()
-            //         .all(|lock| lock.load(Ordering::SeqCst)),
-            //     "texture_lock_begin not all true"
-            // );
-            // debug_assert!(
-            //     self.texture_lock_finish
-            //         .iter()
-            //         .all(|lock| lock.load(Ordering::SeqCst)),
-            //     "texture_lock_finish not all true"
-            // );
-            debug_assert!(
-                self.begin_count.load(Ordering::SeqCst) >= self.texture.len(),
-                "texture_lock_begin not all started"
-            );
-            debug_assert_eq!(
-                self.finish_count.load(Ordering::SeqCst),
-                self.texture.len(),
-                "texture_lock_finish not all ended"
-            );
+        // /// this allocates btw.
+        // #[cfg_attr(feature = "profiling", inline(never))]
+        // pub(super) fn set_texture(&self, handle: &mut egui::TextureHandle) {
+        //     assert!(self.camera_map.is_none(), "camera_map wan't reset");
+        //     // debug_assert!(
+        //     //     self.texture_lock_begin
+        //     //         .iter()
+        //     //         .all(|lock| lock.load(Ordering::SeqCst)),
+        //     //     "texture_lock_begin not all true"
+        //     // );
+        //     // debug_assert!(
+        //     //     self.texture_lock_finish
+        //     //         .iter()
+        //     //         .all(|lock| lock.load(Ordering::SeqCst)),
+        //     //     "texture_lock_finish not all true"
+        //     // );
+        //     debug_assert!(
+        //         self.begin_count.load(Ordering::SeqCst) >= self.diff.len(),
+        //         "texture_lock_begin not all started"
+        //     );
+        //     debug_assert_eq!(
+        //         self.finish_count.load(Ordering::SeqCst),
+        //         self.diff.len(),
+        //         "texture_lock_finish not all ended"
+        //     );
 
-            let size = [self.width(), self.height()];
-            let colors = self
-                .texture
-                .iter()
-                .flat_map(|line| line.try_lock().expect("rendering should be done").clone())
-                .collect();
-            set_texture(handle, size, colors);
-        }
+        //     let size = [self.width(), self.height()];
+        //     let colors = self
+        //         .diff
+        //         .iter()
+        //         .flat_map(|line| line.try_lock().expect("rendering should be done").clone())
+        //         .collect();
+        //     set_texture(handle, size, colors);
+        // }
     }
 }
 

@@ -780,14 +780,6 @@ impl App {
                 {
                     ui.checkbox(&mut self.draw_crosshair, "draw crosshair").on_hover_text("draw a dot at the screen center.");
                 }
-
-                // draw uncolored nodes
-                {
-                    let mut draw_uncolored_nodes = tree::DRAW_UNCOLORED_NODES.load(Ordering::Relaxed);
-                    if ui.checkbox(&mut draw_uncolored_nodes, "draw uncolored nodes").on_hover_text("draw nodes that have been split but haven't yet been sampled in yellow. enabling this slows down refining.").changed() {
-                        tree::DRAW_UNCOLORED_NODES.store(draw_uncolored_nodes, Ordering::Relaxed);
-                    }
-                }
             });
 
             egui::CollapsingHeader::new("metabrot").default_open(true).show(ui, |ui| {
@@ -833,6 +825,22 @@ impl App {
                     }
                     if r.changed() {
                         tree::RETIRE_MAX_WIDTH.store(retire_max_width, Ordering::Relaxed);
+                    }
+                }
+
+                // draw uncolored nodes
+                {
+                    let mut draw_uncolored_nodes = tree::DRAW_UNCOLORED_NODES.load(Ordering::Relaxed);
+                    if ui.checkbox(&mut draw_uncolored_nodes, "draw uncolored nodes").on_hover_text("draw nodes that have been split but haven't yet been sampled in yellow. enabling this slows down refining.").changed() {
+                        tree::DRAW_UNCOLORED_NODES.store(draw_uncolored_nodes, Ordering::Relaxed);
+                    }
+                }
+
+                // draw color diff
+                {
+                    let mut draw_color_diff = fractal::DRAW_COLOR_DIFF.load(Ordering::Relaxed);
+                    if ui.checkbox(&mut draw_color_diff, "draw color diff").on_hover_text("draw pixels that got rerendered since the last frame in blue.").changed() {
+                        fractal::DRAW_COLOR_DIFF.store(draw_color_diff, Ordering::Relaxed);
                     }
                 }
             });
