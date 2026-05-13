@@ -17,7 +17,8 @@ use crate::{
 };
 
 /// whether to draw pixel that weren't cached from the last frame for a frame.
-pub(crate) static DRAW_COLOR_DIFF: AtomicBool = AtomicBool::new(false);
+/// but only for not a full redraw :nauseated_face:.
+pub(crate) static DRAW_COLOR_DIFF: AtomicBool = AtomicBool::new(true);
 const DRAW_COLOR_DIFF_COLOR: Color32 = Color32::from_rgb(50, 50, 255);
 
 /// stuff shared between the main and worker threads.
@@ -362,7 +363,9 @@ mod main_thread {
             {
                 let width = shared_texture_data.width();
                 let height = shared_texture_data.height();
-                let colors = if DRAW_COLOR_DIFF.load(Ordering::Relaxed) {
+                let colors = if !shared_texture_data.needs_full_redraw
+                    && DRAW_COLOR_DIFF.load(Ordering::Relaxed)
+                {
                     // map is annoying bc of the mutex,
                     // so don't bother with iterators.
                     let mut ret = Vec::with_capacity(width * height);

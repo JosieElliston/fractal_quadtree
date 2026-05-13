@@ -110,6 +110,7 @@ impl Fixed {
         }
     }
     /// computes self / 2, panics if we would lose precision (ie if self is odd)
+    #[track_caller]
     pub(crate) fn div2_exact(self) -> Self {
         self.div2_exact_checked()
             .expect("loss of precision in div2_exact")

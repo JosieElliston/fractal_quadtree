@@ -113,14 +113,19 @@ impl Domain {
         // ) <= self.rad()
     }
 
+    /// the point may not be inside the domain.
+    #[cfg_attr(feature = "profiling", inline(never))]
+    pub(crate) fn quadrant_offset_containing(&self, (real, imag): (Real, Imag)) -> Offset {
+        (if real < self.real_mid() { 0 } else { 1 }) + (if imag >= self.imag_mid() { 0 } else { 2 })
+    }
+
     /// the point must be inside the domain.
     // TODO: should this fail if the child would be too small?
     #[cfg_attr(feature = "profiling", inline(never))]
     pub(crate) fn child_offset_containing(&self, (real, imag): (Real, Imag)) -> Offset {
         debug_assert!(self.contains_point((real, imag)));
 
-        let ret = (if real < self.real_mid() { 0 } else { 1 })
-            + (if imag >= self.imag_mid() { 0 } else { 2 });
+        let ret = self.quadrant_offset_containing((real, imag));
 
         #[cfg(debug_assertions)]
         if let Some(children) = self.split() {

@@ -839,7 +839,7 @@ impl App {
                 // draw color diff
                 {
                     let mut draw_color_diff = fractal::DRAW_COLOR_DIFF.load(Ordering::Relaxed);
-                    if ui.checkbox(&mut draw_color_diff, "draw color diff").on_hover_text("draw pixels that got rerendered since the last frame in blue.").changed() {
+                    if ui.checkbox(&mut draw_color_diff, "draw color diff").on_hover_text("draw pixels that got rerendered since the last frame in blue, but not if there was a full redraw :nauseated_face:.").changed() {
                         fractal::DRAW_COLOR_DIFF.store(draw_color_diff, Ordering::Relaxed);
                     }
                 }

@@ -534,15 +534,18 @@ impl Tree {
 
     /// for a node to have rad <= retire_rad,
     /// it must have depth >= ret.
+    ///
+    /// returns `None` if there the depth needed for rad
+    /// is deeper than `Domain` can represent
     #[cfg_attr(feature = "profiling", inline(never))]
-    fn depth_needed_for_rad(&self, retire_rad: Real) -> u16 {
+    fn depth_needed_for_rad(&self, retire_rad: Real) -> Option<u16> {
         let mut depth = 0;
         let mut rad = self.dom.rad();
         while rad > retire_rad {
             depth += 1;
-            rad = rad.div2_exact();
+            rad = rad.div2_exact_checked()?;
         }
-        depth
+        Some(depth)
     }
 
     /// we're allowed to retire a node if it has depth >= ret.
@@ -558,7 +561,10 @@ impl Tree {
             return Err("retire_window is too big/small to reclaim anything");
         };
 
-        Ok(self.depth_needed_for_rad(retire_rad))
+        match self.depth_needed_for_rad(retire_rad) {
+            Some(depth) => Ok(depth),
+            None => Err("depth needed for rad is deeper than `Domain` can represent"),
+        }
     }
 
     /// selects and retires a group of siblings.
@@ -859,10 +865,12 @@ impl Tree {
                         // we should look at the child closest to the center of the window first.
                         // or maybe look at the child with the shallowest height.
                         // actually it doesn't seem faster
+
                         stack.extend(child_handle.siblings().map(|c| (c, depth + 1)));
+
                         // let mut children = child_handle.siblings();
                         // // bring min_height to front
-                        // let i = (0..children.len())
+                        // let offset = (0..children.len())
                         //     .min_by_key(|i| {
                         //         tree.alloc
                         //             .get(children[*i])
@@ -870,7 +878,13 @@ impl Tree {
                         //             .load(Ordering::SeqCst)
                         //     })
                         //     .unwrap();
-                        // children.swap(0, i);
+                        // children.swap(0, offset);
+                        // stack.extend(children.into_iter().map(|c| (c, depth + 1)));
+
+                        // // bring child in quadrant containing window mid
+                        // let offset = dom.quadrant_offset_containing(window.mid());
+                        // let mut children = child_handle.siblings();
+                        // children.swap(0, offset);
                         // stack.extend(children.into_iter().map(|c| (c, depth + 1)));
                     }
                     None => {
@@ -1789,11 +1803,11 @@ mod tests {
     fn test_depth_needed_for_rad() {
         let tree = Tree::new(&mut ThreadData::default());
         assert_eq!(tree.dom.rad(), Real::from_f64(4.0));
-        assert_eq!(tree.depth_needed_for_rad(Real::from_f64(6.0)), 0);
-        assert_eq!(tree.depth_needed_for_rad(Real::from_f64(5.0)), 0);
-        assert_eq!(tree.depth_needed_for_rad(Real::from_f64(4.0)), 0);
-        assert_eq!(tree.depth_needed_for_rad(Real::from_f64(3.0)), 1);
-        assert_eq!(tree.depth_needed_for_rad(Real::from_f64(2.0)), 1);
-        assert_eq!(tree.depth_needed_for_rad(Real::from_f64(1.0)), 2);
+        assert_eq!(tree.depth_needed_for_rad(Real::from_f64(6.0)), Some(0));
+        assert_eq!(tree.depth_needed_for_rad(Real::from_f64(5.0)), Some(0));
+        assert_eq!(tree.depth_needed_for_rad(Real::from_f64(4.0)), Some(0));
+        assert_eq!(tree.depth_needed_for_rad(Real::from_f64(3.0)), Some(1));
+        assert_eq!(tree.depth_needed_for_rad(Real::from_f64(2.0)), Some(1));
+        assert_eq!(tree.depth_needed_for_rad(Real::from_f64(1.0)), Some(2));
     }
 }
