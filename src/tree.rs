@@ -15,16 +15,15 @@ use crate::{
     sample::metabrot_sample,
 };
 
-/// hack to make this easy to add to the UI.
 /// the min size of a node to retire is `window.real_rad() / RETIRE_MAX_WIDTH`.
-// TODO: do this correctly, or use a better heuristic.
 pub(crate) static RETIRE_MAX_WIDTH: AtomicUsize = AtomicUsize::new(1000);
 
-/// hack to make this easy to add to the UI.
 /// draw the uncolored nodes a special color,
 /// rather than just skipping them.
-// TODO: do this correctly
 pub(crate) static DRAW_UNCOLORED_NODES: AtomicBool = AtomicBool::new(true);
+
+/// whether we should split nodes that may immediately get retired.
+pub(crate) static SPLIT_RETIRABLE_NODES: AtomicBool = AtomicBool::new(false);
 
 #[repr(C, align(64))]
 #[derive(Debug)]
@@ -336,7 +335,7 @@ impl Tree {
             update_max_height(self, node);
         }
 
-        // everything below this is helper function definitions
+        // everything below this is helper function definitions.
         return;
 
         #[cfg_attr(feature = "profiling", inline(never))]
@@ -481,7 +480,7 @@ impl Tree {
             }
         }
 
-        // everything below this is helper function definitions
+        // everything below this is helper function definitions.
         // unreachable!();
 
         /// `Ok` if we updated the timestamp,
@@ -574,6 +573,9 @@ impl Tree {
     ///
     /// we guarantee that the siblings and their descendants are inaccessible from the root.
     /// note that other threads can still have access to them via direct handles.
+    /// we guarantee that the siblings are inaccessible from any non-direct handle.
+    /// we guarantee that the siblings and their descendants will eventually be inaccessible except through the returned handle.
+    /// we guarantee that eventually all direct handles to the sibling must have been derived from the returned handle.
     /// TODO: more docs / proof
     ///
     /// we guarantee that there will eventually no other thread can access the siblings.
@@ -666,7 +668,9 @@ impl Tree {
     /// this is done by waiting at least two (or maybe three) ticks/epochs after retirement.
     #[cfg_attr(feature = "profiling", inline(never))]
     pub(crate) unsafe fn reclaim(&self, data: &mut ThreadData, left_sibling: NodeHandle4) {
-        let mut stack = Vec::new();
+        let free_list = &mut data.free_list;
+        let stack = &mut data.vec_handle4;
+        stack.clear();
         stack.push(left_sibling);
         while let Some(left_sibling) = stack.pop() {
             for sibling_handle in left_sibling.siblings() {
@@ -675,13 +679,24 @@ impl Tree {
                     stack.push(left_child);
                 }
             }
-            reclaim_node(self, data, left_sibling);
+            unsafe {
+                reclaim_node(self, free_list, left_sibling);
+            }
         }
 
-        /// deinit the fields for debugging.
-        /// any read of any sibling after this is UB.
+        // everything below this is helper function definitions.
+        return;
+
+        /// puts the siblings in the free list,
+        /// but first, deinit the fields for debugging.
+        ///
+        /// SAFETY: the caller must ensure that the siblings are never read after this.
         #[cfg_attr(feature = "profiling", inline(never))]
-        fn reclaim_node(tree: &Tree, data: &mut ThreadData, left_sibling: NodeHandle4) {
+        unsafe fn reclaim_node(
+            tree: &Tree,
+            free_list: &mut Vec<NodeHandle4>,
+            left_sibling: NodeHandle4,
+        ) {
             for node_handle in left_sibling.siblings() {
                 let node = tree.alloc.get(node_handle);
 
@@ -704,7 +719,8 @@ impl Tree {
                 #[cfg(debug_assertions)]
                 node.assert_all_uninit();
             }
-            data.free_list.push(left_sibling);
+
+            free_list.push(left_sibling);
         }
     }
 
@@ -1008,15 +1024,19 @@ impl Tree {
         }
 
         // used for filtering out leafs that would be immediately reclaimed.
-        let retire_depth = match retire_window {
-            Some(retire_window) => match self.depth_needed_for_window(retire_window) {
-                Ok(depth) => Some(depth),
-                Err(err) => {
-                    log!(err);
-                    None
-                }
-            },
-            None => None,
+        let retire_depth = if SPLIT_RETIRABLE_NODES.load(Ordering::Relaxed) {
+            None
+        } else {
+            match retire_window {
+                Some(retire_window) => match self.depth_needed_for_window(retire_window) {
+                    Ok(depth) => Some(depth),
+                    Err(err) => {
+                        log!(err);
+                        None
+                    }
+                },
+                None => None,
+            }
         };
 
         // // debug disabled to make more races happen
@@ -1056,10 +1076,10 @@ impl Tree {
         let vec_handle_u16 = &mut data.vec_handle_u16;
         let vec_handle = &mut data.vec_handle;
 
-        let mut debug_attempts = 0;
+        // let mut debug_attempts = 0;
         let draw_uncolored_nodes = DRAW_UNCOLORED_NODES.load(Ordering::Relaxed);
         for leaf_handle in select(self, vec_handle_u16, sample_window, shallowest_depth) {
-            debug_attempts += 1;
+            // debug_attempts += 1;
             if let Some(()) = try_split(self, leaf_handle, left_child) {
                 self.update_ancestor_heights(vec_handle, leaf_handle);
                 // this should be done in insert,
@@ -1076,10 +1096,10 @@ impl Tree {
                 );
             }
         }
-        log!(format!(
-            "found {} leafs to try splitting but they all failed",
-            debug_attempts
-        ));
+        // log!(format!(
+        //     "found {} leafs to try splitting but they all failed",
+        //     debug_attempts
+        // ));
 
         // deinit the fields for debugging.
         for child_handle in left_child.siblings() {
@@ -1146,9 +1166,9 @@ impl Tree {
             // go to the correct child.
             let child_offset = dom.child_offset_containing((real, imag));
             let Some(left_child) = node.left_child.load(Ordering::SeqCst) else {
-                log!(
-                    "failed to follow child pointer during insert. this probably means it got reclaimed."
-                );
+                // log!(
+                //     "failed to follow child pointer during insert. this probably means it got reclaimed."
+                // );
                 return;
             };
             node_handle = left_child.siblings_offset(child_offset);
@@ -1312,10 +1332,13 @@ pub(crate) struct ThreadData {
     free_list: Vec<NodeHandle4>,
     /// the block we allocated in `realloc`
     block: Option<NonNull<Block>>,
-    /// for various stacks (and perhaps queues).
+    /// for various stacks.
     /// should be cleared before use, but not when done.
     vec_handle: Vec<NodeHandle>,
-    /// for various stacks (and perhaps queues).
+    /// for various stacks.
+    /// should be cleared before use, but not when done.
+    vec_handle4: Vec<NodeHandle4>,
+    /// for various stacks.
     /// should be cleared before use, but not when done.
     vec_handle_u16: Vec<(NodeHandle, u16)>,
     // /// should be cleared before use, but not when done.

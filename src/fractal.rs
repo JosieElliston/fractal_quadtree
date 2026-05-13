@@ -19,7 +19,8 @@ use crate::{
 /// whether to draw pixel that weren't cached from the last frame for a frame.
 /// but only for not a full redraw :nauseated_face:.
 pub(crate) static DRAW_COLOR_DIFF: AtomicBool = AtomicBool::new(true);
-const DRAW_COLOR_DIFF_COLOR: Color32 = Color32::from_rgb(50, 50, 255);
+// const DRAW_COLOR_DIFF_COLOR: Color32 = Color32::from_rgb(50, 50, 255);
+const DRAW_COLOR_DIFF_COLOR: Color32 = Color32::WHITE;
 
 /// stuff shared between the main and worker threads.
 pub(crate) struct Shared {
@@ -381,7 +382,7 @@ mod main_thread {
                             ret.push(if diff_color.is_none() {
                                 *texture_color
                             } else {
-                                DRAW_COLOR_DIFF_COLOR
+                                texture_color.lerp_to_gamma(DRAW_COLOR_DIFF_COLOR, 0.3)
                             });
                         }
                     }

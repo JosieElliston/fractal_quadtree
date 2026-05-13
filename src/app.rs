@@ -843,6 +843,14 @@ impl App {
                         fractal::DRAW_COLOR_DIFF.store(draw_color_diff, Ordering::Relaxed);
                     }
                 }
+
+                // draw color diff
+                {
+                    let mut split_reclaimable_nodes = tree::SPLIT_RETIRABLE_NODES.load(Ordering::Relaxed);
+                    if ui.checkbox(&mut split_reclaimable_nodes, "split retirable").on_hover_text("whether we should split nodes that may immediately get retired.").changed() {
+                        tree::SPLIT_RETIRABLE_NODES.store(split_reclaimable_nodes, Ordering::Relaxed);
+                    }
+                }
             });
 
             egui::CollapsingHeader::new("mandelbrot").show(ui, |ui| {
