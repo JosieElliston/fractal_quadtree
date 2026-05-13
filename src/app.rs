@@ -586,10 +586,12 @@ impl App {
             // tree shape
             egui::CollapsingHeader::new("tree shape").show(ui, |ui| {
                 // wacky stuff to get around the borrow checker
-                let tree = Arc::clone(self.metabrot.tree());
+                let metabrot = &mut self.metabrot;
+                let tree = &metabrot.shared.tree;
+                let data = &mut metabrot.thread_data;
 
                 // node count
-                ui.label(format!("node count: {}", tree.node_count(&mut self.metabrot.thread_data)))
+                ui.label(format!("node count: {}", tree.node_count(data)))
                     .on_hover_text("how many nodes are in the quadtree. note that this can be expensive to compute, try collapsing the header.");
 
                 // min_height

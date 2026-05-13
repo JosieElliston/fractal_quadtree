@@ -16,9 +16,10 @@ use crate::{
     tree::{ReclaimMoment, RenderMoment, Tree},
 };
 
-/// this mostly exists so i don't duplicate doc comments
-struct Shared {
-    tree: Arc<Tree>,
+/// stuff shared between the main and worker threads.
+///
+pub(crate) struct Shared {
+    pub(crate) tree: Tree,
     /// the main thread's current moment.
     /// we can skip drawing nodes that haven't been updated since the start of the previous frame.
     /// it might happen that we will have correctly drawn pixels that got sampled during frame drawing,
@@ -27,30 +28,30 @@ struct Shared {
     /// monotonically increasing.
     /// only ever updated by the main thread.
     /// we have that `frame_start < sample_time`.
-    render_now: Arc<Atomic<RenderMoment>>,
+    render_now: Atomic<RenderMoment>,
     /// tell the worker threads the current reclaim moment.
-    reclaim_now: Arc<Atomic<ReclaimMoment>>,
+    reclaim_now: Atomic<ReclaimMoment>,
     /// the `Window` in which we're reclaiming.
     /// `None` iff reclaiming is disabled.
     /// note that this is similar to shared_texture.camera_map.window,
     /// it's just that reclaiming, sampling, and rendering are decoupled (eg any one may be disabled).
     /// TODO: this could be an atomic option instead of a `RwLock`.
-    reclaim_window: Arc<RwLock<Option<Window>>>,
+    reclaim_window: RwLock<Option<Window>>,
     /// how many nodes were reclaimed since we last cleared this?
     /// for debugging / UX, not needed for the main algorithm.
-    reclaim_counter: Arc<AtomicU64>,
+    reclaim_counter: AtomicU64,
     /// the `Window` in which we're sampling.
     /// `None` iff sampling is disabled.
     /// note that this is similar to shared_texture.camera_map.window,
     /// it's just that reclaiming, sampling, and rendering are decoupled (eg any one may be disabled).
     /// TODO: this could be an atomic option instead of a `RwLock`.
-    sample_window: Arc<RwLock<Option<Window>>>,
+    sample_window: RwLock<Option<Window>>,
     /// how many samples were taken since we last cleared this?
     /// for debugging / UX, not needed for the main algorithm.
-    sample_counter: Arc<AtomicU64>,
-    shared_texture: SharedTexture,
+    sample_counter: AtomicU64,
+    shared_texture: RwLock<SharedTexture>,
     /// set by the main thread to ask worker threads to exit.
-    kill: Arc<AtomicBool>,
+    kill: AtomicBool,
 }
 
 pub(crate) use main_thread::*;
@@ -59,7 +60,7 @@ mod main_thread {
 
     use super::*;
 
-    /// owned by the pool/main thread
+    /// owned by the main thread.
     struct WorkerHandle {
         handle: thread::JoinHandle<()>,
         /// receive from the worker thread what tick they think it is.
@@ -71,8 +72,10 @@ mod main_thread {
         shared_timer: Arc<Mutex<MultiTimer>>,
     }
 
+    /// the main thread data.
     pub(crate) struct Fractal {
-        shared: Shared,
+        /// `pub` so we can use `thread_data` and `&mut tree`
+        pub(crate) shared: Arc<Shared>,
         workers: Vec<WorkerHandle>,
         pub(crate) thread_data: ThreadData,
     }
@@ -84,30 +87,20 @@ mod main_thread {
                 - 1)
             .max(1);
             let mut thread_data = ThreadData::default();
-            let shared = Shared {
-                tree: Arc::new(Tree::new(&mut thread_data)),
-                render_now: Arc::new(Atomic::new(RenderMoment::default())),
-                reclaim_now: Arc::new(Atomic::new(ReclaimMoment::default())),
-                reclaim_window: Arc::new(RwLock::new(None)),
-                reclaim_counter: Arc::new(AtomicU64::new(0)),
-                sample_window: Arc::new(RwLock::new(None)),
-                sample_counter: Arc::new(AtomicU64::new(0)),
-                shared_texture: SharedTexture::default(),
-                kill: Arc::new(AtomicBool::new(false)),
-            };
+            let shared = Arc::new(Shared {
+                tree: Tree::new(&mut thread_data),
+                render_now: Atomic::new(RenderMoment::default()),
+                reclaim_now: Atomic::new(ReclaimMoment::default()),
+                reclaim_window: RwLock::new(None),
+                reclaim_counter: AtomicU64::new(0),
+                sample_window: RwLock::new(None),
+                sample_counter: AtomicU64::new(0),
+                shared_texture: RwLock::new(SharedTexture::default()),
+                kill: AtomicBool::new(false),
+            });
             let workers = (0..thread_count)
                 .map(|thread_i| {
-                    let shared = Shared {
-                        tree: Arc::clone(&shared.tree),
-                        render_now: Arc::clone(&shared.render_now),
-                        reclaim_now: Arc::clone(&shared.reclaim_now),
-                        reclaim_window: Arc::clone(&shared.reclaim_window),
-                        reclaim_counter: Arc::clone(&shared.reclaim_counter),
-                        sample_window: Arc::clone(&shared.sample_window),
-                        sample_counter: Arc::clone(&shared.sample_counter),
-                        shared_texture: Arc::clone(&shared.shared_texture),
-                        kill: Arc::clone(&shared.kill),
-                    };
+                    let shared = Arc::clone(&shared);
                     let shared_reclaim_now =
                         Arc::new(Atomic::new(shared.reclaim_now.load(Ordering::SeqCst)));
                     let shared_timer = Arc::new(Mutex::new(MultiTimer::default()));
@@ -116,7 +109,7 @@ mod main_thread {
                     let handle = thread::Builder::new()
                         .name(format!("pool {}", thread_i))
                         .spawn(move || {
-                            WorkerLocal::new(
+                            WorkerData::new(
                                 shared,
                                 thread_i,
                                 shared_reclaim_now_clone,
@@ -139,7 +132,7 @@ mod main_thread {
             }
         }
 
-        pub(crate) fn tree(&self) -> &Arc<Tree> {
+        pub(crate) fn tree(&self) -> &Tree {
             &self.shared.tree
         }
 
@@ -410,8 +403,8 @@ mod worker_thread {
     use super::*;
 
     /// owned by the worker thread
-    pub(super) struct WorkerLocal {
-        shared: Shared,
+    pub(super) struct WorkerData {
+        shared: Arc<Shared>,
         /// `usize` bc [`thread::available_parallelism`] returns a `usize`.
         thread_i: usize,
         thread_data: ThreadData,
@@ -432,9 +425,9 @@ mod worker_thread {
         nursing_home: VecDeque<(ReclaimMoment, NodeHandle4)>,
         timer: TimerData,
     }
-    impl WorkerLocal {
+    impl WorkerData {
         pub(super) fn new(
-            shared: Shared,
+            shared: Arc<Shared>,
             thread_i: usize,
             shared_reclaim_now: Arc<Atomic<ReclaimMoment>>,
             shared_timer: Arc<Mutex<MultiTimer>>,
@@ -994,9 +987,7 @@ mod shared_texture {
     /// probably should never call read/write,
     /// instead only call `try_read` or `try_write`,
     /// bc those invariants are maintained manually.
-    pub(super) type SharedTexture = Arc<RwLock<SharedTextureInner>>;
-
-    pub(super) struct SharedTextureInner {
+    pub(super) struct SharedTexture {
         pub(super) needs_full_redraw: bool,
         /// the `CameraMap` where we're rendering.
         /// `Some` iff we're between rendering begin and finish.
@@ -1026,7 +1017,7 @@ mod shared_texture {
         /// TODO: inner `Vec` should be a `Box<[Color32]>`.
         texture: Vec<Mutex<Vec<Color32>>>,
     }
-    impl Default for SharedTextureInner {
+    impl Default for SharedTexture {
         fn default() -> Self {
             Self {
                 needs_full_redraw: false,
@@ -1037,7 +1028,7 @@ mod shared_texture {
             }
         }
     }
-    impl SharedTextureInner {
+    impl SharedTexture {
         fn width(&self) -> usize {
             let width = self
                 .texture
