@@ -44,8 +44,7 @@
 - TODO: when propagating updates for the cache fields, we need to be careful about stuff like the parent getting the max_across_children applied before the child get updated, even though that violates program order. so we should store more stuff on stack variables and not reload data. possibly i should do acquire/release on the field (rather than relaxed), but doesn't that only matter if you're trying to enforce happens-before on other variables? but i am: i'm trying to enforce happens-before with the same field but in a different struct.
     - require that tree.timestamp is seqcst with itself?
     - require that (node.timestamp, children.timestamp) is locally seqcst?
-- <https://docs.rs/loom/latest/loom/>
-- rename reclaim -> free
+- do [loom](https://docs.rs/loom/latest/loom/)
 
 ## optimization
 
@@ -141,7 +140,10 @@
 - Key::I to toggle info box
 - draw dot at z=0 for mandelbrot
 - bc this isn't a library, change `pub(crate)` -> `pub`
-- rename `node_handle` -> `handle`
+- async for main thread rendering?
+- async for reclamation?
+- rename `Block` -> `Slab`, `NodeHandle4` -> `NodeBlockHandle`, "group" -> "block", "siblings" -> "block", `left_sibling` -> `block_handle`, `left_child` -> `children_handle`
+- rename `reclaim` -> `free`, so reclaim refers to the process of retire and free.
 
 ## bugs
 

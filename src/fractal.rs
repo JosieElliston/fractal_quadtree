@@ -460,7 +460,7 @@ use worker_thread::*;
 mod worker_thread {
     use std::collections::VecDeque;
 
-    use crate::tree::{NodeHandle4, ThreadData};
+    use crate::tree::{BlockHandle, ThreadData};
 
     use super::*;
 
@@ -484,7 +484,7 @@ mod worker_thread {
         /// not when they should be reclaimed.
         /// alias: `to_be_reclaimed`,
         /// but this is sufficiently funnier that the unclarity is worth is.
-        nursing_home: VecDeque<(ReclaimMoment, NodeHandle4)>,
+        nursing_home: VecDeque<(ReclaimMoment, BlockHandle)>,
         timer: TimerData,
     }
     impl WorkerData {
@@ -665,7 +665,7 @@ mod worker_thread {
         }
 
         #[cfg_attr(feature = "profiling", inline(never))]
-        fn try_reclaim(&mut self) -> Result<(), &'static str> {
+        fn try_free(&mut self) -> Result<(), &'static str> {
             // if !self.nursing_home.is_empty() {
             //     dbg!(&self.nursing_home.len());
             // }
@@ -696,7 +696,7 @@ mod worker_thread {
             unsafe {
                 self.shared
                     .tree
-                    .reclaim(&mut self.thread_data, left_sibling);
+                    .free(&mut self.thread_data, left_sibling);
             }
             self.shared.reclaim_counter.fetch_add(1, Ordering::Relaxed);
             Ok(())
@@ -820,13 +820,13 @@ mod worker_thread {
 
                 {
                     let start = Instant::now();
-                    match self.try_reclaim() {
+                    match self.try_free() {
                         Ok(_) => {
-                            self.timer.local.reclaim_ok.insert(start.elapsed());
+                            self.timer.local.free_ok.insert(start.elapsed());
                             continue;
                         }
                         Err(_) => {
-                            self.timer.local.reclaim_err.insert(start.elapsed());
+                            self.timer.local.free_err.insert(start.elapsed());
                         }
                     }
                 }
@@ -968,8 +968,8 @@ mod timer {
         pub(crate) draw_err: Timer,
         pub(crate) sample_ok: Timer,
         pub(crate) sample_err: Timer,
-        pub(crate) reclaim_ok: Timer,
-        pub(crate) reclaim_err: Timer,
+        pub(crate) free_ok: Timer,
+        pub(crate) free_err: Timer,
         pub(crate) retire_ok: Timer,
         pub(crate) retire_err: Timer,
         pub(crate) split_ok: Timer,
@@ -993,8 +993,8 @@ mod timer {
                 self.draw_err,
                 self.sample_ok,
                 self.sample_err,
-                self.reclaim_ok,
-                self.reclaim_err,
+                self.free_ok,
+                self.free_err,
                 self.retire_ok,
                 self.retire_err,
                 self.split_ok,
@@ -1009,8 +1009,8 @@ mod timer {
                 draw_err: arr[1],
                 sample_ok: arr[2],
                 sample_err: arr[3],
-                reclaim_ok: arr[4],
-                reclaim_err: arr[5],
+                free_ok: arr[4],
+                free_err: arr[5],
                 retire_ok: arr[6],
                 retire_err: arr[7],
                 split_ok: arr[8],

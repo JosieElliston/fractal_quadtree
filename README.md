@@ -15,6 +15,14 @@ drawing the metabrot set, caching samples in a quadtree. [some](https://github.c
 
 #### simplest
 
+TODO: present sync first
+present by optimization (in some order):
+- concurrency
+- allocator + reclamation
+- color pruning / texture caching/reuse
+- retire-select pruning (doesn't depend on window so it's simpler)
+- refine-select pruning
+
 ```rs
 struct Node {
     color: Option<Color>,

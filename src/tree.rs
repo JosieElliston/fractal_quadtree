@@ -1,6 +1,5 @@
 use std::{
     cell::UnsafeCell,
-    collections::VecDeque,
     num::NonZeroU32,
     ptr::NonNull,
     sync::atomic::{AtomicBool, AtomicU16, AtomicUsize, Ordering, fence},
@@ -22,9 +21,14 @@ pub(crate) static RETIRE_MAX_WIDTH: AtomicUsize = AtomicUsize::new(1000);
 /// rather than just skipping them.
 pub(crate) static DRAW_UNCOLORED_NODES: AtomicBool = AtomicBool::new(true);
 
-/// whether we should split nodes that may immediately get retired.
+/// whether we should split nodes that may immediately get reclaimed.
 pub(crate) static SPLIT_RETIRABLE_NODES: AtomicBool = AtomicBool::new(false);
 
+// TODO: doc comments for `Node`, not just it's fields.
+// TODO: doc how we never give out handles except for reclamation.
+// TODO: note what "reclaim" vs "retire" vs "free" means.
+// reclamation is the general process, which is split into retiring and freeing nodes.
+// TODO: define "eventually"
 #[repr(C, align(64))]
 #[derive(Debug)]
 struct Node {
@@ -36,38 +40,58 @@ struct Node {
     /// also `Domain` too big to fit in a u64 (or u128),
     /// so `Atomic` falls back to a global lock array, which is really slow.
     // TODO: i think you can derive the radius from the center.
+    // note that the domains of the leafs are all disjoint and exactly cover the initial domain.
+    // TODO: debug draw leaf's domain's outlines
     dom: UnsafeCell<Domain>,
+
+    /// the handle to child block, if it exists.
+    /// note that the tree is full: nodes have either zero or four children.
+    ///
     /// `None` iff we're a leaf.
-    /// if `Some`, then we have 4 children, who are `left_child.siblings()`.
+    ///
+    /// if `Some`, then we have four children, who are `children_handle.siblings()`.
+    ///
     /// the induced shape of the tree is strongly consistent.
-    left_child: Atomic<Option<NodeHandle4>>,
+    children_handle: Atomic<Option<BlockHandle>>,
+
     // TODO: maybe replace `Atomic` -> `UnsafeCell`
     // actually i think this has to be atomic bc it's modified when other threads might be looking at it.
-    // we could avoid that by putting a tag on left_child that
+    // we could avoid that by putting a tag on children_handle that
     // prevents other threads from following it, but whatever.
     // this would also prevent us from splitting uncolored nodes.
     /// this never participates in the synchronizes-with relation,
     /// we only need atomicity for load/store,
     /// and which are therefore `Relaxed`.
     color: Atomic<Option<Rgb>>,
+
     // TODO: store depth instead of height? tho that's annoying for splitting.
-    /// distance to the closest descendant leaf.
-    /// 0 if we're a leaf, else 1 + min(c.min_height for c in children).
+    /// the distance to the closest descendant leaf.
+    /// `0` if we're a leaf, else (eventually) `1 + min(c.min_height for c in children)`.
     /// this is used in `refine` to find the shallowest leafs.
     /// this is updated in `refine` and `retire`.
     min_height: AtomicU16,
-    /// distance to the farthest descendant leaf.
-    /// 0 if we're a leaf, else 1 + max(c.max_height for c in children).
+
+    /// the distance to the farthest descendant leaf.
+    /// `0` if we're a leaf, else (eventually) `1 + max(c.max_height for c in children)`.
     /// this is used in `retire` to find the deepest nodes.
     /// this is updated in `refine` and `retire`.
     max_height: AtomicU16,
-    /// timestamp of the last update to color of this node or any descendant.
-    /// monotonically increasing over (real, objective) time.
-    /// nodes have a timestamp of at least their children.
+
+    /// the timestamp of the last update to color of this node or any descendant.
+    /// this is monotonically increasing (over time, not as you traverse the tree).
+    ///
+    /// (eventually) `timestamp >= max(c.timestamp for c in children)`.
+    ///
+    /// note that this is not (eventually) `timestamp == max(c.timestamp for c in children)`,
+    /// because we allow splitting uncolored nodes,
+    /// which can cause a node to have a newer timestamp than its children.
+    ///
     /// this is used in `color_of_pixel` and `any_on_line_needs_redraw`
     /// to prove that a node hasn't had its color changed since we last drew it.
+    ///
     /// this is updated in `insert` and `retire`.
     timestamp: Atomic<RenderMoment>,
+
     _pad: [u8; 8],
 }
 const _: () = assert!(size_of::<Node>() == 64);
@@ -80,7 +104,7 @@ impl Node {
     fn uninit() -> Self {
         Self {
             dom: UnsafeCell::new(Domain::uninit()),
-            left_child: Atomic::new(Some(NodeHandle4::uninit())),
+            children_handle: Atomic::new(Some(BlockHandle::uninit())),
             color: Atomic::new(Some(Rgb::uninit())),
             min_height: AtomicU16::new(Self::UNINIT_HEIGHT),
             max_height: AtomicU16::new(Self::UNINIT_HEIGHT),
@@ -97,9 +121,9 @@ impl Node {
             "dom should be uninit"
         );
         assert_eq!(
-            self.left_child.load(Ordering::Relaxed),
-            Some(NodeHandle4::uninit()),
-            "left_child should be uninit"
+            self.children_handle.load(Ordering::Relaxed),
+            Some(BlockHandle::uninit()),
+            "children_handle should be uninit"
         );
         assert_eq!(
             self.color.load(Ordering::Relaxed),
@@ -131,9 +155,9 @@ impl Node {
             "dom should not be uninit"
         );
         assert_ne!(
-            self.left_child.load(Ordering::Relaxed),
-            Some(NodeHandle4::uninit()),
-            "left_child should not be uninit"
+            self.children_handle.load(Ordering::Relaxed),
+            Some(BlockHandle::uninit()),
+            "children_handle should not be uninit"
         );
         assert_ne!(
             self.color.load(Ordering::Relaxed),
@@ -170,6 +194,63 @@ impl Node {
             self.dom.get().write(dom);
         }
     }
+
+    /// `Ok(prev)` if we updated the timestamp.
+    /// we guarantee that `prev < now`.
+    ///
+    /// `Err(cur)` if we didn't update the timestamp.
+    /// we guarantee that `cur >= now`.
+    /// this can happen if the timestamp was already up to date,
+    /// or another thread brought it up to date while we were trying to update it.
+    ///
+    /// in any case, the timestamp is guaranteed to be at least `now` after this function returns.
+    // TODO: weaken orderings
+    #[cfg_attr(feature = "profiling", inline(never))]
+    fn update_timestamp(&self, now: RenderMoment) -> Result<RenderMoment, RenderMoment> {
+        let mut expected_cur = self.timestamp.load(Ordering::SeqCst);
+
+        if expected_cur >= now {
+            // this node doesn't need to be updated.
+            // because timestamps are monotonically increasing as you go up the tree,
+            // the ancestors also don't need to be updated.
+            return Err(expected_cur);
+        }
+
+        // this is basically a fetch_max
+        loop {
+            match self.timestamp.compare_exchange_weak(
+                expected_cur,
+                now,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(prev) => {
+                    assert_eq!(prev, expected_cur);
+                    return Ok(prev);
+                }
+                Err(actual_cur) => {
+                    assert!(
+                        actual_cur >= expected_cur,
+                        "timestamps are monotonically increasing"
+                    );
+                    // if actual_cur == expected_cur {
+                    //     log!("spurious failure in update_timestamp");
+                    // }
+                    if actual_cur >= now {
+                        // someone else updated the timestamp,
+                        // and their timestamp is newer, so we should stop.
+                        return Err(actual_cur);
+                    } else {
+                        // someone else updated the timestamp
+                        // but their timestamp is older,
+                        // or we experienced a spurious failure.
+                        // in both cases, we should retry.
+                        expected_cur = actual_cur;
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -188,13 +269,13 @@ impl Tree {
         let alloc = Alloc::default();
 
         // we leave the root's siblings uninit.
-        let root_handle = alloc.alloc4(data).into();
+        let root_handle = alloc.alloc(data).into();
         let root = alloc.get(root_handle);
 
         unsafe {
             root.write_dom(dom);
         }
-        root.left_child.store(None, Ordering::Relaxed);
+        root.children_handle.store(None, Ordering::Relaxed);
         root.color.store(Some(color), Ordering::Relaxed);
         root.min_height.store(0, Ordering::Relaxed);
         root.max_height.store(0, Ordering::Relaxed);
@@ -219,20 +300,29 @@ impl Tree {
 
         stack.push(self.root);
 
-        while let Some(handle) = stack.pop() {
+        while let Some(node_handle) = stack.pop() {
             count += 1;
-            if let Some(child_handle) = self.alloc.get(handle).left_child.load(Ordering::SeqCst) {
-                stack.extend(child_handle.siblings());
+            if let Some(children_handle) = self
+                .alloc
+                .get(node_handle)
+                .children_handle
+                .load(Ordering::SeqCst)
+            {
+                stack.extend(children_handle.siblings());
                 // debug heights
                 // min_height
                 #[cfg(false)]
                 {
-                    let min_height = self.alloc.get(handle).min_height.load(Ordering::SeqCst);
-                    let oracle_min_height = child_handle
+                    let min_height = self
+                        .alloc
+                        .get(node_handle)
+                        .min_height
+                        .load(Ordering::SeqCst);
+                    let oracle_min_height = children_handle
                         .siblings()
                         .map(|child_handle| {
                             self.alloc
-                                .get(child_handle)
+                                .get(children_handle)
                                 .min_height
                                 .load(Ordering::SeqCst)
                         })
@@ -243,19 +333,23 @@ impl Tree {
                     if min_height != oracle_min_height {
                         log!(format!(
                             "node {:?} has min_height {}, but oracle min_height is {}",
-                            handle, min_height, oracle_min_height
+                            node_handle, min_height, oracle_min_height
                         ));
                     }
                 }
                 // max_height
                 #[cfg(false)]
                 {
-                    let max_height = self.alloc.get(handle).max_height.load(Ordering::SeqCst);
-                    let oracle_max_height = child_handle
+                    let max_height = self
+                        .alloc
+                        .get(node_handle)
+                        .max_height
+                        .load(Ordering::SeqCst);
+                    let oracle_max_height = children_handle
                         .siblings()
                         .map(|child_handle| {
                             self.alloc
-                                .get(child_handle)
+                                .get(children_handle)
                                 .max_height
                                 .load(Ordering::SeqCst)
                         })
@@ -266,7 +360,7 @@ impl Tree {
                     if max_height != oracle_max_height {
                         log!(format!(
                             "node {:?} has max_height {}, but oracle max_height is {}",
-                            handle, max_height, oracle_max_height
+                            node_handle, max_height, oracle_max_height
                         ));
                     }
                 }
@@ -285,52 +379,44 @@ impl Tree {
         self.alloc.get(self.root).max_height.load(Ordering::SeqCst)
     }
 
-    /// `Ok` if `node.dom.mid() == point`.
-    /// `Err` if we reach a leaf (and `node.dom.mid() != point`).
-    /// in both cases, we have that ret[0] == self.root,
-    /// and if `Ok`, then ret.last().unwrap().dom.mid() == point.
-    // fn path_down_to_point(
-    //     &self,
-    //     mut stack: Vec<NodeHandle>,
-    //     point: (Real, Imag),
-    // ) -> Result<Vec<NodeHandle>, Vec<NodeHandle>> {
-    // TODO: should accept a `NodeHandle` and not a `Complex` bc it's more semantic?
+    /// updates the `min_height` and `max_height` of the node at `node_handle` and all its ancestors.
     #[cfg_attr(feature = "profiling", inline(never))]
-    fn path_down_to_point(
-        &self,
-        stack: &mut Vec<NodeHandle>,
-        point: (Real, Imag),
-    ) -> Result<(), ()> {
-        stack.clear();
-        let mut handle = self.root;
-        loop {
-            stack.push(handle);
-            let node = self.alloc.get(handle);
-            let dom = unsafe { node.dom() };
-            if dom.mid() == point {
-                return Ok(());
-            }
-            match node.left_child.load(Ordering::SeqCst) {
-                Some(left_child) => {
-                    let child_offset = dom.child_offset_containing(point);
-                    let child_handle = left_child.siblings_offset(child_offset);
-                    handle = child_handle;
+    fn update_ancestor_heights(&self, stack: &mut Vec<NodeHandle>, node_handle: NodeHandle) {
+        // note that we must go bottom up for correctness,
+        // so collect the path down to the node.
+        {
+            stack.clear();
+            let target_mid = unsafe { self.alloc.get(node_handle).dom().mid() };
+            let mut node_handle = self.root;
+            loop {
+                stack.push(node_handle);
+                let node = self.alloc.get(node_handle);
+                let dom = unsafe { node.dom() };
+                if dom.mid() == target_mid {
+                    // we found the node.
+                    break;
                 }
-                None => return Err(()),
+                match node.children_handle.load(Ordering::SeqCst) {
+                    Some(children_handle) => {
+                        let child_offset = dom.child_offset_containing(target_mid);
+                        let child_handle = children_handle.offset(child_offset);
+                        node_handle = child_handle;
+                    }
+                    None => {
+                        log!(
+                            "failed to find node in update_ancestor_heights, this probably means it got reclaimed"
+                        );
+                        break;
+                    }
+                }
             }
         }
-    }
 
-    /// updates the `min_height` and `max_height` of `node_handle` and all its ancestors.
-    /// accept a node handle and not just its dom.mid()
-    /// bc its semantically incorrect that we should/can do this for any point.
-    #[cfg_attr(feature = "profiling", inline(never))]
-    fn update_ancestor_heights(&self, stack: &mut Vec<NodeHandle>, handle: NodeHandle) {
-        // we must go bottom up for correctness.
-        let _ = self.path_down_to_point(stack, unsafe { self.alloc.get(handle).dom().mid() });
+        #[expect(unused_variables)]
+        let node_handle = ();
 
-        for handle in stack.iter().rev() {
-            let node = self.alloc.get(*handle);
+        for node_handle in stack.iter().rev() {
+            let node = self.alloc.get(*node_handle);
             update_min_height(self, node);
             update_max_height(self, node);
         }
@@ -343,13 +429,13 @@ impl Tree {
             loop {
                 let old_min_height = node.min_height.load(Ordering::SeqCst);
 
-                // ensure we see updates to node's heights before we look at whether we still have children.
-                // this allows us to (TODO: ) weaken orderings of the loads.
-                fence(Ordering::SeqCst);
+                // TODO: weaken orderings.
+                // // ensure we see updates to node's heights before we look at whether we still have children.
+                // fence(Ordering::SeqCst);
 
-                let new_min_height = match node.left_child.load(Ordering::SeqCst) {
-                    Some(left_child) => {
-                        left_child
+                let new_min_height = match node.children_handle.load(Ordering::SeqCst) {
+                    Some(children_handle) => {
+                        children_handle
                             .siblings()
                             .into_iter()
                             .map(|child_handle| {
@@ -375,13 +461,13 @@ impl Tree {
                     Ordering::SeqCst,
                     Ordering::SeqCst,
                 ) {
-                    Ok(current) => {
-                        assert_eq!(current, old_min_height);
+                    Ok(prev) => {
+                        assert_eq!(prev, old_min_height);
                         break;
                     }
-                    Err(current) => {
+                    Err(actual_cur) => {
                         assert_ne!(
-                            current, old_min_height,
+                            actual_cur, old_min_height,
                             "hopefully guaranteed by `compare_exchange` not being weak"
                         );
                         // someone else updated the height,
@@ -398,13 +484,13 @@ impl Tree {
             loop {
                 let old_max_height = node.max_height.load(Ordering::SeqCst);
 
-                // ensure we see updates to node's heights before we look at whether we still have children.
-                // this allows us to (TODO: ) weaken orderings of the loads.
-                fence(Ordering::SeqCst);
+                // TODO: weaken orderings.
+                // // ensure we see updates to node's heights before we look at whether we still have children.
+                // fence(Ordering::SeqCst);
 
-                let new_max_height = match node.left_child.load(Ordering::SeqCst) {
-                    Some(left_child) => {
-                        left_child
+                let new_max_height = match node.children_handle.load(Ordering::SeqCst) {
+                    Some(children_handle) => {
+                        children_handle
                             .siblings()
                             .into_iter()
                             .map(|child_handle| {
@@ -430,13 +516,13 @@ impl Tree {
                     Ordering::SeqCst,
                     Ordering::SeqCst,
                 ) {
-                    Ok(current) => {
-                        assert_eq!(current, old_max_height);
+                    Ok(prev) => {
+                        assert_eq!(prev, old_max_height);
                         break;
                     }
-                    Err(current) => {
+                    Err(actual_cur) => {
                         assert_ne!(
-                            current, old_max_height,
+                            actual_cur, old_max_height,
                             "hopefully guaranteed by `compare_exchange` not being weak"
                         );
                         // someone else updated the height,
@@ -449,84 +535,38 @@ impl Tree {
         }
     }
 
+    /// updates the `timestamp` of the node at `node_handle` and all its ancestors.
     // note we also update timestamps in `insert`,
     // but there we're already going down the path to the node.
     #[cfg_attr(feature = "profiling", inline(never))]
-    fn update_ancestors_timestamp(&self, target_handle: NodeHandle, now: RenderMoment) {
-        // if we go bottom up, avoid trying to update our ancestors' timestamp
+    fn update_ancestor_timestamps(&self, node_handle: NodeHandle, now: RenderMoment) {
+        // if we go bottom up, we can avoid trying to update our ancestors' timestamp
         // if we find out we are up to date.
         // but this isn't faster bc you need to need to fetch the ancestors anyway
         // when we construct the path down.
         // so just go top down.
 
-        let target_mid = unsafe { self.alloc.get(target_handle).dom().mid() };
-        let mut handle = self.root;
-        loop {
-            let node = self.alloc.get(handle);
+        let target_mid = unsafe { self.alloc.get(node_handle).dom().mid() };
+        #[expect(unused_variables)]
+        let node_handle = ();
 
-            let _ = update_timestamp(node, now);
+        let mut node_handle = self.root;
+        loop {
+            let node = self.alloc.get(node_handle);
+
+            let _ = node.update_timestamp(now);
 
             let dom = unsafe { node.dom() };
             if dom.mid() == target_mid {
                 return;
             }
-            match node.left_child.load(Ordering::SeqCst) {
-                Some(left_child) => {
+            match node.children_handle.load(Ordering::SeqCst) {
+                Some(children_handle) => {
                     let child_offset = dom.child_offset_containing(target_mid);
-                    let child_handle = left_child.siblings_offset(child_offset);
-                    handle = child_handle;
+                    let child_handle = children_handle.offset(child_offset);
+                    node_handle = child_handle;
                 }
                 None => return,
-            }
-        }
-
-        // everything below this is helper function definitions.
-        // unreachable!();
-
-        /// `Ok` if we updated the timestamp,
-        /// in which case we should terminate.
-        ///
-        /// `Err` if the timestamp was already up to date,
-        /// in which case we should continue.
-        // TODO: weaken orderings
-        #[cfg_attr(feature = "profiling", inline(never))]
-        fn update_timestamp(node: &Node, now: RenderMoment) -> Result<(), ()> {
-            let mut old = node.timestamp.load(Ordering::SeqCst);
-
-            if old >= now {
-                // this node doesn't need to be updated.
-                // because timestamps are monotonically increasing as you go up the tree,
-                // the ancestors also don't need to be updated.
-                return Err(());
-            }
-
-            // this is basically a fetch_max
-            loop {
-                match node.timestamp.compare_exchange_weak(
-                    old,
-                    now,
-                    Ordering::SeqCst,
-                    Ordering::SeqCst,
-                ) {
-                    Ok(current) => {
-                        assert_eq!(current, old);
-                        return Ok(());
-                    }
-                    Err(current) => {
-                        assert!(current >= old, "timestamps are monotonically increasing");
-                        if current >= now {
-                            // someone else updated the timestamp,
-                            // and their timestamp is newer, so we should stop.
-                            return Err(());
-                        } else {
-                            // someone else updated the timestamp,
-                            // but their timestamp is older.
-                            // also `compare_exchange_weak` can spuriously fail.
-                            // in both cases, we should retry.
-                            old = current;
-                        }
-                    }
-                }
             }
         }
     }
@@ -566,10 +606,10 @@ impl Tree {
         }
     }
 
-    /// selects and retires a group of siblings.
+    /// selects and retires a block of siblings.
     /// returns `None` if we shouldn't/can't retire.
     ///
-    /// the siblings should be eventually reclaimed to not leak memory.
+    /// the siblings should be eventually freed to not leak memory.
     ///
     /// we guarantee that the siblings and their descendants are inaccessible from the root.
     /// note that other threads can still have access to them via direct handles.
@@ -590,8 +630,8 @@ impl Tree {
         data: &mut ThreadData,
         window: Window,
         now: RenderMoment,
-    ) -> Option<NodeHandle4> {
-        /// returns the parent of the sibling group to retire.
+    ) -> Option<BlockHandle> {
+        /// returns the parent of the sibling block to retire.
         /// must have depth >= `retire_depth`.
         #[cfg_attr(feature = "profiling", inline(never))]
         fn select(
@@ -602,29 +642,33 @@ impl Tree {
             stack.clear();
             stack.push((tree.root, 0));
             std::iter::from_fn(move || {
-                while let Some((handle, depth)) = stack.pop() {
-                    let node = tree.alloc.get(handle);
+                while let Some((node_handle, depth)) = stack.pop() {
+                    let node = tree.alloc.get(node_handle);
 
-                    let Some(child_handle) = node.left_child.load(Ordering::SeqCst) else {
+                    let Some(children_handle) = node.children_handle.load(Ordering::SeqCst) else {
                         // don't explore or select leafs
                         continue;
                     };
 
                     // TODO: don't do this for debugging,
-                    // so we can test retiring nodes whose parents have been retired but not reclaimed
+                    // so we can test retiring nodes whose parents have been retired but not freed
                     if depth >= retire_depth {
                         // if we fail to retire this node,
                         // don't explore its children
-                        // because those will get reclaimed with the node by a different thread.
+                        // because those will get freed with the node by a different thread.
                         // (it would still be correct, but it's wasted work)
-                        return Some(handle);
+                        return Some(node_handle);
                     }
 
                     let max_height = node.max_height.load(Ordering::SeqCst);
                     let deepest_descendant_leaf_depth = max_height + depth;
                     // > bc we need internal nodes, not leafs.
                     if deepest_descendant_leaf_depth > retire_depth {
-                        stack.extend(child_handle.siblings().map(|c| (c, depth + 1)));
+                        stack.extend(
+                            children_handle
+                                .siblings()
+                                .map(|child_handle| (child_handle, depth + 1)),
+                        );
                     }
                 }
                 None
@@ -648,39 +692,47 @@ impl Tree {
             // because other threads can still be looking at the children,
             // and we need their child pointers later.
             let node = self.alloc.get(node_handle);
-            let Some(left_sibling) = node.left_child.swap(None, Ordering::SeqCst) else {
-                // log!("someone else retired the node we selected");
-                continue;
+            let block_handle = match node.children_handle.swap(None, Ordering::SeqCst) {
+                Some(block_handle) => {
+                    // note that i call this `block_handle` and not `children_handle`
+                    // bc they're no longer anyone's children.
+                    block_handle
+                }
+                None => {
+                    // log!("someone else reclaimed the node we selected");
+                    continue;
+                }
             };
 
             self.update_ancestor_heights(vec_handle, node_handle);
-            self.update_ancestors_timestamp(node_handle, now);
+            self.update_ancestor_timestamps(node_handle, now);
 
-            return Some(left_sibling);
+            return Some(block_handle);
         }
 
         None
     }
 
-    /// reclaims the siblings and all their (accessible) descendants.
+    /// frees the siblings and all their (accessible) descendants.
     ///
     /// SAFETY: the caller must ensure that no other thread can have access to the siblings or any of their descendants.
     /// this is done by waiting at least two (or maybe three) ticks/epochs after retirement.
     #[cfg_attr(feature = "profiling", inline(never))]
-    pub(crate) unsafe fn reclaim(&self, data: &mut ThreadData, left_sibling: NodeHandle4) {
+    pub(crate) unsafe fn free(&self, data: &mut ThreadData, block_handle: BlockHandle) {
         let free_list = &mut data.free_list;
         let stack = &mut data.vec_handle4;
         stack.clear();
-        stack.push(left_sibling);
-        while let Some(left_sibling) = stack.pop() {
-            for sibling_handle in left_sibling.siblings() {
+        stack.push(block_handle);
+        while let Some(block_handle) = stack.pop() {
+            for sibling_handle in block_handle.siblings() {
                 let sibling = self.alloc.get(sibling_handle);
-                if let Some(left_child) = sibling.left_child.swap(None, Ordering::SeqCst) {
-                    stack.push(left_child);
+                if let Some(children_handle) = sibling.children_handle.swap(None, Ordering::SeqCst)
+                {
+                    stack.push(children_handle);
                 }
             }
             unsafe {
-                reclaim_node(self, free_list, left_sibling);
+                free_node(self, free_list, block_handle);
             }
         }
 
@@ -691,36 +743,41 @@ impl Tree {
         /// but first, deinit the fields for debugging.
         ///
         /// SAFETY: the caller must ensure that the siblings are never read after this.
+        // TODO: this should go in `AllocData`.
         #[cfg_attr(feature = "profiling", inline(never))]
-        unsafe fn reclaim_node(
+        unsafe fn free_node(
             tree: &Tree,
-            free_list: &mut Vec<NodeHandle4>,
-            left_sibling: NodeHandle4,
+            free_list: &mut Vec<BlockHandle>,
+            block_handle: BlockHandle,
         ) {
-            for node_handle in left_sibling.siblings() {
-                let node = tree.alloc.get(node_handle);
+            for sibling_handle in block_handle.siblings() {
+                let sibling = tree.alloc.get(sibling_handle);
 
                 #[cfg(debug_assertions)]
-                node.assert_not_any_uninit();
+                sibling.assert_not_any_uninit();
 
                 unsafe {
-                    node.write_dom(Domain::uninit());
+                    sibling.write_dom(Domain::uninit());
                 }
-                node.left_child
-                    .store(Some(NodeHandle4::uninit()), Ordering::Relaxed);
-                node.color.store(Some(Rgb::uninit()), Ordering::Relaxed);
-                node.min_height
+                sibling
+                    .children_handle
+                    .store(Some(BlockHandle::uninit()), Ordering::Relaxed);
+                sibling.color.store(Some(Rgb::uninit()), Ordering::Relaxed);
+                sibling
+                    .min_height
                     .store(Node::UNINIT_HEIGHT, Ordering::Relaxed);
-                node.max_height
+                sibling
+                    .max_height
                     .store(Node::UNINIT_HEIGHT, Ordering::Relaxed);
-                node.timestamp
+                sibling
+                    .timestamp
                     .store(RenderMoment::uninit(), Ordering::Relaxed);
 
                 #[cfg(debug_assertions)]
-                node.assert_all_uninit();
+                sibling.assert_all_uninit();
             }
 
-            free_list.push(left_sibling);
+            free_list.push(block_handle);
         }
     }
 
@@ -755,18 +812,18 @@ impl Tree {
             stack.clear();
             stack.push((tree.root, 0));
             let mut shallowest_depth = u16::MAX;
-            while let Some((handle, depth)) = stack.pop() {
+            while let Some((node_handle, depth)) = stack.pop() {
                 if depth >= shallowest_depth {
                     continue;
                 }
-                let node = tree.alloc.get(handle);
+                let node = tree.alloc.get(node_handle);
                 let dom = unsafe { node.dom() };
                 // TODO: instead of doing this check on pop, do it on push
                 // this also lets us do less work in the case where the domain is contained inside the window
                 if !window.overlaps(dom) {
                     continue;
                 }
-                if let Some(child_handle) = node.left_child.load(Ordering::SeqCst) {
+                if let Some(children_handle) = node.children_handle.load(Ordering::SeqCst) {
                     // let height = node.height.load(Ordering::SeqCst);
                     // let shallowest_descendant_leaf_depth = height + depth;
                     // if shallowest_descendant_leaf_depth >= shallowest_depth {
@@ -787,7 +844,11 @@ impl Tree {
                     // so we can find a shallow leaf faster, which lets us pune more.
                     // we should look at the child closest to the center of the window first.
                     // or maybe look at the child with the shallowest height.
-                    stack.extend(child_handle.siblings().map(|c| (c, depth + 1)));
+                    stack.extend(
+                        children_handle
+                            .siblings()
+                            .map(|child_handle| (child_handle, depth + 1)),
+                    );
                 } else {
                     if depth < shallowest_depth {
                         shallowest_depth = depth;
@@ -817,13 +878,13 @@ impl Tree {
             // this makes checks for retire_depth get subsumed by checks for shallowest_depth.
             let initial_bound = retire_depth.unwrap_or(u16::MAX);
             let mut shallowest_depth = initial_bound;
-            while let Some((handle, depth)) = stack.pop() {
+            while let Some((node_handle, depth)) = stack.pop() {
                 // quick check bc the bound may have improved since we pushed this node.
                 if depth >= shallowest_depth {
                     continue;
                 }
 
-                let node = tree.alloc.get(handle);
+                let node = tree.alloc.get(node_handle);
                 let dom = unsafe { node.dom() };
 
                 // if we don't overlap the window,
@@ -832,8 +893,8 @@ impl Tree {
                     continue;
                 }
 
-                match node.left_child.load(Ordering::SeqCst) {
-                    Some(child_handle) => {
+                match node.children_handle.load(Ordering::SeqCst) {
+                    Some(children_handle) => {
                         let min_height = node.min_height.load(Ordering::SeqCst);
                         let shallowest_descendant_leaf_depth = min_height + depth;
 
@@ -856,7 +917,7 @@ impl Tree {
 
                         #[cfg(false)]
                         {
-                            let oracle_height = child_handle
+                            let oracle_height = children_handle
                                 .siblings()
                                 .map(|child_handle| {
                                     tree.alloc
@@ -882,7 +943,11 @@ impl Tree {
                         // or maybe look at the child with the shallowest height.
                         // actually it doesn't seem faster
 
-                        stack.extend(child_handle.siblings().map(|c| (c, depth + 1)));
+                        stack.extend(
+                            children_handle
+                                .siblings()
+                                .map(|child_handle| (child_handle, depth + 1)),
+                        );
 
                         // let mut children = child_handle.siblings();
                         // // bring min_height to front
@@ -895,13 +960,13 @@ impl Tree {
                         //     })
                         //     .unwrap();
                         // children.swap(0, offset);
-                        // stack.extend(children.into_iter().map(|c| (c, depth + 1)));
+                        // stack.extend(children.into_iter().map(|child_handle| (child_handle, depth + 1)));
 
                         // // bring child in quadrant containing window mid
                         // let offset = dom.quadrant_offset_containing(window.mid());
                         // let mut children = child_handle.siblings();
                         // children.swap(0, offset);
-                        // stack.extend(children.into_iter().map(|c| (c, depth + 1)));
+                        // stack.extend(children.into_iter().map(|child_handle| (child_handle, depth + 1)));
                     }
                     None => {
                         if depth < shallowest_depth {
@@ -918,6 +983,22 @@ impl Tree {
             }
         }
 
+        // TODO: this could be cached until the window changes.
+        // possibly cached by the main thread? but then you need synced pops?
+        // actually this would be handles persisting across method calls, which is invalid.
+        // maybe we can relax it to persisting for a bounded number of ticks,
+        // and then keep stuff in the nursing home for longer?
+
+        // could we cache just the depth?
+        // (and invalidate the cache if there were no leaves at that depth?
+        // just running depth_of_shallowest_leaf_overlapping_window with a tighter initial bound probably isn't faster.)
+        // maybe we can also invalidate the cache if any retire occurs (it would be eventually consistent)?
+        // note the depth is monotonically increasing for a constant window in the absence of retires.
+        // how to communicate that any reclaim occurred?
+        // we can also just invalidate it every reclamation tick? which would give us ~100 cache hits?
+
+        // TODO: ask ai for ideas
+
         /// returns an iterator over the leaves that overlap the window with the target depth.
         #[cfg_attr(feature = "profiling", inline(never))]
         fn select(
@@ -929,10 +1010,10 @@ impl Tree {
             stack.clear();
             stack.push((tree.root, 0));
             std::iter::from_fn(move || {
-                while let Some((handle, depth)) = stack.pop() {
+                while let Some((node_handle, depth)) = stack.pop() {
                     debug_assert!(depth <= shallowest_depth);
 
-                    let node = tree.alloc.get(handle);
+                    let node = tree.alloc.get(node_handle);
                     let dom = unsafe { node.dom() };
 
                     // if we don't overlap the window,
@@ -941,8 +1022,8 @@ impl Tree {
                         continue;
                     }
 
-                    match node.left_child.load(Ordering::SeqCst) {
-                        Some(child_handle) => {
+                    match node.children_handle.load(Ordering::SeqCst) {
+                        Some(children_handle) => {
                             let min_height = node.min_height.load(Ordering::SeqCst);
                             // do this in case min_height is stale,
                             // to make debug_assert!(depth <= shallowest_depth); pass.
@@ -958,11 +1039,15 @@ impl Tree {
                             // so we can find a shallow leaf faster, which lets us pune more.
                             // we should look at the child closest to the center of the window first.
                             // or maybe look at the child with the shallowest height.
-                            stack.extend(child_handle.siblings().map(|c| (c, depth + 1)));
+                            stack.extend(
+                                children_handle
+                                    .siblings()
+                                    .map(|child_handle| (child_handle, depth + 1)),
+                            );
                         }
                         None => {
                             if depth == shallowest_depth {
-                                return Some(handle);
+                                return Some(node_handle);
                             }
                         }
                     }
@@ -972,55 +1057,58 @@ impl Tree {
         }
 
         #[cfg_attr(feature = "profiling", inline(never))]
-        fn try_split(tree: &Tree, leaf_handle: NodeHandle, left_child: NodeHandle4) -> Option<()> {
+        fn try_split(
+            tree: &Tree,
+            leaf_handle: NodeHandle,
+            block_handle: BlockHandle,
+        ) -> Option<()> {
             let leaf = tree.alloc.get(leaf_handle);
 
             let leaf_dom = unsafe { leaf.dom() };
 
-            // initialize the children's dom
+            // initialize the sibling's dom
             {
                 let Some(doms) = leaf_dom.split() else {
                     log!("leaf_dom.split() is None");
                     return None;
                 };
                 for (offset, dom) in doms.into_iter().enumerate() {
-                    let child_handle = left_child.siblings_offset(offset);
-                    let child = tree.alloc.get(child_handle);
+                    let sibling_handle = block_handle.offset(offset);
+                    let sibling = tree.alloc.get(sibling_handle);
 
                     // SAFETY: we allocated the children and never gave them to anyone,
                     // so we have exclusive access.
                     unsafe {
-                        child.write_dom(dom);
+                        sibling.write_dom(dom);
                     }
 
                     #[cfg(debug_assertions)]
-                    child.assert_not_any_uninit();
+                    sibling.assert_not_any_uninit();
                 }
             }
 
             // fence(Ordering::Release);
 
             // this is the linearization point
-            match leaf.left_child.compare_exchange_weak(
+            match leaf.children_handle.compare_exchange_weak(
                 None,
-                Some(left_child),
+                Some(block_handle),
                 Ordering::SeqCst,
                 Ordering::SeqCst,
             ) {
-                Ok(current_left_child) => {
+                Ok(prev) => {
                     // log!("swap succeeded");
                     assert_eq!(
-                        current_left_child, None,
+                        prev, None,
                         "this is guaranteed by compare_exchange_weak, despite it being documented incorrectly"
                     );
+                    Some(())
                 }
-                Err(_current_left_child) => {
-                    // log!("left_child was already `None`");
-                    return None;
+                Err(_actual_cur) => {
+                    // log!("children_handle was not already `None`");
+                    None
                 }
             }
-
-            Some(())
         }
 
         // used for filtering out leafs that would be immediately reclaimed.
@@ -1053,24 +1141,28 @@ impl Tree {
         //     );
         // }
 
-        // note that we have an exclusive reference to this sibling group
-        let left_child = match data.free_list.pop() {
-            Some(handle) => handle,
-            None => self.alloc.alloc4(data),
+        // note that we have an exclusive reference to this sibling block.
+        // TODO: we shouldn't do the match here,
+        // that should be the job of alloc.
+        // move that inside alloc once i refactor `ThreadData`.
+        // so `AllocData` shouldn't have pub fields.
+        let block_handle = match data.free_list.pop() {
+            Some(block_handle) => block_handle,
+            None => self.alloc.alloc(data),
         };
 
-        // initialize the children except for dom, which we don't know yet
-        for child_handle in left_child.siblings() {
-            let child = self.alloc.get(child_handle);
+        // initialize the speculative children except for dom, which we don't know yet
+        for sibling_handle in block_handle.siblings() {
+            let sibling = self.alloc.get(sibling_handle);
 
             #[cfg(debug_assertions)]
-            child.assert_all_uninit();
+            sibling.assert_all_uninit();
 
-            child.left_child.store(None, Ordering::Relaxed);
-            child.color.store(None, Ordering::Relaxed);
-            child.min_height.store(0, Ordering::Relaxed);
-            child.max_height.store(0, Ordering::Relaxed);
-            child.timestamp.store(now, Ordering::Relaxed);
+            sibling.children_handle.store(None, Ordering::Relaxed);
+            sibling.color.store(None, Ordering::Relaxed);
+            sibling.min_height.store(0, Ordering::Relaxed);
+            sibling.max_height.store(0, Ordering::Relaxed);
+            sibling.timestamp.store(now, Ordering::Relaxed);
         }
 
         let vec_handle_u16 = &mut data.vec_handle_u16;
@@ -1080,17 +1172,17 @@ impl Tree {
         let draw_uncolored_nodes = DRAW_UNCOLORED_NODES.load(Ordering::Relaxed);
         for leaf_handle in select(self, vec_handle_u16, sample_window, shallowest_depth) {
             // debug_attempts += 1;
-            if let Some(()) = try_split(self, leaf_handle, left_child) {
+            if let Some(()) = try_split(self, leaf_handle, block_handle) {
                 self.update_ancestor_heights(vec_handle, leaf_handle);
                 // this should be done in insert,
                 // but this allows us to debug draw uncolored nodes.
                 // (uncolored nodes would still sometimes get drawn,
                 // but that's just bc their timestamp got updated by someone else.)
                 if draw_uncolored_nodes {
-                    self.update_ancestors_timestamp(leaf_handle, now);
+                    self.update_ancestor_timestamps(leaf_handle, now);
                 }
                 return Some(
-                    left_child
+                    block_handle
                         .siblings()
                         .map(|h| unsafe { self.alloc.get(h).dom().mid() }),
                 );
@@ -1102,31 +1194,32 @@ impl Tree {
         // ));
 
         // deinit the fields for debugging.
-        for child_handle in left_child.siblings() {
-            let child = self.alloc.get(child_handle);
+        for sibling_handle in block_handle.siblings() {
+            let sibling = self.alloc.get(sibling_handle);
 
             unsafe {
-                child.write_dom(Domain::uninit());
+                sibling.write_dom(Domain::uninit());
             }
-            child
-                .left_child
-                .store(Some(NodeHandle4::uninit()), Ordering::Relaxed);
-            child.color.store(Some(Rgb::uninit()), Ordering::Relaxed);
-            child
+            sibling
+                .children_handle
+                .store(Some(BlockHandle::uninit()), Ordering::Relaxed);
+            sibling.color.store(Some(Rgb::uninit()), Ordering::Relaxed);
+            sibling
                 .min_height
                 .store(Node::UNINIT_HEIGHT, Ordering::Relaxed);
-            child
+            sibling
                 .max_height
                 .store(Node::UNINIT_HEIGHT, Ordering::Relaxed);
-            child
+            sibling
                 .timestamp
                 .store(RenderMoment::uninit(), Ordering::Relaxed);
 
             #[cfg(debug_assertions)]
-            child.assert_all_uninit();
+            sibling.assert_all_uninit();
         }
 
-        data.free_list.push(left_child);
+        // this should be `unsafe AllocData::free` or `unsafe AllocData::free_list_push` or smt.
+        data.free_list.push(block_handle);
 
         None
     }
@@ -1147,13 +1240,10 @@ impl Tree {
         loop {
             let node = self.alloc.get(node_handle);
 
-            // update timestamp.
-            // TODO: .fetch_max
-            let _ = node
-                .timestamp
-                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |old| {
-                    if old >= now { None } else { Some(now) }
-                });
+            // we should only do this if the insert succeeds,
+            // though it fails rarely enough that it's probably not worth
+            // the cost of traversing the path twice.
+            let _ = node.update_timestamp(now);
 
             // break if we found the node.
             let dom = unsafe { node.dom() };
@@ -1164,14 +1254,14 @@ impl Tree {
             }
 
             // go to the correct child.
-            let child_offset = dom.child_offset_containing((real, imag));
-            let Some(left_child) = node.left_child.load(Ordering::SeqCst) else {
+            let Some(children_handle) = node.children_handle.load(Ordering::SeqCst) else {
                 // log!(
                 //     "failed to follow child pointer during insert. this probably means it got reclaimed."
                 // );
                 return;
             };
-            node_handle = left_child.siblings_offset(child_offset);
+            let child_offset = dom.child_offset_containing((real, imag));
+            node_handle = children_handle.offset(child_offset);
         }
     }
 
@@ -1193,8 +1283,8 @@ impl Tree {
         // if we have a segment that's definitely good, we stop exploring.
         // if we have a segment that's definitely bad, we fail.
         // to know that a segment is definitely bad, it must be a leaf.
-        while let Some(handle) = stack.pop() {
-            let node = self.alloc.get(handle);
+        while let Some(node_handle) = stack.pop() {
+            let node = self.alloc.get(node_handle);
             let dom = unsafe { node.dom() };
 
             if dom.imag_lo() > imag || dom.imag_hi() < imag {
@@ -1209,8 +1299,8 @@ impl Tree {
                 continue;
             }
 
-            if let Some(child_handle) = node.left_child.load(Ordering::Relaxed) {
-                stack.extend(child_handle.siblings());
+            if let Some(children_handle) = node.children_handle.load(Ordering::Relaxed) {
+                stack.extend(children_handle.siblings());
             } else {
                 if timestamp >= prev_frame_start {
                     return true;
@@ -1309,11 +1399,11 @@ impl Tree {
 
             // i++
             {
-                let Some(left_child) = node.left_child.load(Ordering::Relaxed) else {
+                let Some(children_handle) = node.children_handle.load(Ordering::Relaxed) else {
                     break;
                 };
                 let child_offset = dom.child_offset_containing(pixel_mid);
-                node_handle = left_child.siblings_offset(child_offset);
+                node_handle = children_handle.offset(child_offset);
             }
         }
 
@@ -1324,20 +1414,23 @@ impl Tree {
 /// for data that each thread should keep track of for itself.
 /// basically just for allocations.
 /// dropping this may leak memory, but is safe.
+// TODO: rename
+// TODO: split into stuff that would leak `AllocData`, and is pub(super),
+// and stuff that wouldn't `TODO`, and is pub(crate).
 #[derive(Debug, Default)]
 pub(crate) struct ThreadData {
     /// nodes we have freed.
     /// you should look in here before going to the global allocator.
     /// the nodes should be uninit.
-    free_list: Vec<NodeHandle4>,
-    /// the block we allocated in `realloc`
-    block: Option<NonNull<Block>>,
+    free_list: Vec<BlockHandle>,
+    /// the slab we allocated in `realloc` but lost the race to swap in.
+    slab: Option<NonNull<Slab>>,
     /// for various stacks.
     /// should be cleared before use, but not when done.
     vec_handle: Vec<NodeHandle>,
     /// for various stacks.
     /// should be cleared before use, but not when done.
-    vec_handle4: Vec<NodeHandle4>,
+    vec_handle4: Vec<BlockHandle>,
     /// for various stacks.
     /// should be cleared before use, but not when done.
     vec_handle_u16: Vec<(NodeHandle, u16)>,
@@ -1415,11 +1508,11 @@ mod alloc {
     const _: () = assert!(align_of::<Node>() == 64);
     /// bits 0..6: unused (for epoch stuff maybe?).
     ///
-    /// bits 6..12: index of node within the block.
+    /// bits 6..12: index of node within the slab.
     ///
-    /// bits 12..: `Block` pointer.
+    /// bits 12..: `Slab` pointer.
     ///
-    /// bits 6..: `Node` pointer (due to the high alignment of `Block`).
+    /// bits 6..: `Node` pointer (due to the high alignment of `Slab`).
     // TODO: we can store [Node; 4] and get two more bits in the pointer
     #[repr(transparent)]
     #[derive(Clone, Copy, PartialEq, Eq, bytemuck::NoUninit)]
@@ -1431,14 +1524,14 @@ mod alloc {
             Self(NonZeroUsize::new(0xABCDEFABCDEFABCD_u64 as usize).unwrap())
         }
 
-        /// index is the index of the node in the block
-        fn new(block: NonNull<Block>, index: usize) -> Self {
-            debug_assert!(index < Block::CAPACITY);
-            let block = block.as_ptr() as usize;
-            debug_assert_eq!(block % Block::SIZE, 0);
+        /// index is the index of the node in the slab
+        fn new(slab: NonNull<Slab>, index: usize) -> Self {
+            debug_assert!(index < Slab::CAPACITY);
+            let slab = slab.as_ptr() as usize;
+            debug_assert_eq!(slab % Slab::SIZE, 0);
             let offset = index * size_of::<Node>();
-            debug_assert_eq!(block & offset, 0);
-            let ret = block + offset;
+            debug_assert_eq!(slab & offset, 0);
+            let ret = slab + offset;
             debug_assert_eq!(
                 ret % size_of::<Node>(),
                 0,
@@ -1449,15 +1542,15 @@ mod alloc {
             unsafe { NodeHandle(NonZeroUsize::new_unchecked(ret)) }
         }
 
-        fn to_block(self) -> NonNull<Block> {
-            let block = self.0.get() & !(Block::SIZE - 1);
-            debug_assert_eq!(block % Block::SIZE, 0);
-            NonNull::new(block as *mut Block).unwrap()
+        fn to_slab(self) -> NonNull<Slab> {
+            let slab = self.0.get() & !(Slab::SIZE - 1);
+            debug_assert_eq!(slab % Slab::SIZE, 0);
+            NonNull::new(slab as *mut Slab).unwrap()
         }
 
         fn to_index(self) -> usize {
-            let index = (self.0.get() % Block::SIZE) / size_of::<Node>();
-            debug_assert!(index < Block::CAPACITY);
+            let index = (self.0.get() % Slab::SIZE) / size_of::<Node>();
+            debug_assert!(index < Slab::CAPACITY);
             index
         }
 
@@ -1468,13 +1561,13 @@ mod alloc {
             unsafe { NonNull::new_unchecked(ptr) }
         }
 
-        /// because the root is leftmost in its group,
+        /// because the root is leftmost in its block,
         /// this is actually fine to call on the root.
         #[cfg_attr(feature = "profiling", inline(never))]
-        pub(super) fn left_sibling(self) -> NodeHandle4 {
-            let block = self.to_block();
+        pub(super) fn to_block(self) -> BlockHandle {
+            let slab = self.to_slab();
             let i = self.to_index();
-            NodeHandle4::try_from(NodeHandle::new(block, i - (i % 4))).unwrap()
+            BlockHandle::try_from(NodeHandle::new(slab, i - (i % 4))).unwrap()
         }
     }
     impl fmt::Debug for NodeHandle {
@@ -1482,44 +1575,49 @@ mod alloc {
             f.debug_tuple("NodeHandle")
                 .field(&format_args!("hex: {:x}", self.0.get()))
                 .field(&format_args!(
-                    "block: {:x}",
-                    self.to_block().as_ptr() as usize
+                    "slab: {:x}",
+                    self.to_slab().as_ptr() as usize
                 ))
                 .field(&format_args!("index: {}", self.to_index()))
                 .finish()
         }
     }
-    impl From<NodeHandle4> for NodeHandle {
-        fn from(value: NodeHandle4) -> Self {
+    impl From<BlockHandle> for NodeHandle {
+        fn from(value: BlockHandle) -> Self {
             value.0
         }
     }
 
     /// in 0..4.
-    /// used to index into a group of siblings.
+    /// used to index into a block of siblings.
     pub(crate) type Offset = usize;
 
-    /// represents a group of four siblings.
+    /// represents a block of four sibling nodes.
+    ///
+    /// bc they're contiguous in memory,
+    /// we actually just store the handle to the leftmost sibling.
     #[repr(transparent)]
     #[derive(Clone, Copy, PartialEq, Eq, bytemuck::NoUninit)]
-    pub(crate) struct NodeHandle4(NodeHandle);
-    unsafe impl bytemuck::ZeroableInOption for NodeHandle4 {}
-    unsafe impl bytemuck::PodInOption for NodeHandle4 {}
-    impl NodeHandle4 {
+    pub(crate) struct BlockHandle(NodeHandle);
+    unsafe impl bytemuck::ZeroableInOption for BlockHandle {}
+    unsafe impl bytemuck::PodInOption for BlockHandle {}
+    impl BlockHandle {
+        // const ARITY: usize = 4;
+
         pub(super) fn uninit() -> Self {
             Self(NodeHandle::uninit())
         }
 
         /// equivalent to `self.siblings()[offset]`
         #[cfg_attr(feature = "profiling", inline(never))]
-        pub(super) fn siblings_offset(self, offset: Offset) -> NodeHandle {
+        pub(super) fn offset(self, offset: Offset) -> NodeHandle {
             debug_assert!(offset < 4);
             #[cfg(debug_assertions)]
             let oracle = {
-                let block = self.0.to_block();
+                let slab = self.0.to_slab();
                 let i = self.0.to_index();
                 debug_assert_eq!(i % 4, 0, "unaligned handle in siblings");
-                NodeHandle::new(block, i + offset)
+                NodeHandle::new(slab, i + offset)
             };
             let ret = unsafe {
                 NodeHandle(NonZeroUsize::new_unchecked(
@@ -1534,14 +1632,14 @@ mod alloc {
         /// note that if you call this on the root, you'll get handles to uninitialized nodes.
         #[cfg_attr(feature = "profiling", inline(never))]
         pub(super) fn siblings(self) -> [NodeHandle; 4] {
-            let block = self.0.to_block();
+            let slab = self.0.to_slab();
             let i = self.0.to_index();
             debug_assert_eq!(i % 4, 0, "unaligned handle in siblings");
             let oracle = [
-                NodeHandle::new(block, i),
-                NodeHandle::new(block, i + 1),
-                NodeHandle::new(block, i + 2),
-                NodeHandle::new(block, i + 3),
+                NodeHandle::new(slab, i),
+                NodeHandle::new(slab, i + 1),
+                NodeHandle::new(slab, i + 2),
+                NodeHandle::new(slab, i + 3),
             ];
             let ret = unsafe {
                 [
@@ -1561,19 +1659,19 @@ mod alloc {
             ret
         }
     }
-    impl fmt::Debug for NodeHandle4 {
+    impl fmt::Debug for BlockHandle {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            f.debug_tuple("NodeHandle4")
+            f.debug_tuple("NodeBlockHandle")
                 .field(&format_args!("hex: {:x}", self.0.0.get()))
                 .field(&format_args!(
-                    "block: {:x}",
-                    self.0.to_block().as_ptr() as usize
+                    "slab: {:x}",
+                    self.0.to_slab().as_ptr() as usize
                 ))
                 .field(&format_args!("index: {}", self.0.to_index()))
                 .finish()
         }
     }
-    impl TryFrom<NodeHandle> for NodeHandle4 {
+    impl TryFrom<NodeHandle> for BlockHandle {
         type Error = &'static str;
 
         fn try_from(value: NodeHandle) -> Result<Self, Self::Error> {
@@ -1585,39 +1683,39 @@ mod alloc {
     }
 
     /// footer rather than header because then indexing the node array
-    /// is an offset from the block pointer,
-    /// rather than the block pointer + header size.
+    /// is an offset from the slab pointer,
+    /// rather than the slab pointer + header size.
     #[derive(Debug)]
-    struct BlockFooter {
+    struct SlabFooter {
         // TODO: consider having the head point to itself instead of `None` / null
-        // prev: *mut Block,
-        prev: Option<NonNull<Block>>,
-        /// how many nodes are allocated in this block.
+        // prev: *mut Slab,
+        prev: Option<NonNull<Slab>>,
+        /// how many nodes are allocated in this slab.
         /// note that this can be > capacity.
         len: AtomicUsize,
     }
 
-    // align requires a literal, otherwise i would use `Block::SIZE`
+    // align requires a literal, otherwise i would use `Slab::SIZE`
     #[repr(C, align(4096))]
     #[derive(Debug)]
-    pub(super) struct Block {
+    pub(super) struct Slab {
         /// not wrapped in `UnsafeCell` because we don't actually write to the nodes, only their fields.
         // TODO: maybe this should be `[MaybeUninit<Node>; CAPACITY]`
         // TODO: should i be using `Pin` somewhere?
-        // TODO: we should be able to free blocks so we can use caching on mandelbrots.
+        // TODO: we should be able to free slabs so we can use caching on mandelbrots.
         mem: [Node; Self::CAPACITY],
-        foot: BlockFooter,
+        foot: SlabFooter,
     }
-    const _: () = assert!(size_of::<Block>() == Block::SIZE);
-    const _: () = assert!(align_of::<Block>() == Block::SIZE);
-    impl Block {
+    const _: () = assert!(size_of::<Slab>() == Slab::SIZE);
+    const _: () = assert!(align_of::<Slab>() == Slab::SIZE);
+    impl Slab {
         const SIZE: usize = 4096;
-        const CAPACITY: usize = (Self::SIZE - size_of::<BlockFooter>()) / size_of::<Node>();
+        const CAPACITY: usize = (Self::SIZE - size_of::<SlabFooter>()) / size_of::<Node>();
 
-        fn with_prev(prev: Option<NonNull<Block>>) -> Self {
+        fn with_prev(prev: Option<NonNull<Slab>>) -> Self {
             Self {
                 mem: std::array::from_fn(|_| Node::uninit()),
-                foot: BlockFooter {
+                foot: SlabFooter {
                     prev,
                     len: AtomicUsize::new(0),
                 },
@@ -1627,7 +1725,7 @@ mod alloc {
 
     #[derive(Debug)]
     pub(super) struct Alloc {
-        head: AtomicPtr<Block>,
+        head: AtomicPtr<Slab>,
         // last_len: AtomicUsize,
     }
     impl Default for Alloc {
@@ -1640,52 +1738,52 @@ mod alloc {
         #[cfg_attr(feature = "profiling", inline(never))]
         fn new() -> Self {
             Self {
-                head: AtomicPtr::new(Box::into_raw(Box::new(Block::with_prev(None)))),
+                head: AtomicPtr::new(Box::into_raw(Box::new(Slab::with_prev(None)))),
                 // last_len: AtomicUsize::new(0),
                 // local_cache: vec![std::ptr::null_mut(); thread_count].into_boxed_slice(),
             }
         }
 
         #[cfg_attr(feature = "profiling", inline(never))]
-        fn realloc(&self, data: &mut ThreadData, old_last: NonNull<Block>) {
-            let new_block = match data.block.take() {
-                Some(block) => block.as_ptr(),
-                None => Box::into_raw(Box::new(Block::with_prev(Some(old_last)))),
+        fn realloc(&self, data: &mut ThreadData, old_last: NonNull<Slab>) {
+            let new_slab = match data.slab.take() {
+                Some(slab) => slab.as_ptr(),
+                None => Box::into_raw(Box::new(Slab::with_prev(Some(old_last)))),
             };
             match self.head.compare_exchange_weak(
                 old_last.as_ptr(),
-                new_block,
+                new_slab,
                 Ordering::SeqCst,
                 Ordering::SeqCst,
             ) {
-                Ok(current) => {
-                    assert_eq!(current, old_last.as_ptr());
-                    // successfully swapped in the new block, so we can just use it
+                Ok(prev) => {
+                    assert_eq!(prev, old_last.as_ptr());
+                    // successfully swapped in the new slab, so we can just use it
                     // self.local_cache[thread_i] = std::ptr::null_mut();
                 }
-                Err(_current) => {
-                    // another thread already swapped in a new block,
+                Err(_actual_cur) => {
+                    // another thread already swapped in a new slab,
                     // or we had a spurious failure.
-                    // reuse the block we allocated for next time.
-                    data.block = Some(NonNull::new(new_block).unwrap());
+                    // reuse the slab we allocated for next time.
+                    data.slab = Some(NonNull::new(new_slab).unwrap());
                 }
             }
         }
 
         #[cfg_attr(feature = "profiling", inline(never))]
-        pub(super) fn alloc4(&self, data: &mut ThreadData) -> NodeHandle4 {
+        pub(super) fn alloc(&self, data: &mut ThreadData) -> BlockHandle {
             // loop bc it's possible that after reallocating
             // or during waiting for another thread to reallocate,
-            // we go to sleep and the new block fills up.
+            // we go to sleep and the new slab fills up.
             loop {
                 let last = unsafe { self.head.load(Ordering::SeqCst).as_ref().unwrap() };
                 let i = last.foot.len.fetch_add(4, Ordering::SeqCst);
-                if i + 4 <= Block::CAPACITY {
+                if i + 4 <= Slab::CAPACITY {
                     return NodeHandle::new(last.into(), i)
                         .try_into()
                         .expect("we just made sure it's aligned");
                 }
-                // we could say that whoever got len == Block::CAPACITY is responsible for reallocating,
+                // we could say that whoever got len == Slab::CAPACITY is responsible for reallocating,
                 // but what if that thread went to sleep during reallocation?
                 // so just have all the threads realloc
                 self.realloc(data, last.into());
@@ -1693,19 +1791,23 @@ mod alloc {
         }
 
         #[cfg_attr(feature = "profiling", inline(never))]
-        pub(super) fn get(&self, handle: NodeHandle) -> &Node {
-            debug_assert_ne!(handle, NodeHandle::uninit(), "uninit handle in Alloc::get");
+        pub(super) fn get(&self, node_handle: NodeHandle) -> &Node {
+            debug_assert_ne!(
+                node_handle,
+                NodeHandle::uninit(),
+                "uninit node_handle in Alloc::get"
+            );
 
-            let ret = unsafe { handle.to_ptr().as_ref() };
+            let ret = unsafe { node_handle.to_ptr().as_ref() };
 
             #[cfg(debug_assertions)]
             {
-                let block = handle.to_block();
-                let block = unsafe { block.as_ref() };
+                let slab = node_handle.to_slab();
+                let slab = unsafe { slab.as_ref() };
 
                 debug_assert_eq!(
                     ret as *const Node,
-                    &block.mem[handle.to_index()] as *const Node
+                    &slab.mem[node_handle.to_index()] as *const Node
                 );
             }
 

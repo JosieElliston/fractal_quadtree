@@ -58,7 +58,6 @@ pub(crate) struct App {
     global_dts: egui::util::History<f32>,
     fractal_dts: egui::util::History<f32>,
     /// the last successful reclaim tick.
-    // TODO: should this be called `retire`?
     last_reclaim_tick: Instant,
     reclaim_dts: egui::util::History<f32>,
     reclaim_counts: egui::util::History<u64>,
@@ -678,12 +677,12 @@ impl App {
                         timer.sample_err.us_per_iter(),
                     ));
                     ui.label(format!(
-                        "us per reclaim_ok: {:.03}",
-                        timer.reclaim_ok.us_per_iter(),
+                        "us per free_ok: {:.03}",
+                        timer.free_ok.us_per_iter(),
                     ));
                     ui.label(format!(
-                        "us per reclaim_err: {:.03}",
-                        timer.reclaim_err.us_per_iter(),
+                        "us per free_err: {:.03}",
+                        timer.free_err.us_per_iter(),
                     ));
                     ui.label(format!(
                         "us per retire_ok: {:.03}",
@@ -712,7 +711,7 @@ impl App {
                     // let total_elapsed = timer.total().elapsed();
 
                     // ui.label(format!("draw portion: {:.03}", timer.draw.div_elapsed(total_elapsed)));
-                    // ui.label(format!("reclaim portion: {:.03}", timer.reclaim.div_elapsed(total_elapsed)));
+                    // ui.label(format!("free portion: {:.03}", timer.free.div_elapsed(total_elapsed)));
                     // ui.label(format!("retire portion: {:.03}", timer.retire.div_elapsed(total_elapsed)));
                     // ui.label(format!("sample portion: {:.03}", timer.sample.div_elapsed(total_elapsed)));
                     // ui.label(format!("split portion: {:.03}", timer.split.div_elapsed(total_elapsed)));
@@ -806,10 +805,10 @@ impl App {
                         .on_hover_text("whether to get new samples of the metabrot. keybinding: ".to_owned() + &ctx.format_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::NONE, egui::Key::S)));
                 }
 
-                // retiring
+                // reclamation
                 {
-                    ui.checkbox(&mut self.retiring, "retiring")
-                        .on_hover_text("whether to retire/reclaim/free/deallocate nodes. keybinding: ".to_owned() + &ctx.format_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::NONE, egui::Key::R)));
+                    ui.checkbox(&mut self.retiring, "reclamation")
+                        .on_hover_text("whether to reclaim/retire/free/deallocate nodes. keybinding: ".to_owned() + &ctx.format_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::NONE, egui::Key::R)));
                 }
 
                 // retire max width
