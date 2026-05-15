@@ -45,7 +45,6 @@ impl Tree {
 refine is O(n) because we need to find the shallowest leaf.
 if we store the distance to nearest/shallowest descendant leaf at each node,
 
-
 #### concurrency
 
 #### reclamation / block allocator -->

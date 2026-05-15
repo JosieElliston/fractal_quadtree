@@ -142,8 +142,8 @@
 - bc this isn't a library, change `pub(crate)` -> `pub`
 - async for main thread rendering?
 - async for reclamation?
-- rename `Block` -> `Slab`, `NodeHandle4` -> `NodeBlockHandle`, "group" -> "block", "siblings" -> "block", `left_sibling` -> `block_handle`, `left_child` -> `children_handle`
-- rename `reclaim` -> `free`, so reclaim refers to the process of retire and free.
+- consistent `AsdfLocal` / `AsdfShared` / `LocalAsdf` / `SharedAsdf` / `Data`
+- consistent "siblings" / "block" / "siblings block" / "block of siblings"
 
 ## bugs
 

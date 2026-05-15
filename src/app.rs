@@ -587,10 +587,10 @@ impl App {
                 // wacky stuff to get around the borrow checker
                 let metabrot = &mut self.metabrot;
                 let tree = &metabrot.shared.tree;
-                let data = &mut metabrot.thread_data;
+                let tree_local = &mut metabrot.tree_local;
 
                 // node count
-                ui.label(format!("node count: {}", tree.node_count(data)))
+                ui.label(format!("node count: {}", tree.node_count(tree_local)))
                     .on_hover_text("how many nodes are in the quadtree. note that this can be expensive to compute, try collapsing the header.");
 
                 // min_height

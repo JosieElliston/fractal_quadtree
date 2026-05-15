@@ -260,7 +260,7 @@ pub(crate) struct Tree {
     root: NodeHandle,
 }
 impl Tree {
-    pub(crate) fn new(data: &mut ThreadData) -> Self {
+    pub(crate) fn new(_tree_local: &mut TreeLocal, alloc_local: &mut AllocLocal) -> Self {
         let dom = Domain::default();
         let color = metabrot_sample::<false>(&mut None, dom.mid())
             .color()
@@ -269,8 +269,8 @@ impl Tree {
         let alloc = Alloc::default();
 
         // we leave the root's siblings uninit.
-        let root_handle = alloc.alloc(data).into();
-        let root = alloc.get(root_handle);
+        let root_handle = alloc.alloc(alloc_local).into();
+        let root = alloc.get_uninit(root_handle);
 
         unsafe {
             root.write_dom(dom);
@@ -283,7 +283,7 @@ impl Tree {
             .store(RenderMoment::default(), Ordering::Relaxed);
 
         // TODO: do i need a fence?
-        // fence(Ordering::Release);
+        fence(Ordering::Release);
 
         Self {
             dom,
@@ -293,9 +293,9 @@ impl Tree {
     }
 
     #[cfg_attr(feature = "profiling", inline(never))]
-    pub(crate) fn node_count(&self, data: &mut ThreadData) -> usize {
+    pub(crate) fn node_count(&self, tree_local: &mut TreeLocal) -> usize {
         let mut count = 0;
-        let stack = &mut data.vec_handle;
+        let stack = &mut tree_local.vec_handle;
         stack.clear();
 
         stack.push(self.root);
@@ -627,7 +627,7 @@ impl Tree {
     #[cfg_attr(feature = "profiling", inline(never))]
     pub(crate) fn retire(
         &self,
-        data: &mut ThreadData,
+        tree_local: &mut TreeLocal,
         window: Window,
         now: RenderMoment,
     ) -> Option<BlockHandle> {
@@ -683,8 +683,8 @@ impl Tree {
             }
         };
 
-        let vec_handle_u16 = &mut data.vec_handle_u16;
-        let vec_handle = &mut data.vec_handle;
+        let vec_handle_u16 = &mut tree_local.vec_handle_u16;
+        let vec_handle = &mut tree_local.vec_handle;
 
         for node_handle in select(self, vec_handle_u16, retire_depth) {
             // erase the child pointer.
@@ -718,9 +718,13 @@ impl Tree {
     /// SAFETY: the caller must ensure that no other thread can have access to the siblings or any of their descendants.
     /// this is done by waiting at least two (or maybe three) ticks/epochs after retirement.
     #[cfg_attr(feature = "profiling", inline(never))]
-    pub(crate) unsafe fn free(&self, data: &mut ThreadData, block_handle: BlockHandle) {
-        let free_list = &mut data.free_list;
-        let stack = &mut data.vec_handle4;
+    pub(crate) unsafe fn free(
+        &self,
+        tree_local: &mut TreeLocal,
+        alloc_local: &mut AllocLocal,
+        block_handle: BlockHandle,
+    ) {
+        let stack = &mut tree_local.vec_handle4;
         stack.clear();
         stack.push(block_handle);
         while let Some(block_handle) = stack.pop() {
@@ -732,52 +736,8 @@ impl Tree {
                 }
             }
             unsafe {
-                free_node(self, free_list, block_handle);
+                self.alloc.free(alloc_local, block_handle);
             }
-        }
-
-        // everything below this is helper function definitions.
-        return;
-
-        /// puts the siblings in the free list,
-        /// but first, deinit the fields for debugging.
-        ///
-        /// SAFETY: the caller must ensure that the siblings are never read after this.
-        // TODO: this should go in `AllocData`.
-        #[cfg_attr(feature = "profiling", inline(never))]
-        unsafe fn free_node(
-            tree: &Tree,
-            free_list: &mut Vec<BlockHandle>,
-            block_handle: BlockHandle,
-        ) {
-            for sibling_handle in block_handle.siblings() {
-                let sibling = tree.alloc.get(sibling_handle);
-
-                #[cfg(debug_assertions)]
-                sibling.assert_not_any_uninit();
-
-                unsafe {
-                    sibling.write_dom(Domain::uninit());
-                }
-                sibling
-                    .children_handle
-                    .store(Some(BlockHandle::uninit()), Ordering::Relaxed);
-                sibling.color.store(Some(Rgb::uninit()), Ordering::Relaxed);
-                sibling
-                    .min_height
-                    .store(Node::UNINIT_HEIGHT, Ordering::Relaxed);
-                sibling
-                    .max_height
-                    .store(Node::UNINIT_HEIGHT, Ordering::Relaxed);
-                sibling
-                    .timestamp
-                    .store(RenderMoment::uninit(), Ordering::Relaxed);
-
-                #[cfg(debug_assertions)]
-                sibling.assert_all_uninit();
-            }
-
-            free_list.push(block_handle);
         }
     }
 
@@ -793,11 +753,102 @@ impl Tree {
     #[cfg_attr(feature = "profiling", inline(never))]
     pub(crate) fn refine(
         &self,
-        data: &mut ThreadData,
+        tree_local: &mut TreeLocal,
+        alloc_local: &mut AllocLocal,
         sample_window: Window,
         retire_window: Option<Window>,
         now: RenderMoment,
     ) -> Option<[(Real, Imag); 4]> {
+        // used for filtering out leafs that would be immediately reclaimed.
+        let retire_depth = if SPLIT_RETIRABLE_NODES.load(Ordering::Relaxed) {
+            None
+        } else {
+            match retire_window {
+                Some(retire_window) => match self.depth_needed_for_window(retire_window) {
+                    Ok(depth) => Some(depth),
+                    Err(err) => {
+                        log!(err);
+                        None
+                    }
+                },
+                None => None,
+            }
+        };
+
+        // // debug disabled to make more races happen
+        // let retire_rad = None;
+        let shallowest_depth = depth_of_shallowest_leaf_overlapping_window(
+            self,
+            tree_local,
+            sample_window,
+            retire_depth,
+        )?;
+
+        // #[cfg(false)]
+        // {
+        //     let shallowest_depth_oracle = depth_of_shallowest_leaf_oracle(self, window, data)?;
+        //     log!(
+        //         "oracle: {}, actual: {}",
+        //         shallowest_depth_oracle, shallowest_depth
+        //     );
+        // }
+
+        let block_handle = self.alloc.alloc(alloc_local);
+
+        // initialize the speculative children except for dom, which we don't know yet.
+        // actually, also init the dom with a non uninit sentinel for debugging,
+        // bc i like assert that nodes are either init or uninit and never partially init.
+        for sibling_handle in block_handle.siblings() {
+            let sibling = self.alloc.get_uninit(sibling_handle);
+
+            #[cfg(debug_assertions)]
+            sibling.assert_all_uninit();
+
+            unsafe {
+                sibling.write_dom(Domain::default());
+            }
+            sibling.children_handle.store(None, Ordering::Relaxed);
+            sibling.color.store(None, Ordering::Relaxed);
+            sibling.min_height.store(0, Ordering::Relaxed);
+            sibling.max_height.store(0, Ordering::Relaxed);
+            sibling.timestamp.store(now, Ordering::Relaxed);
+        }
+
+        let vec_handle_u16 = &mut tree_local.vec_handle_u16;
+        let vec_handle = &mut tree_local.vec_handle;
+
+        // let mut debug_attempts = 0;
+        let draw_uncolored_nodes = DRAW_UNCOLORED_NODES.load(Ordering::Relaxed);
+        for leaf_handle in select(self, vec_handle_u16, sample_window, shallowest_depth) {
+            // debug_attempts += 1;
+            if let Some(()) = try_split(self, leaf_handle, block_handle) {
+                self.update_ancestor_heights(vec_handle, leaf_handle);
+                // this should be done in insert,
+                // but this allows us to debug draw uncolored nodes.
+                // (uncolored nodes would still sometimes get drawn,
+                // but that's just bc their timestamp got updated by someone else.)
+                if draw_uncolored_nodes {
+                    self.update_ancestor_timestamps(leaf_handle, now);
+                }
+                return Some(
+                    block_handle
+                        .siblings()
+                        .map(|h| unsafe { self.alloc.get(h).dom().mid() }),
+                );
+            }
+        }
+        // log!(format!(
+        //     "found {} leafs to try splitting but they all failed",
+        //     debug_attempts
+        // ));
+
+        unsafe {
+            self.alloc.free(alloc_local, block_handle);
+        }
+
+        // everything below this is helper function definitions.
+        return None;
+
         /// returns the depth of the shallowest leaf that overlaps the window.
         /// returns `None` if there are no such leafs.
         /// oracle without using the cached height.
@@ -805,10 +856,10 @@ impl Tree {
         #[cfg(false)]
         fn depth_of_shallowest_leaf_oracle(
             tree: &Tree,
-            data: &mut ThreadData,
+            tree_local: &mut TreeLocal,
             window: Window,
         ) -> Option<u16> {
-            let stack = &mut data.vec_handle_u16;
+            let stack = &mut tree_local.vec_handle_u16;
             stack.clear();
             stack.push((tree.root, 0));
             let mut shallowest_depth = u16::MAX;
@@ -868,11 +919,11 @@ impl Tree {
         #[cfg_attr(feature = "profiling", inline(never))]
         fn depth_of_shallowest_leaf_overlapping_window(
             tree: &Tree,
-            data: &mut ThreadData,
+            tree_local: &mut TreeLocal,
             window: Window,
             retire_depth: Option<u16>,
         ) -> Option<u16> {
-            let stack = &mut data.vec_handle_u16;
+            let stack = &mut tree_local.vec_handle_u16;
             stack.clear();
             stack.push((tree.root, 0));
             // this makes checks for retire_depth get subsumed by checks for shallowest_depth.
@@ -1110,118 +1161,6 @@ impl Tree {
                 }
             }
         }
-
-        // used for filtering out leafs that would be immediately reclaimed.
-        let retire_depth = if SPLIT_RETIRABLE_NODES.load(Ordering::Relaxed) {
-            None
-        } else {
-            match retire_window {
-                Some(retire_window) => match self.depth_needed_for_window(retire_window) {
-                    Ok(depth) => Some(depth),
-                    Err(err) => {
-                        log!(err);
-                        None
-                    }
-                },
-                None => None,
-            }
-        };
-
-        // // debug disabled to make more races happen
-        // let retire_rad = None;
-        let shallowest_depth =
-            depth_of_shallowest_leaf_overlapping_window(self, data, sample_window, retire_depth)?;
-
-        // #[cfg(false)]
-        // {
-        //     let shallowest_depth_oracle = depth_of_shallowest_leaf_oracle(self, window, data)?;
-        //     log!(
-        //         "oracle: {}, actual: {}",
-        //         shallowest_depth_oracle, shallowest_depth
-        //     );
-        // }
-
-        // note that we have an exclusive reference to this sibling block.
-        // TODO: we shouldn't do the match here,
-        // that should be the job of alloc.
-        // move that inside alloc once i refactor `ThreadData`.
-        // so `AllocData` shouldn't have pub fields.
-        let block_handle = match data.free_list.pop() {
-            Some(block_handle) => block_handle,
-            None => self.alloc.alloc(data),
-        };
-
-        // initialize the speculative children except for dom, which we don't know yet
-        for sibling_handle in block_handle.siblings() {
-            let sibling = self.alloc.get(sibling_handle);
-
-            #[cfg(debug_assertions)]
-            sibling.assert_all_uninit();
-
-            sibling.children_handle.store(None, Ordering::Relaxed);
-            sibling.color.store(None, Ordering::Relaxed);
-            sibling.min_height.store(0, Ordering::Relaxed);
-            sibling.max_height.store(0, Ordering::Relaxed);
-            sibling.timestamp.store(now, Ordering::Relaxed);
-        }
-
-        let vec_handle_u16 = &mut data.vec_handle_u16;
-        let vec_handle = &mut data.vec_handle;
-
-        // let mut debug_attempts = 0;
-        let draw_uncolored_nodes = DRAW_UNCOLORED_NODES.load(Ordering::Relaxed);
-        for leaf_handle in select(self, vec_handle_u16, sample_window, shallowest_depth) {
-            // debug_attempts += 1;
-            if let Some(()) = try_split(self, leaf_handle, block_handle) {
-                self.update_ancestor_heights(vec_handle, leaf_handle);
-                // this should be done in insert,
-                // but this allows us to debug draw uncolored nodes.
-                // (uncolored nodes would still sometimes get drawn,
-                // but that's just bc their timestamp got updated by someone else.)
-                if draw_uncolored_nodes {
-                    self.update_ancestor_timestamps(leaf_handle, now);
-                }
-                return Some(
-                    block_handle
-                        .siblings()
-                        .map(|h| unsafe { self.alloc.get(h).dom().mid() }),
-                );
-            }
-        }
-        // log!(format!(
-        //     "found {} leafs to try splitting but they all failed",
-        //     debug_attempts
-        // ));
-
-        // deinit the fields for debugging.
-        for sibling_handle in block_handle.siblings() {
-            let sibling = self.alloc.get(sibling_handle);
-
-            unsafe {
-                sibling.write_dom(Domain::uninit());
-            }
-            sibling
-                .children_handle
-                .store(Some(BlockHandle::uninit()), Ordering::Relaxed);
-            sibling.color.store(Some(Rgb::uninit()), Ordering::Relaxed);
-            sibling
-                .min_height
-                .store(Node::UNINIT_HEIGHT, Ordering::Relaxed);
-            sibling
-                .max_height
-                .store(Node::UNINIT_HEIGHT, Ordering::Relaxed);
-            sibling
-                .timestamp
-                .store(RenderMoment::uninit(), Ordering::Relaxed);
-
-            #[cfg(debug_assertions)]
-            sibling.assert_all_uninit();
-        }
-
-        // this should be `unsafe AllocData::free` or `unsafe AllocData::free_list_push` or smt.
-        data.free_list.push(block_handle);
-
-        None
     }
 
     /// inserts the previously reserved sample into the node.
@@ -1230,7 +1169,7 @@ impl Tree {
     #[cfg_attr(feature = "profiling", inline(never))]
     pub(crate) fn insert(
         &self,
-        _data: &mut ThreadData,
+        _tree_local: &mut TreeLocal,
         (real, imag): (Real, Imag),
         color: Color32,
         now: RenderMoment,
@@ -1268,7 +1207,7 @@ impl Tree {
     #[cfg_attr(feature = "profiling", inline(never))]
     pub(crate) fn any_on_line_needs_redraw(
         &self,
-        data: &mut ThreadData,
+        tree_local: &mut TreeLocal,
         real_lo: Real,
         real_hi: Real,
         imag: Imag,
@@ -1276,7 +1215,7 @@ impl Tree {
     ) -> bool {
         debug_assert!(real_lo <= real_hi);
 
-        let stack = &mut data.vec_handle;
+        let stack = &mut tree_local.vec_handle;
         stack.clear();
         stack.push(self.root);
 
@@ -1324,7 +1263,7 @@ impl Tree {
     #[cfg_attr(feature = "profiling", inline(never))]
     pub(crate) fn color_of_pixel(
         &self,
-        _data: &mut ThreadData,
+        _tree_local: &mut TreeLocal,
         pixel: Pixel,
         prev_frame_start: RenderMoment,
     ) -> Option<Color32> {
@@ -1411,20 +1350,13 @@ impl Tree {
     }
 }
 
-/// for data that each thread should keep track of for itself.
-/// basically just for allocations.
-/// dropping this may leak memory, but is safe.
-// TODO: rename
-// TODO: split into stuff that would leak `AllocData`, and is pub(super),
-// and stuff that wouldn't `TODO`, and is pub(crate).
+/// per-thread data for the allocator.
+///
+/// this is basically just to reuse the same memory for various stacks.
+///
+/// dropping this will not leak memory.
 #[derive(Debug, Default)]
-pub(crate) struct ThreadData {
-    /// nodes we have freed.
-    /// you should look in here before going to the global allocator.
-    /// the nodes should be uninit.
-    free_list: Vec<BlockHandle>,
-    /// the slab we allocated in `realloc` but lost the race to swap in.
-    slab: Option<NonNull<Slab>>,
+pub(crate) struct TreeLocal {
     /// for various stacks.
     /// should be cleared before use, but not when done.
     vec_handle: Vec<NodeHandle>,
@@ -1682,6 +1614,32 @@ mod alloc {
         }
     }
 
+    /// per-thread data for the allocator.
+    ///
+    /// dropping this will probably leak memory,
+    /// and perhaps deadlock (in the future).
+    #[derive(Debug, Default)]
+    pub(crate) struct AllocLocal {
+        /// nodes we have freed.
+        /// we look in here before going to the global allocator.
+        /// the nodes should be uninit.
+        free_list: Vec<BlockHandle>,
+        /// the slab we allocated in `realloc` but lost the race to swap in.
+        slab: Option<NonNull<Slab>>,
+    }
+    impl Drop for AllocLocal {
+        fn drop(&mut self) {
+            if !self.free_list.is_empty() {
+                log!("dropping `AllocLocal` with non-empty free list");
+            }
+            if let Some(slab) = self.slab.take() {
+                unsafe {
+                    drop(Box::from_raw(slab.as_ptr()));
+                }
+            }
+        }
+    }
+
     /// footer rather than header because then indexing the node array
     /// is an offset from the slab pointer,
     /// rather than the slab pointer + header size.
@@ -1745,8 +1703,8 @@ mod alloc {
         }
 
         #[cfg_attr(feature = "profiling", inline(never))]
-        fn realloc(&self, data: &mut ThreadData, old_last: NonNull<Slab>) {
-            let new_slab = match data.slab.take() {
+        fn realloc(&self, alloc_local: &mut AllocLocal, old_last: NonNull<Slab>) {
+            let new_slab = match alloc_local.slab.take() {
                 Some(slab) => slab.as_ptr(),
                 None => Box::into_raw(Box::new(Slab::with_prev(Some(old_last)))),
             };
@@ -1765,13 +1723,18 @@ mod alloc {
                     // another thread already swapped in a new slab,
                     // or we had a spurious failure.
                     // reuse the slab we allocated for next time.
-                    data.slab = Some(NonNull::new(new_slab).unwrap());
+                    alloc_local.slab = Some(NonNull::new(new_slab).unwrap());
                 }
             }
         }
 
         #[cfg_attr(feature = "profiling", inline(never))]
-        pub(super) fn alloc(&self, data: &mut ThreadData) -> BlockHandle {
+        pub(super) fn alloc(&self, alloc_local: &mut AllocLocal) -> BlockHandle {
+            // look in the free list before going to the shared allocator.
+            if let Some(block_handle) = alloc_local.free_list.pop() {
+                return block_handle;
+            }
+
             // loop bc it's possible that after reallocating
             // or during waiting for another thread to reallocate,
             // we go to sleep and the new slab fills up.
@@ -1786,12 +1749,53 @@ mod alloc {
                 // we could say that whoever got len == Slab::CAPACITY is responsible for reallocating,
                 // but what if that thread went to sleep during reallocation?
                 // so just have all the threads realloc
-                self.realloc(data, last.into());
+                self.realloc(alloc_local, last.into());
             }
         }
 
+        /// puts the siblings block in the free list.
+        /// also deinits the fields for debugging.
+        ///
+        /// SAFETY: the caller must ensure that the siblings are never read after this.
+        // TODO: should this be in alloc?
         #[cfg_attr(feature = "profiling", inline(never))]
-        pub(super) fn get(&self, node_handle: NodeHandle) -> &Node {
+        pub(super) unsafe fn free(&self, alloc_local: &mut AllocLocal, block_handle: BlockHandle) {
+            for sibling_handle in block_handle.siblings() {
+                // TODO: have a feature flag for whether to deinit nodes
+                let sibling = self.get(sibling_handle);
+
+                #[cfg(debug_assertions)]
+                sibling.assert_not_any_uninit();
+
+                unsafe {
+                    sibling.write_dom(Domain::uninit());
+                }
+                sibling
+                    .children_handle
+                    .store(Some(BlockHandle::uninit()), Ordering::Relaxed);
+                sibling.color.store(Some(Rgb::uninit()), Ordering::Relaxed);
+                sibling
+                    .min_height
+                    .store(Node::UNINIT_HEIGHT, Ordering::Relaxed);
+                sibling
+                    .max_height
+                    .store(Node::UNINIT_HEIGHT, Ordering::Relaxed);
+                sibling
+                    .timestamp
+                    .store(RenderMoment::uninit(), Ordering::Relaxed);
+
+                #[cfg(debug_assertions)]
+                sibling.assert_all_uninit();
+            }
+
+            alloc_local.free_list.push(block_handle);
+        }
+
+        /// gets the partially initialized node.
+        /// (debug assert that the handle is init.)
+        #[track_caller]
+        #[cfg_attr(feature = "profiling", inline(never))]
+        fn get_partial_init(&self, node_handle: NodeHandle) -> &Node {
             debug_assert_ne!(
                 node_handle,
                 NodeHandle::uninit(),
@@ -1810,6 +1814,31 @@ mod alloc {
                     &slab.mem[node_handle.to_index()] as *const Node
                 );
             }
+
+            ret
+        }
+
+        /// gets the initialized node.
+        #[doc(alias = "get_init")]
+        #[track_caller]
+        #[cfg_attr(feature = "profiling", inline(never))]
+        pub(super) fn get(&self, node_handle: NodeHandle) -> &Node {
+            let ret = self.get_partial_init(node_handle);
+
+            #[cfg(debug_assertions)]
+            ret.assert_not_any_uninit();
+
+            ret
+        }
+
+        /// gets the uninitialized node.
+        #[track_caller]
+        #[cfg_attr(feature = "profiling", inline(never))]
+        pub(super) fn get_uninit(&self, node_handle: NodeHandle) -> &Node {
+            let ret = self.get_partial_init(node_handle);
+
+            #[cfg(debug_assertions)]
+            ret.assert_all_uninit();
 
             ret
         }
@@ -1926,7 +1955,7 @@ mod tests {
 
     #[test]
     fn test_depth_needed_for_rad() {
-        let tree = Tree::new(&mut ThreadData::default());
+        let tree = Tree::new(&mut TreeLocal::default(), &mut AllocLocal::default());
         assert_eq!(tree.dom.rad(), Real::from_f64(4.0));
         assert_eq!(tree.depth_needed_for_rad(Real::from_f64(6.0)), Some(0));
         assert_eq!(tree.depth_needed_for_rad(Real::from_f64(5.0)), Some(0));

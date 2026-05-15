@@ -1,7 +1,7 @@
 use std::{
     sync::{
         Arc, Mutex, RwLock, TryLockError,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
     thread,
     time::{Duration, Instant},
@@ -13,7 +13,7 @@ use eframe::egui::{self, Color32};
 use crate::{
     complex::{CameraMap, Window, fixed::*},
     log, sample,
-    tree::{ReclaimMoment, RenderMoment, Tree},
+    tree::*,
 };
 
 /// whether to draw pixel that weren't cached from the last frame for a frame.
@@ -61,13 +61,11 @@ pub(crate) struct Shared {
 
 pub(crate) use main_thread::*;
 mod main_thread {
-    use crate::tree::ThreadData;
-
     use super::*;
 
     /// owned by the main thread.
     struct WorkerHandle {
-        handle: thread::JoinHandle<()>,
+        join_handle: thread::JoinHandle<()>,
         /// receive from the worker thread what tick they think it is.
         shared_reclaim_now: Arc<Atomic<ReclaimMoment>>,
         /// workers don't actually update this on every iteration,
@@ -79,8 +77,8 @@ mod main_thread {
 
     /// the main thread data.
     pub(crate) struct Fractal {
-        /// `pub` so we can use `thread_data` and `&mut shared.tree`
-        pub(crate) thread_data: ThreadData,
+        pub(crate) tree_local: TreeLocal,
+        pub(crate) alloc_local: AllocLocal,
         pub(crate) shared: Arc<Shared>,
         workers: Vec<WorkerHandle>,
         /// we apply diffs the worker threads compute.
@@ -93,9 +91,10 @@ mod main_thread {
                 .unwrap_or(1)
                 - 1)
             .max(1);
-            let mut thread_data = ThreadData::default();
+            let mut tree_local = TreeLocal::default();
+            let mut alloc_local = AllocLocal::default();
             let shared = Arc::new(Shared {
-                tree: Tree::new(&mut thread_data),
+                tree: Tree::new(&mut tree_local, &mut alloc_local),
                 render_now: Atomic::new(RenderMoment::default()),
                 reclaim_now: Atomic::new(ReclaimMoment::default()),
                 reclaim_window: RwLock::new(None),
@@ -113,10 +112,10 @@ mod main_thread {
                     let shared_timer = Arc::new(Mutex::new(MultiTimer::default()));
                     let shared_reclaim_now_clone = Arc::clone(&shared_reclaim_now);
                     let shared_timer_clone = Arc::clone(&shared_timer);
-                    let handle = thread::Builder::new()
+                    let join_handle = thread::Builder::new()
                         .name(format!("pool {}", thread_i))
                         .spawn(move || {
-                            WorkerData::new(
+                            Worker::new(
                                 shared,
                                 thread_i,
                                 shared_reclaim_now_clone,
@@ -126,14 +125,15 @@ mod main_thread {
                         })
                         .unwrap();
                     WorkerHandle {
-                        handle,
+                        join_handle,
                         shared_reclaim_now,
                         shared_timer,
                     }
                 })
                 .collect();
             Self {
-                thread_data,
+                tree_local,
+                alloc_local,
                 shared,
                 workers,
                 local_texture: Vec::new(),
@@ -187,7 +187,7 @@ mod main_thread {
         pub(crate) fn join(&mut self) {
             self.shared.kill.store(true, Ordering::Relaxed);
             for worker in self.workers.drain(..) {
-                worker.handle.join().expect("worker thread panicked");
+                worker.join_handle.join().expect("worker thread panicked");
             }
         }
 
@@ -460,13 +460,12 @@ use worker_thread::*;
 mod worker_thread {
     use std::collections::VecDeque;
 
-    use crate::tree::{BlockHandle, ThreadData};
-
     use super::*;
 
     /// owned by the worker thread
-    pub(super) struct WorkerData {
-        thread_data: ThreadData,
+    pub(super) struct Worker {
+        tree_local: TreeLocal,
+        alloc_local: AllocLocal,
         shared: Arc<Shared>,
         /// `usize` bc [`thread::available_parallelism`] returns a `usize`.
         thread_i: usize,
@@ -487,7 +486,7 @@ mod worker_thread {
         nursing_home: VecDeque<(ReclaimMoment, BlockHandle)>,
         timer: TimerData,
     }
-    impl WorkerData {
+    impl Worker {
         pub(super) fn new(
             shared: Arc<Shared>,
             thread_i: usize,
@@ -495,7 +494,8 @@ mod worker_thread {
             shared_timer: Arc<Mutex<MultiTimer>>,
         ) -> Self {
             Self {
-                thread_data: ThreadData::default(),
+                tree_local: TreeLocal::default(),
+                alloc_local: AllocLocal::default(),
                 shared,
                 thread_i,
                 local_reclaim_now: shared_reclaim_now.load(Ordering::SeqCst),
@@ -591,7 +591,7 @@ mod worker_thread {
                             "we should short circuit earlier"
                         );
                         self.shared.tree.any_on_line_needs_redraw(
-                            &mut self.thread_data,
+                            &mut self.tree_local,
                             real_lo,
                             real_hi,
                             imag,
@@ -609,7 +609,7 @@ mod worker_thread {
                     {
                         *target = if let Some(pixel) = pixel {
                             if let Some(color) = self.shared.tree.color_of_pixel(
-                                &mut self.thread_data,
+                                &mut self.tree_local,
                                 pixel,
                                 prev_frame_start,
                             ) {
@@ -653,14 +653,15 @@ mod worker_thread {
                     return Err("reclaim_window would block");
                 }
             };
-            let Some(left) = self.shared.tree.retire(
-                &mut self.thread_data,
+            let Some(block_handle) = self.shared.tree.retire(
+                &mut self.tree_local,
                 window,
                 self.shared.render_now.load(Ordering::SeqCst),
             ) else {
                 return Err("nothing to retire");
             };
-            self.nursing_home.push_back((self.local_reclaim_now, left));
+            self.nursing_home
+                .push_back((self.local_reclaim_now, block_handle));
             Ok(())
         }
 
@@ -687,7 +688,7 @@ mod worker_thread {
             }
 
             // + 3 instead of + 2 because the reclaim_moment is from the start of retire, rather than the end
-            let Some((_, left_sibling)) = self
+            let Some((_, block_handle)) = self
                 .nursing_home
                 .pop_front_if(|(reclaim_moment, _)| *reclaim_moment + 3 <= self.local_reclaim_now)
             else {
@@ -696,7 +697,7 @@ mod worker_thread {
             unsafe {
                 self.shared
                     .tree
-                    .free(&mut self.thread_data, left_sibling);
+                    .free(&mut self.tree_local, &mut self.alloc_local, block_handle);
             }
             self.shared.reclaim_counter.fetch_add(1, Ordering::Relaxed);
             Ok(())
@@ -730,7 +731,8 @@ mod worker_thread {
 
             debug_assert!(self.to_be_colored.is_empty());
             if let Some(handles) = self.shared.tree.refine(
-                &mut self.thread_data,
+                &mut self.tree_local,
+                &mut self.alloc_local,
                 sample_window,
                 reclaim_window,
                 self.shared.render_now.load(Ordering::SeqCst),
@@ -750,7 +752,7 @@ mod worker_thread {
 
             let color = sample::metabrot_sample::<false>(&mut None, (real, imag)).color();
             self.shared.tree.insert(
-                &mut self.thread_data,
+                &mut self.tree_local,
                 (real, imag),
                 color,
                 self.shared.render_now.load(Ordering::SeqCst),
@@ -1041,7 +1043,6 @@ mod timer {
 
 use shared_texture::*;
 mod shared_texture {
-    use std::sync::atomic::AtomicUsize;
 
     use super::*;
 
