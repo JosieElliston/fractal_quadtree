@@ -43,6 +43,9 @@ pub(crate) struct TreeLocal {
     // deque_handle_u16: VecDeque<(NodeHandle, u16)>,
 }
 
+// TODO: doc how we never give out handles except for reclamation.
+// TODO: note what "reclaim" vs "retire" vs "free" means.
+// reclamation is the general process, which is split into retiring and freeing nodes.
 #[derive(Debug)]
 pub(crate) struct Tree {
     dom: Domain,

@@ -12,10 +12,6 @@ use super::{
     alloc::{BlockHandle, NodeHandle},
 };
 
-// TODO: doc comments for `Node`, not just its fields.
-// TODO: doc how we never give out handles except for reclamation.
-// TODO: note what "reclaim" vs "retire" vs "free" means.
-// reclamation is the general process, which is split into retiring and freeing nodes.
 // TODO: define "eventually"
 #[repr(C, align(64))]
 #[derive(Debug)]
@@ -80,7 +76,7 @@ pub(super) struct Node {
     /// this is updated in `insert` and `retire`.
     pub(super) timestamp: Atomic<RenderMoment>,
 
-    _pad: [u8; 8],
+    _pad: [u8; 20],
 }
 const _: () = assert!(size_of::<Node>() == 64);
 const _: () = assert!(align_of::<Node>() == 64);
@@ -97,7 +93,7 @@ impl Node {
             min_height: AtomicU16::new(Self::UNINIT_HEIGHT),
             max_height: AtomicU16::new(Self::UNINIT_HEIGHT),
             timestamp: Atomic::new(RenderMoment::uninit()),
-            _pad: [0; 8],
+            _pad: Default::default(),
         }
     }
 

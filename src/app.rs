@@ -665,52 +665,60 @@ impl App {
                     let timer = self.timers.values().reduce(|lhs, rhs| lhs + rhs).unwrap_or_default();
 
                     ui.label(format!(
-                        "us per draw_ok: {:.03}",
-                        timer.draw_ok.us_per_iter(),
+                        "render_ok: {:.03} us",
+                        timer.render_ok.us_per_iter(),
                     ));
                     ui.label(format!(
-                        "us per draw_err: {:.03}",
-                        timer.draw_err.us_per_iter(),
+                        "render_err: {:.03} us",
+                        timer.render_err.us_per_iter(),
                     ));
-                       ui.label(format!(
-                        "us per sample_ok: {:.03}",
+                    ui.label(format!(
+                        "insert_ok: {:.03} us",
+                        timer.insert_ok.us_per_iter(),
+                    ));
+                    ui.label(format!(
+                        "insert_err: {:.03} us",
+                        timer.insert_err.us_per_iter(),
+                    ));
+                    ui.label(format!(
+                        "sample_ok: {:.03} us",
                         timer.sample_ok.us_per_iter(),
                     ));
                     ui.label(format!(
-                        "us per sample_err: {:.03}",
+                        "sample_err: {:.03} us",
                         timer.sample_err.us_per_iter(),
                     ));
                     ui.label(format!(
-                        "us per free_ok: {:.03}",
+                        "free_ok: {:.03} us",
                         timer.free_ok.us_per_iter(),
                     ));
                     ui.label(format!(
-                        "us per free_err: {:.03}",
+                        "free_err: {:.03} us",
                         timer.free_err.us_per_iter(),
                     ));
                     ui.label(format!(
-                        "us per retire_ok: {:.03}",
+                        "retire_ok: {:.03} us",
                         timer.retire_ok.us_per_iter(),
                     ));
                     ui.label(format!(
-                        "us per retire_err: {:.03}",
+                        "retire_err: {:.03} us",
                         timer.retire_err.us_per_iter(),
                     ));
                     ui.label(format!(
-                        "us per split_ok: {:.03}",
-                        timer.split_ok.us_per_iter(),
+                        "refine_ok: {:.03} us",
+                        timer.refine_ok.us_per_iter(),
                     ));
                     ui.label(format!(
-                        "us per split_err: {:.03}",
-                        timer.split_err.us_per_iter(),
+                        "refine_err: {:.03} us",
+                        timer.refine_err.us_per_iter(),
                     ));
-                    ui.label(format!("us per idle: {:.03}", timer.idle.us_per_iter()));
+                    ui.label(format!("idle: {:.03} us", timer.idle.us_per_iter()));
 
                     // do this so the separator's size is the size of the content,
                     // rather than the full width of the parent container.
                     // TODO: the separator only gets sized to the content above it.
                     ui.shrink_width_to_current();
-                    ui.separator();
+                    // ui.separator();
                     // TODO: flamegraph
                     // let total_elapsed = timer.total().elapsed();
 
@@ -718,7 +726,7 @@ impl App {
                     // ui.label(format!("free portion: {:.03}", timer.free.div_elapsed(total_elapsed)));
                     // ui.label(format!("retire portion: {:.03}", timer.retire.div_elapsed(total_elapsed)));
                     // ui.label(format!("sample portion: {:.03}", timer.sample.div_elapsed(total_elapsed)));
-                    // ui.label(format!("split portion: {:.03}", timer.split.div_elapsed(total_elapsed)));
+                    // ui.label(format!("refine portion: {:.03}", timer.refine.div_elapsed(total_elapsed)));
                     // ui.label(format!("idle portion: {:.03}", timer.idle.div_elapsed(total_elapsed)));
                 };
                 add_contents(ui);

@@ -11,7 +11,8 @@ use super::Offset;
 /// `[real_mid - rad, real_mid + rad) x [imag_mid - rad, imag_mid + rad)`
 ///
 /// must have that rad > 0.
-// TODO: possibly we can have rad >= 0, but whatever
+// TODO: possibly we can have rad >= 0, but whatever.
+// TODO: don't store rad, compute it from `Domain::default()` and trailing_zeros?
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, bytemuck::NoUninit)]
 pub(crate) struct Domain {
@@ -98,6 +99,12 @@ impl Domain {
     }
     pub(crate) fn rad(self) -> Fixed {
         self.rad
+    }
+
+    /// returns the depth of the domain,
+    /// assuming `Domain::default()` has depth 0.
+    pub(crate) fn depth(self) -> u16 {
+        todo!();
     }
 
     #[cfg_attr(feature = "profiling", inline(never))]

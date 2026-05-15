@@ -58,16 +58,18 @@ impl ops::Add for Timer {
 /// it needs to be `Copy` for [`egui::util::History`].
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct MultiTimer {
-    pub(crate) draw_ok: Timer,
-    pub(crate) draw_err: Timer,
+    pub(crate) render_ok: Timer,
+    pub(crate) render_err: Timer,
     pub(crate) sample_ok: Timer,
     pub(crate) sample_err: Timer,
+    pub(crate) insert_ok: Timer,
+    pub(crate) insert_err: Timer,
     pub(crate) free_ok: Timer,
     pub(crate) free_err: Timer,
     pub(crate) retire_ok: Timer,
     pub(crate) retire_err: Timer,
-    pub(crate) split_ok: Timer,
-    pub(crate) split_err: Timer,
+    pub(crate) refine_ok: Timer,
+    pub(crate) refine_err: Timer,
     pub(crate) idle: Timer,
 }
 
@@ -75,7 +77,7 @@ const _: () =
     assert!(std::mem::size_of::<MultiTimer>() == MultiTimer::N * std::mem::size_of::<Timer>());
 
 impl MultiTimer {
-    const N: usize = 11;
+    const N: usize = 13;
 
     pub(crate) fn reset(&mut self) {
         *self = Self::default();
@@ -83,33 +85,37 @@ impl MultiTimer {
 
     fn to_array(self) -> [Timer; MultiTimer::N] {
         [
-            self.draw_ok,
-            self.draw_err,
+            self.render_ok,
+            self.render_err,
             self.sample_ok,
             self.sample_err,
+            self.insert_ok,
+            self.insert_err,
             self.free_ok,
             self.free_err,
             self.retire_ok,
             self.retire_err,
-            self.split_ok,
-            self.split_err,
+            self.refine_ok,
+            self.refine_err,
             self.idle,
         ]
     }
 
     fn from_array(arr: [Timer; MultiTimer::N]) -> Self {
         Self {
-            draw_ok: arr[0],
-            draw_err: arr[1],
+            render_ok: arr[0],
+            render_err: arr[1],
             sample_ok: arr[2],
             sample_err: arr[3],
-            free_ok: arr[4],
-            free_err: arr[5],
-            retire_ok: arr[6],
-            retire_err: arr[7],
-            split_ok: arr[8],
-            split_err: arr[9],
-            idle: arr[10],
+            insert_ok: arr[4],
+            insert_err: arr[5],
+            free_ok: arr[6],
+            free_err: arr[7],
+            retire_ok: arr[8],
+            retire_err: arr[9],
+            refine_ok: arr[10],
+            refine_err: arr[11],
+            idle: arr[12],
         }
     }
 
@@ -129,5 +135,28 @@ impl ops::Add for MultiTimer {
         let lhs = self.to_array();
         let rhs = rhs.to_array();
         Self::from_array(std::array::from_fn(|i| lhs[i] + rhs[i]))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn timer_to_tuple(timer: Timer) -> (Duration, u64) {
+        (timer.elapsed(), timer.count())
+    }
+
+    #[test]
+    fn test_multitimer() {
+        let arr = std::array::from_fn(|i| {
+            let mut timer = Timer::default();
+            timer.insert(Duration::from_millis(100 * (i as u64 + 1)));
+            timer
+        });
+
+        assert_eq!(
+            arr.map(timer_to_tuple),
+            MultiTimer::from_array(arr).to_array().map(timer_to_tuple)
+        );
     }
 }

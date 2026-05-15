@@ -32,10 +32,11 @@ pub(super) struct Worker {
     local_reclaim_now: ReclaimMoment,
     /// tell the main thread about our belief of the current moment.
     shared_reclaim_now: Arc<Atomic<ReclaimMoment>>,
-    /// nodes we split and need to find the color of.
+    /// points we need to find the color of.
     /// note that the len should be <= 4.
-    /// TODO: rename
-    to_be_colored: Vec<(Real, Imag)>,
+    // TODO: rename
+    to_be_sampled: Vec<(Real, Imag)>,
+    to_be_inserted: Option<((Real, Imag), Color32)>,
     /// moment is when they were retired,
     /// not when they should be reclaimed.
     /// alias: `to_be_reclaimed`,
@@ -57,7 +58,8 @@ impl Worker {
             thread_i,
             local_reclaim_now: shared_reclaim_now.load(Ordering::SeqCst),
             shared_reclaim_now,
-            to_be_colored: Vec::with_capacity(4),
+            to_be_sampled: Vec::with_capacity(4),
+            to_be_inserted: None,
             nursing_home: VecDeque::new(),
             timer: TimerData::new(shared_timer),
         }
@@ -79,7 +81,7 @@ impl Worker {
     }
 
     #[cfg_attr(feature = "profiling", inline(never))]
-    fn try_draw(&mut self) -> Result<(), &'static str> {
+    fn try_render(&mut self) -> Result<(), &'static str> {
         // pub(crate) struct DrawTimer {
         //     pub(crate) would_block: Timer,
         //     pub(crate) no_camera_map: Timer,
@@ -191,29 +193,30 @@ impl Worker {
     }
 
     #[cfg_attr(feature = "profiling", inline(never))]
-    fn try_retire(&mut self) -> Result<(), &'static str> {
-        let window = match self.shared.reclaim_window.try_read() {
-            Ok(window) => match window.as_ref() {
-                Some(window) => *window,
-                None => {
-                    return Err("reclaim_window is None");
-                }
-            },
-            Err(TryLockError::Poisoned(_)) => panic!("window poisoned"),
-            Err(TryLockError::WouldBlock) => {
-                // the main thread is updating the window
-                return Err("reclaim_window would block");
-            }
+    fn try_insert(&mut self) -> Result<(), &'static str> {
+        let Some(((real, imag), color)) = self.to_be_inserted.take() else {
+            return Err("nothing to insert");
         };
-        let Some(block_handle) = self.shared.tree.retire(
+        self.shared.tree.insert(
             &mut self.tree_local,
-            window,
+            (real, imag),
+            color,
             self.shared.render_now.load(Ordering::SeqCst),
-        ) else {
-            return Err("nothing to retire");
+        );
+        Ok(())
+    }
+
+    #[cfg_attr(feature = "profiling", inline(never))]
+    fn try_sample(&mut self) -> Result<(), &'static str> {
+        assert!(self.to_be_inserted.is_none());
+
+        let Some((real, imag)) = self.to_be_sampled.pop() else {
+            return Err("nothing in sample queue");
         };
-        self.nursing_home
-            .push_back((self.local_reclaim_now, block_handle));
+
+        let color = sample::metabrot_sample::<false>(&mut None, (real, imag)).color();
+        self.shared.sample_counter.fetch_add(1, Ordering::Relaxed);
+        self.to_be_inserted = Some(((real, imag), color));
         Ok(())
     }
 
@@ -251,7 +254,34 @@ impl Worker {
                 .tree
                 .free(&mut self.tree_local, &mut self.alloc_local, block_handle);
         }
+        Ok(())
+    }
+
+    #[cfg_attr(feature = "profiling", inline(never))]
+    fn try_retire(&mut self) -> Result<(), &'static str> {
+        let window = match self.shared.reclaim_window.try_read() {
+            Ok(window) => match window.as_ref() {
+                Some(window) => *window,
+                None => {
+                    return Err("reclaim_window is None");
+                }
+            },
+            Err(TryLockError::Poisoned(_)) => panic!("window poisoned"),
+            Err(TryLockError::WouldBlock) => {
+                // the main thread is updating the window
+                return Err("reclaim_window would block");
+            }
+        };
+        let Some(block_handle) = self.shared.tree.retire(
+            &mut self.tree_local,
+            window,
+            self.shared.render_now.load(Ordering::SeqCst),
+        ) else {
+            return Err("nothing to retire");
+        };
         self.shared.reclaim_counter.fetch_add(1, Ordering::Relaxed);
+        self.nursing_home
+            .push_back((self.local_reclaim_now, block_handle));
         Ok(())
     }
 
@@ -280,7 +310,7 @@ impl Worker {
             }
         };
 
-        debug_assert!(self.to_be_colored.is_empty());
+        debug_assert!(self.to_be_sampled.is_empty());
         if let Some(handles) = self.shared.tree.refine(
             &mut self.tree_local,
             &mut self.alloc_local,
@@ -288,29 +318,11 @@ impl Worker {
             reclaim_window,
             self.shared.render_now.load(Ordering::SeqCst),
         ) {
-            self.to_be_colored.extend(handles);
+            self.to_be_sampled.extend(handles);
             Ok(())
         } else {
             Err("nothing to refine")
         }
-    }
-
-    #[cfg_attr(feature = "profiling", inline(never))]
-    fn try_sample(&mut self) -> Result<(), &'static str> {
-        let Some((real, imag)) = self.to_be_colored.pop() else {
-            return Err("nothing in sample queue");
-        };
-
-        let color = sample::metabrot_sample::<false>(&mut None, (real, imag)).color();
-        self.shared.tree.insert(
-            &mut self.tree_local,
-            (real, imag),
-            color,
-            self.shared.render_now.load(Ordering::SeqCst),
-        );
-        self.shared.sample_counter.fetch_add(1, Ordering::Relaxed);
-
-        Ok(())
     }
 
     #[cfg_attr(feature = "profiling", inline(never))]
@@ -339,26 +351,39 @@ impl Worker {
             // TODO: put functions and ui in a consistent order.
 
             // rendering is highest priority
-            // followed by reclaiming
+            // followed by inserting
             // followed by sampling
+            // followed by freeing
             // followed by retiring
             // followed by refining
 
             {
                 let start = Instant::now();
-                match self.try_draw() {
+                match self.try_render() {
                     Ok(_) => {
-                        self.timer.local.draw_ok.insert(start.elapsed());
+                        self.timer.local.render_ok.insert(start.elapsed());
                         continue;
                     }
                     Err(_) => {
-                        self.timer.local.draw_err.insert(start.elapsed());
+                        self.timer.local.render_err.insert(start.elapsed());
                     }
                 }
             }
 
             {
-                // TODO: would be nice to have the timer distinguish between sampling and inserting time.
+                let start = Instant::now();
+                match self.try_insert() {
+                    Ok(_) => {
+                        self.timer.local.insert_ok.insert(start.elapsed());
+                        continue;
+                    }
+                    Err(_) => {
+                        self.timer.local.insert_err.insert(start.elapsed());
+                    }
+                }
+            }
+
+            {
                 let start = Instant::now();
                 match self.try_sample() {
                     Ok(_) => {
@@ -401,11 +426,11 @@ impl Worker {
                 let start = Instant::now();
                 match self.try_refine() {
                     Ok(_) => {
-                        self.timer.local.split_ok.insert(start.elapsed());
+                        self.timer.local.refine_ok.insert(start.elapsed());
                         continue;
                     }
                     Err(_) => {
-                        self.timer.local.split_err.insert(start.elapsed());
+                        self.timer.local.refine_err.insert(start.elapsed());
                     }
                 }
             }
