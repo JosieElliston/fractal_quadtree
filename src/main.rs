@@ -2,23 +2,12 @@
 
 mod app;
 mod complex;
-mod fractal;
+mod pool;
 mod sample;
 mod tree;
 mod typestate_sample;
 
-use std::{
-    hint::black_box,
-    time::{Duration, Instant},
-};
-
-use eframe::egui::{Pos2, Rect, Vec2};
 use mimalloc::MiMalloc;
-
-use crate::{
-    complex::{Camera, CameraMap, Domain},
-    tree::Tree,
-};
 
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;

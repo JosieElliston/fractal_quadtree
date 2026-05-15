@@ -1,6 +1,6 @@
 use std::fmt;
 
-use super::{Domain, fixed::*};
+use super::fixed::*;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 // #[repr(align(32))]
@@ -216,16 +216,7 @@ impl Window {
 //         }
 //     }
 // }
-impl From<Domain> for Window {
-    fn from(dom: Domain) -> Self {
-        Window {
-            real_lo: dom.real_lo(),
-            real_hi: dom.real_hi(),
-            imag_lo: dom.imag_lo(),
-            imag_hi: dom.imag_hi(),
-        }
-    }
-}
+
 impl fmt::Display for Window {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(

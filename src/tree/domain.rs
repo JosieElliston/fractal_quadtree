@@ -1,8 +1,8 @@
 use std::fmt;
 
-use crate::tree::Offset;
+use crate::complex::{Window, fixed::*};
 
-use super::fixed::*;
+use super::Offset;
 
 /// this is not just any square,
 /// a `Domain` must be derived by splitting the default domain into four children,
@@ -144,5 +144,11 @@ impl fmt::Display for Domain {
             self.imag_mid(),
             self.rad()
         )
+    }
+}
+impl From<Domain> for Window {
+    fn from(dom: Domain) -> Self {
+        Window::from_lo_hi(dom.real_lo(), dom.real_hi(), dom.imag_lo(), dom.imag_hi())
+            .expect("this should be infallible")
     }
 }

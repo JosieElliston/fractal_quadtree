@@ -7,8 +7,8 @@ use egui::{self, Color32, Key, Pos2, Rect, Vec2};
 
 use crate::{
     complex::{Camera, CameraMap, Window, fixed::*},
-    fractal::{self, Fractal},
     log,
+    pool::{self, main_thread::Fractal},
     sample::{self, SampleDistanceGradient, SampleLog, SampleMaybeDistance},
     tree,
 };
@@ -63,7 +63,7 @@ pub(crate) struct App {
     reclaim_counts: egui::util::History<u64>,
     /// how many samples we received on each frame
     sample_counts: egui::util::History<u64>,
-    timers: egui::util::History<fractal::MultiTimer>,
+    timers: egui::util::History<pool::timer::MultiTimer>,
     /// this allows us to prevent the main thread from needing to wait for the fractal to finish rendering.
     /// this is only false for the first frame.
     has_begun_rendering: bool,
@@ -200,9 +200,13 @@ impl App {
                 }
                 CurrentFractal::Mandelbrot => {
                     if let Some(z0) = z0 {
-                        fractal::render_mandelbrot(&mut self.texture, secondary_camera_map, z0);
+                        pool::main_thread::render_mandelbrot(
+                            &mut self.texture,
+                            secondary_camera_map,
+                            z0,
+                        );
                     } else {
-                        fractal::render_color(&mut self.texture, secondary_camera_map);
+                        pool::main_thread::render_color(&mut self.texture, secondary_camera_map);
                     }
                 }
             }
@@ -837,9 +841,9 @@ impl App {
 
                 // draw color diff
                 {
-                    let mut draw_color_diff = fractal::DRAW_COLOR_DIFF.load(Ordering::Relaxed);
+                    let mut draw_color_diff = pool::main_thread::DRAW_COLOR_DIFF.load(Ordering::Relaxed);
                     if ui.checkbox(&mut draw_color_diff, "draw color diff").on_hover_text("draw pixels that got rerendered since the last frame in blue, but not if there was a full redraw :nauseated_face:.").changed() {
-                        fractal::DRAW_COLOR_DIFF.store(draw_color_diff, Ordering::Relaxed);
+                        pool::main_thread::DRAW_COLOR_DIFF.store(draw_color_diff, Ordering::Relaxed);
                     }
                 }
 
