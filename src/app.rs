@@ -1,5 +1,5 @@
 use std::{
-    sync::{Arc, atomic::Ordering},
+    sync::atomic::Ordering,
     time::{Duration, Instant},
 };
 
@@ -267,11 +267,11 @@ impl App {
     /// draw the sample log for z0
     fn show_sample_log(
         &self,
-        painter: &egui::Painter,
-        secondary_camera_map: &CameraMap,
-        z0: (Real, Imag),
+        _painter: &egui::Painter,
+        _secondary_camera_map: &CameraMap,
+        _z0: (Real, Imag),
     ) {
-        let sample_log = SampleLog::default();
+        let _sample_log = SampleLog::default();
         log!("todo: show_sample_log");
     }
 

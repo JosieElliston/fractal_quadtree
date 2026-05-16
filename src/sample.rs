@@ -1,5 +1,3 @@
-use std::time::Instant;
-
 use eframe::egui::Color32;
 
 use crate::complex::{Window, fixed::*};
@@ -694,12 +692,12 @@ pub(crate) fn metabrot_sample<const LOGGING: bool>(
         sample_log.window_primary(window);
     }
 
-    let start = Instant::now();
+    // let start = Instant::now();
 
-    let mut deepest: f32 = 0.0;
-    let mut deepest_point = (Fixed::ZERO, Fixed::ZERO);
+    // let mut deepest: f32 = 0.0;
+    // let mut deepest_point = (Fixed::ZERO, Fixed::ZERO);
 
-    let (c, sample) = deepest_via_gradient_steps::<LOGGING>(
+    let (_c, sample) = deepest_via_gradient_steps::<LOGGING>(
         sample_log,
         (z0_real, z0_imag),
         window,
@@ -707,8 +705,8 @@ pub(crate) fn metabrot_sample<const LOGGING: bool>(
         WIDTH,
         GRADIENT_STEPS,
     );
-    deepest = sample.depth;
-    deepest_point = c;
+    // deepest = sample.depth;
+    // deepest_point = c;
 
     #[cfg(false)]
     {
@@ -717,58 +715,58 @@ pub(crate) fn metabrot_sample<const LOGGING: bool>(
         SAMPLE_COUNTER.fetch_add(1, Ordering::Relaxed);
     }
 
-    return sample;
+    sample
 
-    // resample around points with a distance estimate < the diameter of each grid cell.
-    // note that we don't use the gradient of the distance estimate for this.
-    // TODO: use the gradient of the distance estimate
-    // to avoid sampling the same mesa-points as our neighbor will,
-    // resample with the radius of the cell, not the distance estimate.
-    // this could miss points that are farther than the radius
-    // but still have a distance estimate smaller than the diameter of the cell,
-    // if our neighbor's distance estimate didn't trigger a resample on them.
-    // TODO: fix this
+    // // resample around points with a distance estimate < the diameter of each grid cell.
+    // // note that we don't use the gradient of the distance estimate for this.
+    // // TODO: use the gradient of the distance estimate
+    // // to avoid sampling the same mesa-points as our neighbor will,
+    // // resample with the radius of the cell, not the distance estimate.
+    // // this could miss points that are farther than the radius
+    // // but still have a distance estimate smaller than the diameter of the cell,
+    // // if our neighbor's distance estimate didn't trigger a resample on them.
+    // // TODO: fix this
 
-    // we want to look through all the points at a coarse grain before resampling
-    let mut to_resample = Vec::with_capacity(WIDTH0 * WIDTH0);
-    let cell_rad = {
-        (window.real_rad().div_f64(WIDTH0 as f64)).max(window.imag_rad().div_f64(WIDTH0 as f64))
-    };
-    // initial samples
-    for (c_real, c_imag) in window.grid_centers(WIDTH0, WIDTH0).flatten() {
-        let SampleMaybeDistance { depth, distance } =
-            distance_estimator::<LOGGING>(sample_log, (z0_real, z0_imag), (c_real, c_imag));
-        if depth > deepest {
-            if depth >= SampleDepth::MAX_DEPTH as f32 {
-                return SampleDepth { depth };
-            }
-            deepest = depth;
-            deepest_point = (c_real, c_imag);
-        }
-        if let Some(distance) = distance
-            && distance < cell_rad.mul2()
-        {
-            to_resample.push((c_real, c_imag));
-        }
-    }
-    // TODO: try sorting the vec by distance estimate
-    // windows around the points that triggered a resample
-    for (c0_real, c0_imag) in to_resample {
-        let resample_window = Window::from_mid_rad(c0_real, c0_imag, cell_rad, cell_rad).unwrap();
-        for (c_real, c_imag) in resample_window.grid_centers(WIDTH1, WIDTH1).flatten() {
-            if (c0_real, c0_imag) == (c_real, c_imag) {
-                continue;
-            }
-            let sample = quadratic_map::<LOGGING>(sample_log, (z0_real, z0_imag), (c_real, c_imag));
-            if sample.depth > deepest {
-                if sample.depth >= SampleDepth::MAX_DEPTH as f32 {
-                    return sample;
-                }
-                deepest = sample.depth;
-                deepest_point = (c_real, c_imag);
-            }
-        }
-    }
+    // // we want to look through all the points at a coarse grain before resampling
+    // let mut to_resample = Vec::with_capacity(WIDTH0 * WIDTH0);
+    // let cell_rad = {
+    //     (window.real_rad().div_f64(WIDTH0 as f64)).max(window.imag_rad().div_f64(WIDTH0 as f64))
+    // };
+    // // initial samples
+    // for (c_real, c_imag) in window.grid_centers(WIDTH0, WIDTH0).flatten() {
+    //     let SampleMaybeDistance { depth, distance } =
+    //         distance_estimator::<LOGGING>(sample_log, (z0_real, z0_imag), (c_real, c_imag));
+    //     if depth > deepest {
+    //         if depth >= SampleDepth::MAX_DEPTH as f32 {
+    //             return SampleDepth { depth };
+    //         }
+    //         deepest = depth;
+    //         deepest_point = (c_real, c_imag);
+    //     }
+    //     if let Some(distance) = distance
+    //         && distance < cell_rad.mul2()
+    //     {
+    //         to_resample.push((c_real, c_imag));
+    //     }
+    // }
+    // // TODO: try sorting the vec by distance estimate
+    // // windows around the points that triggered a resample
+    // for (c0_real, c0_imag) in to_resample {
+    //     let resample_window = Window::from_mid_rad(c0_real, c0_imag, cell_rad, cell_rad).unwrap();
+    //     for (c_real, c_imag) in resample_window.grid_centers(WIDTH1, WIDTH1).flatten() {
+    //         if (c0_real, c0_imag) == (c_real, c_imag) {
+    //             continue;
+    //         }
+    //         let sample = quadratic_map::<LOGGING>(sample_log, (z0_real, z0_imag), (c_real, c_imag));
+    //         if sample.depth > deepest {
+    //             if sample.depth >= SampleDepth::MAX_DEPTH as f32 {
+    //                 return sample;
+    //             }
+    //             deepest = sample.depth;
+    //             deepest_point = (c_real, c_imag);
+    //         }
+    //     }
+    // }
 
-    SampleDepth { depth: deepest }
+    // SampleDepth { depth: deepest }
 }

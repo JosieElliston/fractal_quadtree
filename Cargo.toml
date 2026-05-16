@@ -31,6 +31,7 @@ opt-level = 3
 [profile.profiling]
 # possibly clicking on the window makes samply sad and not display the correct threads??
 # samply record cargo run --profile profiling --features profiling
+# cargo build --profile profiling --features profiling && samply record target/profiling/fractal_quadtree
 # cargo instruments -t "CPU Counters" --profile profiling --features profiling
 # cargo instruments -t "CPU Profiler" --profile profiling --features profiling
 # cargo instruments -t time --profile profiling --features profiling

@@ -1,4 +1,5 @@
 #![allow(clippy::manual_is_multiple_of)]
+// #![allow(dead_code)]
 
 mod app;
 mod complex;

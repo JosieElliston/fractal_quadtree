@@ -3,11 +3,7 @@ use std::{
     sync::atomic::{AtomicPtr, Ordering},
 };
 
-use crate::{
-    log,
-    pool::RenderMoment,
-    tree::{Domain, Node, Rgb},
-};
+use crate::{log, tree::Node};
 
 use super::{BlockHandle, NodeHandle, Slab};
 

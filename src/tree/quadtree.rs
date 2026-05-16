@@ -734,9 +734,9 @@ impl Tree {
                     continue;
                 }
 
-                match node.children_handle.load(Ordering::SeqCst) {
+                match node.children_handle.load(Ordering::Acquire) {
                     Some(children_handle) => {
-                        let min_height = node.min_height.load(Ordering::SeqCst);
+                        let min_height = node.min_height.load(Ordering::Relaxed);
                         let shallowest_descendant_leaf_depth = min_height + depth;
 
                         // prune if no descendant leaf can improve the bound
@@ -863,9 +863,9 @@ impl Tree {
                         continue;
                     }
 
-                    match node.children_handle.load(Ordering::SeqCst) {
+                    match node.children_handle.load(Ordering::Acquire) {
                         Some(children_handle) => {
-                            let min_height = node.min_height.load(Ordering::SeqCst);
+                            let min_height = node.min_height.load(Ordering::Relaxed);
                             // do this in case min_height is stale,
                             // to make debug_assert!(depth <= shallowest_depth); pass.
                             let min_height = min_height.max(1);
@@ -931,8 +931,8 @@ impl Tree {
             match leaf.children_handle.compare_exchange_weak(
                 None,
                 Some(block_handle),
-                Ordering::SeqCst,
-                Ordering::SeqCst,
+                Ordering::Release,
+                Ordering::Relaxed,
             ) {
                 Ok(prev) => {
                     // log!("swap succeeded");
@@ -1025,7 +1025,7 @@ impl Tree {
                 continue;
             }
 
-            if let Some(children_handle) = node.children_handle.load(Ordering::Relaxed) {
+            if let Some(children_handle) = node.children_handle.load(Ordering::Acquire) {
                 stack.extend(children_handle.siblings());
             } else {
                 if timestamp >= prev_frame_start {
@@ -1125,7 +1125,7 @@ impl Tree {
 
             // i++
             {
-                let Some(children_handle) = node.children_handle.load(Ordering::Relaxed) else {
+                let Some(children_handle) = node.children_handle.load(Ordering::Acquire) else {
                     break;
                 };
                 let child_offset = dom.child_offset_containing(pixel_mid);

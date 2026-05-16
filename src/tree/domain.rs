@@ -1,6 +1,6 @@
 use std::fmt;
 
-use crate::complex::{Window, fixed::*};
+use crate::complex::fixed::*;
 
 use super::Offset;
 
@@ -151,11 +151,5 @@ impl fmt::Display for Domain {
             self.imag_mid(),
             self.rad()
         )
-    }
-}
-impl From<Domain> for Window {
-    fn from(dom: Domain) -> Self {
-        Window::from_lo_hi(dom.real_lo(), dom.real_hi(), dom.imag_lo(), dom.imag_hi())
-            .expect("this should be infallible")
     }
 }

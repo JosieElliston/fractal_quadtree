@@ -153,32 +153,20 @@ impl Worker {
                     )
                 };
 
-            if !line_needs_redraw {
-                // debug draw unchanged lines pink
-                // l.iter_mut()
-                //     .for_each(|pixel| *pixel = Color32::from_rgb(255, 50, 255));
-            } else {
+            if line_needs_redraw {
                 for ((_rect, pixel), target) in
                     camera_map.pixels().nth(row).unwrap().zip(l.iter_mut())
                 {
-                    *target = if let Some(pixel) = pixel {
-                        if let Some(color) = self.shared.tree.color_of_pixel(
+                    *target = match pixel {
+                        Some(pixel) => self.shared.tree.color_of_pixel(
                             &mut self.tree_local,
                             pixel,
                             prev_frame_start,
-                        ) {
-                            // i kinda with i could debug draw it red for a frame,
-                            // but that's really hard.
-                            Some(color)
-                        } else {
-                            // we proved that the color hasn't changed
-                            // // debug draw unchanged pixels blue
-                            // Color32::from_rgb(50, 50, 255)
-                            continue;
+                        ),
+                        None => {
+                            // probably we're zoomed in too far
+                            Some(Color32::MAGENTA)
                         }
-                    } else {
-                        // probably we're zoomed in too far
-                        Some(Color32::MAGENTA)
                     };
                 }
             }

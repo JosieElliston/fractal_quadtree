@@ -1,5 +1,7 @@
 use std::fmt;
 
+use crate::tree::Domain;
+
 use super::fixed::*;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -206,17 +208,6 @@ impl Window {
         })
     }
 }
-// impl From<Square> for Window {
-//     fn from(value: Square) -> Self {
-//         Window {
-//             real_lo: value.real_lo(),
-//             real_hi: value.real_hi(),
-//             imag_lo: value.imag_lo(),
-//             imag_hi: value.imag_hi(),
-//         }
-//     }
-// }
-
 impl fmt::Display for Window {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -224,6 +215,16 @@ impl fmt::Display for Window {
             "Window(real: [{}, {}], imag: [{}, {}])",
             self.real_lo, self.real_hi, self.imag_lo, self.imag_hi
         )
+    }
+}
+impl From<Domain> for Window {
+    fn from(dom: Domain) -> Self {
+        Window {
+            real_lo: dom.real_lo(),
+            real_hi: dom.real_hi(),
+            imag_lo: dom.imag_lo(),
+            imag_hi: dom.imag_hi(),
+        }
     }
 }
 // impl PartialOrd for Window {
