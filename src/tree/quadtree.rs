@@ -594,9 +594,6 @@ impl Tree {
         for sibling_handle in block_handle.siblings() {
             let sibling = self.alloc.get_uninit(sibling_handle);
 
-            #[cfg(debug_assertions)]
-            sibling.assert_all_uninit();
-
             unsafe {
                 sibling.write_dom(Domain::default());
             }
@@ -925,9 +922,6 @@ impl Tree {
                     unsafe {
                         sibling.write_dom(dom);
                     }
-
-                    #[cfg(debug_assertions)]
-                    sibling.assert_not_any_uninit();
                 }
             }
 

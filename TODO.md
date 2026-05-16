@@ -45,6 +45,8 @@
     - require that tree.timestamp is seqcst with itself?
     - require that (node.timestamp, children.timestamp) is locally seqcst?
 - do [loom](https://docs.rs/loom/latest/loom/)
+- separate complex/quadratic_map/sampling/the specific fractal and the generic quadtree stuff (so the Domain lives in `[0, 1) x [0, 1)`) (not `[-1, 1) x [-1, 1)` bc the midpoint might not be 0 and that's weird)
+- insert random sleeps during stack traversal to fuzz reclamation
 
 ## optimization
 

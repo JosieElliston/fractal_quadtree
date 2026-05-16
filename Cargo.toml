@@ -16,9 +16,12 @@ rand = "0.10.1"
 rayon = "1.12.0"
 
 [features]
-# used for eg not inlining functions so they show up when profiling
+# used for eg not inlining functions so they show up when profiling.
 # #[cfg_attr(feature = "profiling", inline(never))]
 profiling = []
+# deinitializes nodes on free and asserts correct initialization state in alloc, get, get_uninit, and free.
+# cargo run --features deinit_nodes
+deinit_nodes = []
 
 [profile.release]
 

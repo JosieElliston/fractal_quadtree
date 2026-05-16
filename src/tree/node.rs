@@ -98,6 +98,7 @@ impl Node {
     }
 
     #[track_caller]
+    #[cfg(feature = "deinit_nodes")]
     pub(super) fn assert_all_uninit(&self) {
         assert_eq!(
             unsafe { self.dom() },
@@ -132,6 +133,7 @@ impl Node {
     }
 
     #[track_caller]
+    #[cfg(feature = "deinit_nodes")]
     pub(super) fn assert_not_any_uninit(&self) {
         assert_ne!(
             unsafe { self.dom() },

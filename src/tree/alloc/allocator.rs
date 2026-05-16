@@ -84,41 +84,48 @@ impl Alloc {
 
     #[cfg_attr(feature = "profiling", inline(never))]
     pub(crate) fn alloc(&self, alloc_local: &mut AllocLocal) -> BlockHandle {
-        // look in the free list before going to the shared allocator.
-        if let Some(block_handle) = alloc_local.free_list.pop() {
-            return block_handle;
+        let block_handle = match alloc_local.free_list.pop() {
+            Some(block_handle) => {
+                // look in the free list before going to the shared allocator.
+                block_handle
+            }
+            None => {
+                // loop bc it's possible that after reallocating
+                // or during waiting for another thread to reallocate,
+                // we go to sleep and the new slab fills up.
+                loop {
+                    let last = unsafe { self.head.load(Ordering::SeqCst).as_ref().unwrap() };
+                    let i = last.foot.len.fetch_add(4, Ordering::SeqCst);
+                    if i + 4 <= Slab::CAPACITY {
+                        break NodeHandle::new(last.into(), i)
+                            .try_into()
+                            .expect("we just made sure it's aligned");
+                    }
+                    // we could say that whoever got len == Slab::CAPACITY is responsible for reallocating,
+                    // but what if that thread went to sleep during reallocation?
+                    // so just have all the threads realloc.
+                    self.realloc(alloc_local, last.into());
+                }
+            }
+        };
+
+        #[cfg(feature = "deinit_nodes")]
+        for sibling_handle in block_handle.siblings() {
+            self.get_partial_init(sibling_handle).assert_all_uninit();
         }
 
-        // loop bc it's possible that after reallocating
-        // or during waiting for another thread to reallocate,
-        // we go to sleep and the new slab fills up.
-        loop {
-            let last = unsafe { self.head.load(Ordering::SeqCst).as_ref().unwrap() };
-            let i = last.foot.len.fetch_add(4, Ordering::SeqCst);
-            if i + 4 <= Slab::CAPACITY {
-                return NodeHandle::new(last.into(), i)
-                    .try_into()
-                    .expect("we just made sure it's aligned");
-            }
-            // we could say that whoever got len == Slab::CAPACITY is responsible for reallocating,
-            // but what if that thread went to sleep during reallocation?
-            // so just have all the threads realloc
-            self.realloc(alloc_local, last.into());
-        }
+        block_handle
     }
 
     /// puts the siblings block in the free list.
-    /// also deinits the fields for debugging.
+    /// also deinits the fields if the `deinit_nodes` feature is enabled.
     ///
     /// SAFETY: the caller must ensure that the siblings are never read after this.
-    // TODO: should this be in alloc?
     #[cfg_attr(feature = "profiling", inline(never))]
     pub(crate) unsafe fn free(&self, alloc_local: &mut AllocLocal, block_handle: BlockHandle) {
+        #[cfg(feature = "deinit_nodes")]
         for sibling_handle in block_handle.siblings() {
-            // TODO: have a feature flag for whether to deinit nodes
             let sibling = self.get(sibling_handle);
-
-            #[cfg(debug_assertions)]
             sibling.assert_not_any_uninit();
 
             unsafe {
@@ -138,7 +145,6 @@ impl Alloc {
                 .timestamp
                 .store(RenderMoment::uninit(), Ordering::Relaxed);
 
-            #[cfg(debug_assertions)]
             sibling.assert_all_uninit();
         }
 
@@ -179,7 +185,7 @@ impl Alloc {
     pub(crate) fn get(&self, node_handle: NodeHandle) -> &Node {
         let ret = self.get_partial_init(node_handle);
 
-        #[cfg(debug_assertions)]
+        #[cfg(feature = "deinit_nodes")]
         ret.assert_not_any_uninit();
 
         ret
@@ -191,7 +197,7 @@ impl Alloc {
     pub(crate) fn get_uninit(&self, node_handle: NodeHandle) -> &Node {
         let ret = self.get_partial_init(node_handle);
 
-        #[cfg(debug_assertions)]
+        #[cfg(feature = "deinit_nodes")]
         ret.assert_all_uninit();
 
         ret
