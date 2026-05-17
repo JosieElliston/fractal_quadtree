@@ -118,7 +118,8 @@ impl Worker {
         let mut l = shared_texture.diff()[row]
             .try_lock()
             .expect("we just locked it");
-        {
+
+        'render_line: {
             let prev_frame_start = if shared_texture.needs_full_redraw {
                 RenderMoment::MIN
             } else {
@@ -171,12 +172,6 @@ impl Worker {
             //     }
             // }
 
-            #[cfg(false)]
-            {
-                let root_timestamp = self.shared.tree.root_timestamp();
-                dbg!(prev_frame_start, root_timestamp);
-            }
-
             let pixel_colors: Box<[(Pixel, &mut Option<Color32>)]> = camera_map
                 .pixels()
                 .nth(row)
@@ -191,22 +186,26 @@ impl Worker {
                     }
                 })
                 .collect();
+
             let (pixels, colors) = pixel_colors
                 .into_iter()
                 .unzip::<Pixel, &mut Option<Color32>, Vec<Pixel>, Vec<&mut Option<Color32>>>();
             let pixels = pixels.into_boxed_slice();
             let mut colors = colors.into_boxed_slice();
 
-            let imag_mid = pixels[0].imag_mid();
-            assert!(
-                pixels.iter().all(|pixel| pixel.imag_mid() == imag_mid),
-                "all pixels in a row should have the same imag"
-            );
-
             let pixel_real_lo_his: Box<[(Real, Real)]> = pixels
                 .iter()
                 .map(|pixel| (pixel.real_mid(), pixel.real_mid()))
                 .collect();
+
+            let imag_mid = match pixels.first() {
+                Some(pixel) => pixel.imag_mid(),
+                None => break 'render_line,
+            };
+            assert!(
+                pixels.iter().all(|pixel| pixel.imag_mid() == imag_mid),
+                "all pixels in a row should have the same imag"
+            );
 
             self.shared.tree.color_of_line(
                 &mut self.tree_local,

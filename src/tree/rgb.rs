@@ -25,11 +25,12 @@ impl Rgb {
 impl fmt::Debug for Rgb {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let [r, g, b, a] = self.0.get().to_le_bytes();
-        debug_assert_eq!(a, 255);
+        // debug_assert_eq!(a, 255);
         f.debug_struct("RGB")
             .field("r", &r)
             .field("g", &g)
             .field("b", &b)
+            .field("a", &a)
             .finish()
     }
 }
