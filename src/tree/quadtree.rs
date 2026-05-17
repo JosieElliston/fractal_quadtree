@@ -1062,8 +1062,8 @@ impl Tree {
             let imag_delta = imag_0 - imag_1;
             // real_delta.mul(real_delta) + imag_delta.mul(imag_delta)
 
-            // i think they give the same result
-            // except manhattan maybe gives weird lines
+            // i think these give the same result,
+            // except manhattan maybe gives weird lines.
             // real_delta.abs() + imag_delta.abs()
             real_delta.abs().max(imag_delta.abs())
         }
@@ -1206,6 +1206,11 @@ impl Tree {
             (&pixel_real_mids[lo..hi], &mut colors[lo..hi])
         };
 
+        // use rgbs and not just the colors
+        // because colors are discontinuous in memory
+        // (because at high zooms we can't get fixed point pixels for all the real pixels)
+        // (and so are a slice of references)
+        // and we can check for uninit with rgbs.
         let mut rgbs = vec![Some(Rgb::uninit()); pixel_real_mids.len()].into_boxed_slice();
 
         // run the recursion.
@@ -1241,7 +1246,8 @@ impl Tree {
         // everything below this is helper function definitions.
         return;
 
-        // TODO: take pixel_real_lo_his and do antialiasing
+        // TODO: take pixel_real_lo_his and do antialiasing.
+        #[expect(clippy::too_many_arguments)]
         #[cfg_attr(feature = "profiling", inline(never))]
         fn f(
             tree: &Tree,
@@ -1318,30 +1324,6 @@ impl Tree {
                 }
             }
 
-            // for every pixel mid,
-            // if it's closer to the node's domain mid than the closest sample we've found so far,
-            // update the color.
-            // TODO: these will probably be contiguous segments,
-            // so we don't need to compute distance for all of them,
-            // but don't bother with that rn.
-            {
-                let color = node.color.load(Ordering::Relaxed);
-                let color = color.or(uncolored_node_color);
-                if let Some(color) = color {
-                    for (real, c, best_distance) in itertools::izip!(
-                        pixel_real_mids.iter(),
-                        colors.iter_mut(),
-                        distances.iter_mut(),
-                    ) {
-                        let new_dist = distance((*real, pixel_imag_mid), dom.mid());
-                        if new_dist < *best_distance {
-                            *best_distance = new_dist;
-                            *c = color.into();
-                        }
-                    }
-                }
-            }
-
             // if we have children, explore them.
             if let Some(children_handle) = node.children_handle.load(Ordering::Acquire) {
                 let mid = pixel_real_mids
@@ -1380,6 +1362,36 @@ impl Tree {
                     );
                 }
             }
+
+            // for every pixel mid,
+            // if it's closer to the node's domain mid than the closest sample we've found so far,
+            // update the color.
+            // also only write colors (and compute distance)
+            // if we find that our children needed a redraw (this isn't actually faster).
+            // TODO: these will probably be contiguous segments,
+            // so we don't need to compute distance for all of them,
+            // but don't bother with that rn.
+            // i think the points that are closer are guaranteed to be convex.
+            {
+                let color = node.color.load(Ordering::Relaxed);
+                let color = color.or(uncolored_node_color);
+                if let Some(color) = color {
+                    for (real, c, best_distance) in itertools::izip!(
+                        pixel_real_mids.iter(),
+                        colors.iter_mut(),
+                        distances.iter_mut(),
+                    ) {
+                        if c.is_none() {
+                            continue;
+                        }
+                        let new_dist = distance((*real, pixel_imag_mid), dom.mid());
+                        if new_dist < *best_distance {
+                            *best_distance = new_dist;
+                            *c = color.into();
+                        }
+                    }
+                }
+            }
         }
 
         #[cfg_attr(feature = "profiling", inline(never))]
@@ -1388,8 +1400,8 @@ impl Tree {
             let imag_delta = imag_0 - imag_1;
             // real_delta.mul(real_delta) + imag_delta.mul(imag_delta)
 
-            // i think they give the same result
-            // except manhattan maybe gives weird lines
+            // i think these give the same result,
+            // except manhattan maybe gives weird lines.
             // real_delta.abs() + imag_delta.abs()
             real_delta.abs().max(imag_delta.abs())
         }

@@ -47,6 +47,20 @@ impl Window {
         })
     }
 
+    pub(crate) fn from_lo_hi_unchecked(
+        real_lo: Real,
+        real_hi: Real,
+        imag_lo: Imag,
+        imag_hi: Imag,
+    ) -> Self {
+        Self {
+            real_lo,
+            real_hi,
+            imag_lo,
+            imag_hi,
+        }
+    }
+
     /// fails if the window would be empty,
     /// ie if it would have zero width or height.
     /// also fails if the window is too big, to avoid overflow issues.

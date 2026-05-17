@@ -1,6 +1,10 @@
-use std::{num::NonZeroUsize, ops};
+use std::{
+    num::NonZeroUsize,
+    ops::{self, Div},
+};
 
 use eframe::egui::{self, Pos2, Rect, Vec2};
+use itertools::Itertools;
 
 use super::{Window, fixed::*};
 
@@ -23,7 +27,7 @@ impl Default for Camera {
     }
 }
 impl Camera {
-    /// panics if `real_rad` is not positive
+    /// panics if `real_rad` is not positive.
     // pub(crate) fn new(real_mid: Real, imag_mid: Imag, real_rad: Real) -> Self {
     pub(crate) fn new(real_mid: f64, imag_mid: f64, real_rad: f64) -> Self {
         // assert!(real_rad > Fixed::ZERO);
@@ -77,6 +81,7 @@ pub(crate) struct CameraMap {
     /// how many egui pixels do we draw a "pixel" as?
     /// not needed for the mapping itself,
     /// but it is needed when dealing with pixels.
+    // TODO: should this be f32?
     stride: Option<NonZeroUsize>,
 }
 impl CameraMap {
@@ -106,7 +111,7 @@ impl CameraMap {
     pub(crate) fn camera(&self) -> Camera {
         self.camera
     }
-    /// equivalent to `self.rect_to_window(self.rect())`
+    /// equivalent to `self.rect_to_window(self.rect())`.
     pub(crate) fn window(&self) -> Option<Window> {
         Window::from_lo_hi(
             self.camera.real_lo().try_into().ok()?,
@@ -129,7 +134,7 @@ impl CameraMap {
         self.camera.real_rad * (self.rect.height() as f64 / self.rect.width() as f64)
     }
 
-    /// returns `None` if it would be out of the fixed point domain
+    /// returns `None` if it would be out of the fixed point domain.
     pub(crate) fn x_to_real(&self, x: f32) -> Option<Real> {
         Real::try_from_f64(super::lerp(
             self.camera.real_lo(),
@@ -137,7 +142,7 @@ impl CameraMap {
             super::inv_lerp(self.rect.min.x as f64, self.rect.max.x as f64, x as f64),
         ))
     }
-    /// returns `None` if it would be out of the fixed point domain
+    /// returns `None` if it would be out of the fixed point domain.
     pub(crate) fn y_to_imag(&self, y: f32) -> Option<Imag> {
         Imag::try_from_f64(super::lerp(
             self.imag_lo(),
@@ -235,7 +240,8 @@ impl CameraMap {
 
     pub(crate) fn pixels_width(&self) -> usize {
         let stride = self.stride.unwrap().get();
-        let ret = (self.rect.width() as usize).div_ceil(stride);
+        let ret = self.rect.width().div(stride as f32).ceil() as usize;
+        // let ret = (self.rect.width() as usize).div_ceil(stride);
         #[cfg(debug_assertions)]
         if let Some(line) = self.pixels().next() {
             debug_assert_eq!(ret, line.count());
@@ -244,7 +250,8 @@ impl CameraMap {
     }
     pub(crate) fn pixels_height(&self) -> usize {
         let stride = self.stride.unwrap().get();
-        let ret = (self.rect.height() as usize).div_ceil(stride);
+        let ret = self.rect.height().div(stride as f32).ceil() as usize;
+        // let ret = (self.rect.height() as usize).div_ceil(stride);
         debug_assert_eq!(ret, self.pixels().count());
         ret
     }
@@ -267,18 +274,76 @@ impl CameraMap {
     }
 
     /// pixel is None if it couldn't be constructed,
-    /// so it would be too small or outside the fixed point domain
+    /// so it would be too small or outside the fixed point domain.
+    /// the last rect in a row/column may may be partially outside the camera_map.rect.
+    /// but if the stride divides the rect size, the last rect will be exactly aligned.
     pub(crate) fn pixels(
         &self,
     ) -> impl Iterator<Item = impl Iterator<Item = (Rect, Option<Pixel>)>> {
         let stride = self.stride.unwrap().get();
-        (0..self.rect.size().y as usize)
-            .step_by(stride)
-            .map(move |row| {
-                (0..self.rect.size().x as usize)
-                    .step_by(stride)
-                    .map(move |col| (self.rect_at(row, col), self.pixel_at(row, col)))
-            })
+
+        // let height = self.pixels_height();
+        // let width = self.pixels_width();
+        // let actual_max = self.rect.min + Vec2::new(width as f32, height as f32) * stride as f32;
+
+        // (0..=height).map(move |row| {
+        //     (0..=width).map(move |col| (self.rect_at(row, col), self.pixel_at(row, col)))
+        // })
+
+        let mut y_lo = self.rect.min.y;
+        let mut imag_lo = self.y_to_imag(y_lo);
+
+        std::iter::from_fn(move || {
+            if y_lo >= self.rect.max.y {
+                return None;
+            }
+
+            let y_hi = y_lo + stride as f32;
+            let imag_hi = self.y_to_imag(y_hi);
+
+            let mut x_lo = self.rect.min.x;
+            let mut real_lo = self.x_to_real(x_lo);
+
+            let ret = std::iter::from_fn(move || {
+                if x_lo >= self.rect.max.x {
+                    return None;
+                }
+
+                let x_hi = x_lo + stride as f32;
+                let real_hi = self.x_to_real(x_hi);
+
+                let ret = (
+                    Rect::from_min_max(Pos2::new(x_lo, y_lo), Pos2::new(x_hi, y_hi)),
+                    match (real_lo, real_hi, imag_lo, imag_hi) {
+                        (Some(real_lo), Some(real_hi), Some(imag_lo), Some(imag_hi)) => {
+                            // Some(Window::from_lo_hi(real_lo, real_hi, imag_lo, imag_hi).unwrap())
+                            Some(Pixel::from_lo_hi_unchecked(
+                                real_lo, real_hi, imag_lo, imag_hi,
+                            ))
+                        }
+                        _ => None,
+                    },
+                );
+
+                x_lo = x_hi;
+                real_lo = real_hi;
+
+                Some(ret)
+            });
+
+            y_lo = y_hi;
+            imag_lo = imag_hi;
+
+            Some(ret)
+        })
+
+        // (0..self.rect.size().y as usize)
+        //     .step_by(stride)
+        //     .map(move |row| {
+        //         (0..self.rect.size().x as usize)
+        //             .step_by(stride)
+        //             .map(move |col| (self.rect_at(row, col), self.pixel_at(row, col)))
+        //     })
     }
 
     pub(crate) fn pan_zoom(
@@ -482,7 +547,7 @@ mod tests {
     }
 
     #[test]
-    fn test_pixels() {
+    fn test_pixels_width_height_divides() {
         let (rect, camera) = get_rect_camera();
         let camera_map = CameraMap::new(rect, camera, 2);
 
@@ -494,5 +559,103 @@ mod tests {
             camera_map.pixels().next().unwrap().count(),
             camera_map.pixels_width()
         );
+    }
+
+    #[test]
+    fn test_pixels_width_height_not_divides() {
+        let (rect, camera) = get_rect_camera();
+        let camera_map = CameraMap::new(rect, camera, 3);
+
+        assert_eq!(camera_map.pixels_width(), 10 / 3 + 1);
+        assert_eq!(camera_map.pixels_height(), 20 / 3 + 1);
+
+        assert_eq!(camera_map.pixels().count(), camera_map.pixels_height());
+        assert_eq!(
+            camera_map.pixels().next().unwrap().count(),
+            camera_map.pixels_width()
+        );
+    }
+
+    #[test]
+    fn test_pixels_lo_hi_divides() {
+        let (rect, camera) = get_rect_camera();
+        let camera_map = CameraMap::new(rect, camera, 2);
+
+        let (first_rect, _first_pixel) = camera_map.pixels().next().unwrap().next().unwrap();
+        let (last_rect, _last_pixel) = camera_map.pixels().last().unwrap().last().unwrap();
+        // let first_pixel = first_pixel.unwrap();
+        // let last_pixel = last_pixel.unwrap();
+
+        assert_eq!(first_rect.min, rect.min);
+        assert_eq!(last_rect.max, rect.max);
+    }
+
+    #[test]
+    fn test_pixels_lo_hi_not_divides() {
+        let (rect, camera) = get_rect_camera();
+        let camera_map = CameraMap::new(rect, camera, 3);
+
+        let (first_rect, _first_pixel) = camera_map.pixels().next().unwrap().next().unwrap();
+        let (last_rect, _last_pixel) = camera_map.pixels().last().unwrap().last().unwrap();
+        // let first_pixel = first_pixel.unwrap();
+        // let last_pixel = last_pixel.unwrap();
+
+        assert_eq!(first_rect.min, rect.min);
+        assert!(last_rect.min.x < rect.max.x);
+        assert!(last_rect.min.y < rect.max.y);
+        assert!(last_rect.max.x > rect.max.x);
+        assert!(last_rect.max.y > rect.max.y);
+    }
+
+    #[test]
+    fn test_pixels2() {
+        let (rect, camera) = get_rect_camera();
+        let camera_map = CameraMap::new(rect, camera, 2);
+
+        assert_eq!(camera_map.pixels_width(), 5);
+        assert_eq!(camera_map.pixels_height(), 10);
+
+        assert_eq!(camera_map.pixels().count(), camera_map.pixels_height());
+        assert_eq!(
+            camera_map.pixels().next().unwrap().count(),
+            camera_map.pixels_width()
+        );
+
+        let line = camera_map
+            .pixels()
+            .next()
+            .unwrap()
+            .map(|(_rect, pixel)| pixel.unwrap())
+            .collect_vec();
+        let reals_oracle = line
+            .iter()
+            .map(|pixel| (pixel.real_lo(), pixel.real_hi()))
+            .collect_vec();
+        for ((_left_lo, left_hi), (right_lo, _right_hi)) in reals_oracle.iter().tuple_windows() {
+            assert_eq!(left_hi, right_lo, "adjacent pixels should line up");
+        }
+        let reals_oracle = line
+            .iter()
+            .map(|pixel| pixel.real_lo())
+            .chain(line.last().map(|pixel| pixel.real_hi()))
+            .collect_vec();
+
+        let stride = camera_map.stride.unwrap().get();
+
+        // let xs = (0..self.rect.size().x as usize + 1).map(|x| x * stride);
+        // let reals_oracle: Vec<_> = xs.map(|x| self.x_to_real(x as f32)).collect();
+        let n = camera_map.pixels_width() + 1;
+        let reals: Vec<_> = (0..n)
+            .map(|i| {
+                Real::try_from_f64(crate::complex::lerp(
+                    camera_map.camera.real_lo(),
+                    camera_map.camera.real_hi(),
+                    i as f64 / n as f64,
+                ))
+                .unwrap()
+            })
+            .collect();
+        assert_eq!(reals_oracle.len(), reals.len());
+        assert_eq!(reals_oracle, reals);
     }
 }
