@@ -11,6 +11,7 @@ bytemuck = "*"
 eframe = "0.34.1"
 # version determined by eframe
 egui = { version = "*", features = ["bytemuck"] }
+itertools = "0.14.0"
 mimalloc = "0.1.50"
 rand = "0.10.1"
 rayon = "1.12.0"

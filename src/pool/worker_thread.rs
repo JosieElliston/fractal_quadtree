@@ -9,7 +9,7 @@ use atomic::Atomic;
 use egui::Color32;
 
 use crate::{
-    complex::fixed::*,
+    complex::{Pixel, fixed::*},
     sample,
     tree::{
         TreeLocal,
@@ -125,51 +125,96 @@ impl Worker {
                 self.shared.render_now.load(Ordering::SeqCst) - 1
             };
 
-            // TODO: do more of this, perhaps bisection bc that's easier than real spacial stuff
-            let line_needs_redraw = shared_texture.needs_full_redraw
-                || 'line_needs_redraw: {
-                    let Some(first_pixel) = camera_map.pixel_at(row, 0) else {
-                        break 'line_needs_redraw true;
-                    };
-                    let Some(last_pixel) = camera_map.pixel_at(row, camera_map.pixels_width() - 1)
-                    else {
-                        break 'line_needs_redraw true;
-                    };
-                    debug_assert_eq!(first_pixel.imag_mid(), last_pixel.imag_mid());
-                    let imag = first_pixel.imag_mid();
-                    let real_lo = first_pixel.real_mid();
-                    let real_hi = last_pixel.real_mid();
-                    debug_assert_ne!(
-                        prev_frame_start,
-                        RenderMoment::MIN,
-                        "we should short circuit earlier"
-                    );
-                    self.shared.tree.any_on_line_needs_redraw(
-                        &mut self.tree_local,
-                        real_lo,
-                        real_hi,
-                        imag,
-                        prev_frame_start,
-                    )
-                };
+            // // TODO: do more of this, perhaps bisection bc that's easier than real spacial stuff
+            // let line_needs_redraw = shared_texture.needs_full_redraw
+            //     || 'line_needs_redraw: {
+            //         let Some(first_pixel) = camera_map.pixel_at(row, 0) else {
+            //             break 'line_needs_redraw true;
+            //         };
+            //         let Some(last_pixel) = camera_map.pixel_at(row, camera_map.pixels_width() - 1)
+            //         else {
+            //             break 'line_needs_redraw true;
+            //         };
+            //         debug_assert_eq!(first_pixel.imag_mid(), last_pixel.imag_mid());
+            //         let imag = first_pixel.imag_mid();
+            //         let real_lo = first_pixel.real_mid();
+            //         let real_hi = last_pixel.real_mid();
+            //         debug_assert_ne!(
+            //             prev_frame_start,
+            //             RenderMoment::MIN,
+            //             "we should short circuit earlier"
+            //         );
+            //         self.shared.tree.any_on_line_needs_redraw(
+            //             &mut self.tree_local,
+            //             real_lo,
+            //             real_hi,
+            //             imag,
+            //             prev_frame_start,
+            //         )
+            //     };
 
-            if line_needs_redraw {
-                for ((_rect, pixel), target) in
-                    camera_map.pixels().nth(row).unwrap().zip(l.iter_mut())
-                {
-                    *target = match pixel {
-                        Some(pixel) => self.shared.tree.color_of_pixel(
-                            &mut self.tree_local,
-                            pixel,
-                            prev_frame_start,
-                        ),
-                        None => {
-                            // probably we're zoomed in too far
-                            Some(Color32::MAGENTA)
-                        }
-                    };
-                }
+            // if line_needs_redraw {
+            //     for ((_rect, pixel), target) in
+            //         camera_map.pixels().nth(row).unwrap().zip(l.iter_mut())
+            //     {
+            //         *target = match pixel {
+            //             Some(pixel) => self.shared.tree.color_of_pixel(
+            //                 &mut self.tree_local,
+            //                 pixel,
+            //                 prev_frame_start,
+            //             ),
+            //             None => {
+            //                 // probably we're zoomed in too far
+            //                 Some(Color32::MAGENTA)
+            //             }
+            //         };
+            //     }
+            // }
+
+            #[cfg(false)]
+            {
+                let root_timestamp = self.shared.tree.root_timestamp();
+                dbg!(prev_frame_start, root_timestamp);
             }
+
+            let pixel_colors: Box<[(Pixel, &mut Option<Color32>)]> = camera_map
+                .pixels()
+                .nth(row)
+                .unwrap()
+                .zip(l.iter_mut())
+                .filter_map(|((_rect, pixel), color)| match pixel {
+                    Some(pixel) => Some((pixel, color)),
+                    None => {
+                        // probably we're zoomed in too far.
+                        *color = Some(Color32::MAGENTA);
+                        None
+                    }
+                })
+                .collect();
+            let (pixels, colors) = pixel_colors
+                .into_iter()
+                .unzip::<Pixel, &mut Option<Color32>, Vec<Pixel>, Vec<&mut Option<Color32>>>();
+            let pixels = pixels.into_boxed_slice();
+            let mut colors = colors.into_boxed_slice();
+
+            let imag_mid = pixels[0].imag_mid();
+            assert!(
+                pixels.iter().all(|pixel| pixel.imag_mid() == imag_mid),
+                "all pixels in a row should have the same imag"
+            );
+
+            let pixel_real_lo_his: Box<[(Real, Real)]> = pixels
+                .iter()
+                .map(|pixel| (pixel.real_mid(), pixel.real_mid()))
+                .collect();
+
+            self.shared.tree.color_of_line(
+                &mut self.tree_local,
+                prev_frame_start,
+                &pixel_real_lo_his,
+                imag_mid,
+                &mut colors,
+            );
         }
         debug_assert!(
             shared_texture.finish_count().load(Ordering::SeqCst) < camera_map.pixels_height()

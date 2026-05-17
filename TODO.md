@@ -46,6 +46,7 @@
     - require that (node.timestamp, children.timestamp) is locally seqcst?
 - separate complex/quadratic_map/sampling/the specific fractal and the generic quadtree stuff (so the Domain lives in `[0, 1) x [0, 1)`) (not `[-1, 1) x [-1, 1)` bc the midpoint might not be 0 and that's weird)
 - insert random sleeps during stack traversal to fuzz reclamation
+- color by segments (currently you drop frames during a full redraw)
 
 ## optimization
 

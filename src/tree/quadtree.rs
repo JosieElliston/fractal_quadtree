@@ -1,4 +1,7 @@
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering, fence};
+use std::{
+    collections::VecDeque,
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering, fence},
+};
 
 use egui::Color32;
 
@@ -25,22 +28,21 @@ pub(crate) static DRAW_UNCOLORED_NODES: AtomicBool = AtomicBool::new(true);
 pub(crate) static SPLIT_RETIRABLE_NODES: AtomicBool = AtomicBool::new(false);
 
 /// per-thread data for the tree.
-/// this allows us to reuse allocations for stacks.
+/// this allows us to reuse allocations for eg stacks.
 ///
 /// dropping this will not leak memory.
 #[derive(Debug, Default)]
 pub(crate) struct TreeLocal {
-    /// for various stacks.
     /// should be cleared before use, but not when done.
     vec_handle: Vec<NodeHandle>,
-    /// for various stacks.
     /// should be cleared before use, but not when done.
     vec_handle4: Vec<BlockHandle>,
-    /// for various stacks.
     /// should be cleared before use, but not when done.
     vec_handle_u16: Vec<(NodeHandle, u16)>,
     // /// should be cleared before use, but not when done.
     // deque_handle_u16: VecDeque<(NodeHandle, u16)>,
+    /// should be cleared before use, but not when done.
+    deque_handle: VecDeque<NodeHandle>,
 }
 
 // TODO: doc how we never give out handles except for reclamation.
@@ -1134,6 +1136,385 @@ impl Tree {
         }
 
         Some(closest_sample_color.into())
+    }
+
+    pub(crate) fn root_timestamp(&self) -> RenderMoment {
+        let root = self.alloc.get(self.root);
+        root.timestamp.load(Ordering::Relaxed)
+    }
+
+    /// gets the color of an entire line at once.
+    /// `colors` is the output buffer.
+    /// we only modify color_reals.0, not color_reals.1, but idk how to express that.
+    pub(crate) fn color_of_line(
+        &self,
+        _tree_local: &mut TreeLocal,
+        prev_frame_start: RenderMoment,
+        pixel_real_lo_his: &[(Real, Real)],
+        pixel_imag_mid: Imag,
+        colors: &mut [&mut Option<Color32>],
+    ) {
+        #[cfg(false)]
+        {
+            let root = self.alloc.get(self.root);
+            let root_timestamp = root.timestamp.load(Ordering::Relaxed);
+            dbg!(prev_frame_start, root_timestamp);
+        }
+        debug_assert!(pixel_real_lo_his.len() == colors.len());
+
+        // TODO: horizontal antialiasing / interpolation based on the real interval of the pixel
+        let pixel_real_mids: Box<[Real]> = pixel_real_lo_his
+            .iter()
+            .map(|(real_lo, real_hi)| (*real_lo + *real_hi).div2_floor())
+            .collect();
+        #[expect(unused_variables)]
+        let pixel_real_lo_his = ();
+
+        debug_assert!(
+            pixel_real_mids
+                .array_windows::<2>()
+                .all(|[left, right]| left < right),
+            "pixel_real_mids must be strictly increasing"
+        );
+
+        // TODO: wtf why isn't this failing
+        debug_assert!(
+            pixel_real_mids
+                .iter()
+                .all(|&real_mid| (self.dom.real_lo()..self.dom.real_hi()).contains(&real_mid))
+        );
+
+        // write UNCONTAINED_COLOR to the colors not in self.dom().
+        {
+            const UNCONTAINED_COLOR: Color32 = Color32::from_rgb(255, 255, 255);
+            for (c, real_mid) in colors.iter_mut().zip(pixel_real_mids.iter()) {
+                if !(self.dom.real_lo()..self.dom.real_hi()).contains(real_mid) {
+                    **c = Some(UNCONTAINED_COLOR);
+                }
+            }
+        }
+
+        // // resize pixel_real_mids and colors to be inside self.dom().
+        // // let (pixel_real_mids, colors) =
+
+        // None means "no update needed"; Some(color) means "update to this color".
+        let mut rgbs = vec![Some(Rgb::uninit()); pixel_real_mids.len()].into_boxed_slice();
+
+        let uncolored_node_color = if DRAW_UNCOLORED_NODES.load(Ordering::Relaxed) {
+            Some(Rgb::new(255, 255, 0))
+        } else {
+            None
+        };
+
+        let mut distances = vec![Fixed::MAX; pixel_real_mids.len()].into_boxed_slice();
+
+        f(
+            self,
+            uncolored_node_color,
+            prev_frame_start,
+            &pixel_real_mids,
+            pixel_imag_mid,
+            &mut rgbs,
+            &mut distances,
+            self.root,
+        );
+
+        // write rgbs to colors
+        for (color, rgb) in colors.iter_mut().zip(rgbs) {
+            // if rand::random_bool(0.001) && rgb.is_some() {
+            //     log!("rbg.is_some()");
+            // }
+            **color = rgb.map(|rgb| {
+                debug_assert_ne!(rgb, Rgb::uninit());
+                rgb.into()
+            });
+        }
+
+        // let queue = &mut tree_local.deque_handle;
+        // queue.clear();
+        // queue.push_back(self.root);
+
+        // // if we have a segment that's definitely good, we stop exploring.
+        // // // if we have a segment that's definitely bad, we fail.
+        // // // to know that a segment is definitely bad, it must be a leaf.
+        // while let Some(node_handle) = queue.pop_front() {
+        //     let node = self.alloc.get(node_handle);
+        //     let dom = unsafe { node.dom() };
+
+        //     if dom.imag_lo() > imag || dom.imag_hi() < imag {
+        //         continue;
+        //     }
+        //     if dom.real_hi() < color_reals.first().unwrap().1
+        //         || dom.real_lo() > color_reals.last().unwrap().1
+        //     {
+        //         continue;
+        //     }
+
+        //     let timestamp = node.timestamp.load(Ordering::Relaxed);
+        //     let prune = timestamp < prev_frame_start;
+
+        //     let color = if prune {
+        //         None
+        //     } else {
+        //         let color = node.color.load(Ordering::Relaxed).map(Into::into);
+        //         color.or(uncolored_node_color)
+        //     };
+
+        //     // write the nodes color into the output buffer for each pixel center it contains.
+        //     // TODO: distance
+        //     {
+        //         let lo = match color_reals
+        //             .binary_search_by(|(_, real)| real.partial_cmp(&dom.real_lo()).unwrap())
+        //         {
+        //             Ok(i) => i,
+        //             Err(i) => i,
+        //         };
+        //         let hi = match color_reals
+        //             .binary_search_by(|(_, real)| real.partial_cmp(&dom.real_hi()).unwrap())
+        //         {
+        //             Ok(i) => i,
+        //             Err(i) => i,
+        //         };
+
+        //         #[cfg(false)]
+        //         {
+        //             use std::fmt::Write;
+        //             let mut s = String::new();
+        //             writeln!(&mut s, "lo: {}, hi: {}", lo, hi).unwrap();
+        //             writeln!(&mut s, "real_lo:        {}", dom.real_lo()).unwrap();
+        //             writeln!(&mut s, "real_hi:        {}", dom.real_hi()).unwrap();
+
+        //             writeln!(
+        //                 &mut s,
+        //                 "reals[lo - 1] = {}",
+        //                 reals
+        //                     .get(lo.wrapping_sub(1))
+        //                     .map_or("N/A".to_string(), |v| v.to_string())
+        //             )
+        //             .unwrap();
+        //             writeln!(&mut s, "reals[lo    ] = {}", reals[lo]).unwrap();
+        //             writeln!(
+        //                 &mut s,
+        //                 "reals[lo + 1] = {}",
+        //                 reals
+        //                     .get(lo + 1)
+        //                     .map_or("N/A".to_string(), |v| v.to_string())
+        //             )
+        //             .unwrap();
+
+        //             writeln!(
+        //                 &mut s,
+        //                 "reals[hi - 1] = {}",
+        //                 reals
+        //                     .get(hi.wrapping_sub(1))
+        //                     .map_or("N/A".to_string(), |v| v.to_string())
+        //             )
+        //             .unwrap();
+        //             writeln!(
+        //                 &mut s,
+        //                 "reals[hi    ] = {}",
+        //                 reals.get(hi).map_or("N/A".to_string(), |v| v.to_string())
+        //             )
+        //             .unwrap();
+        //             writeln!(
+        //                 &mut s,
+        //                 "reals[hi + 1] = {}",
+        //                 reals
+        //                     .get(hi + 1)
+        //                     .map_or("N/A".to_string(), |v| v.to_string())
+        //             )
+        //             .unwrap();
+
+        //             debug_assert!(
+        //                 lo == 0 || !(dom.real_lo()..dom.real_hi()).contains(&reals[lo - 1]),
+        //                 "{}",
+        //                 s
+        //             );
+        //             debug_assert!(
+        //                 hi == reals.len() || !(dom.real_lo()..dom.real_hi()).contains(&reals[hi]),
+        //                 "{}",
+        //                 s
+        //             );
+        //             debug_assert!(
+        //                 (lo..hi)
+        //                     .into_iter()
+        //                     .all(|i| (dom.real_lo()..dom.real_hi()).contains(&reals[i])),
+        //                 "{}",
+        //                 s
+        //             );
+        //         }
+        //         for (c, _real) in &mut color_reals[lo..hi] {
+        //             // debug_assert!(colors[i].is_none());
+        //             **c = color;
+        //         }
+        //     }
+
+        //     if prune {
+        //         continue;
+        //     }
+
+        //     if let Some(children_handle) = node.children_handle.load(Ordering::Acquire) {
+        //         queue.extend(children_handle.siblings());
+        //     }
+        // }
+
+        // everything below this is helper function definitions.
+        return;
+
+        // TODO: take pixel_real_range and do antialiasing
+        #[cfg_attr(feature = "profiling", inline(never))]
+        fn f(
+            tree: &Tree,
+            uncolored_node_color: Option<Rgb>,
+            prev_frame_start: RenderMoment,
+            pixel_real_mids: &[Real],
+            pixel_imag_mid: Imag,
+            colors: &mut [Option<Rgb>],
+            distances: &mut [Fixed],
+            node_handle: NodeHandle,
+        ) {
+            debug_assert!(colors.len() == distances.len());
+            debug_assert!(colors.len() == pixel_real_mids.len());
+
+            let node = tree.alloc.get(node_handle);
+            let dom = unsafe { node.dom() };
+
+            if pixel_real_mids.is_empty() {
+                return;
+            }
+
+            if dom.imag_lo() > pixel_imag_mid || dom.imag_hi() < pixel_imag_mid {
+                return;
+            }
+            if dom.real_hi() < *pixel_real_mids.first().unwrap()
+                || dom.real_lo() > *pixel_real_mids.last().unwrap()
+            {
+                return;
+            }
+
+            // shrink to be in the node's domain
+            let (pixel_real_mids, colors, distances) = {
+                let lo = pixel_real_mids
+                    .binary_search(&dom.real_lo())
+                    .unwrap_or_else(|i| i);
+                let hi = pixel_real_mids
+                    .binary_search(&dom.real_hi())
+                    .unwrap_or_else(|i| i);
+
+                debug_assert!(lo <= hi);
+
+                #[cfg(false)]
+                for (i, real_mid) in pixel_real_mids.iter().enumerate() {
+                    debug_assert_eq!(
+                        (lo..hi).contains(&i),
+                        (dom.real_lo()..dom.real_hi()).contains(real_mid),
+                        "({lo}..{hi}).contains({i}) should be ({}..{}).contains({real_mid})",
+                        dom.real_lo(),
+                        dom.real_hi(),
+                    );
+                }
+
+                (
+                    &pixel_real_mids[lo..hi],
+                    &mut colors[lo..hi],
+                    &mut distances[lo..hi],
+                )
+            };
+            debug_assert!(colors.len() == distances.len());
+            debug_assert!(colors.len() == pixel_real_mids.len());
+
+            if pixel_real_mids.is_empty() {
+                return;
+            }
+
+            debug_assert!(
+                (dom.real_lo()..dom.real_hi()).contains(pixel_real_mids.first().unwrap())
+            );
+            debug_assert!((dom.real_lo()..dom.real_hi()).contains(pixel_real_mids.last().unwrap()));
+            #[cfg(false)]
+            for real in pixel_real_mids.iter() {
+                debug_assert!((dom.real_lo()..dom.real_hi()).contains(real));
+            }
+
+            // if the node's timestamp proves that
+            // neither this node nor any descendant has changed, skip this subtree entirely.
+            // // do NOT erase colors already written by fresher ancestor nodes.
+            // #[cfg(false)]
+            {
+                let timestamp = node.timestamp.load(Ordering::Relaxed);
+                if timestamp < prev_frame_start {
+                    for color in colors.iter_mut() {
+                        *color = None;
+                    }
+                    return;
+                }
+            }
+
+            // for every pixel mid,
+            // if it's closer to the node's domain mid than the closest sample we've found so far,
+            // update the color.
+            // TODO: these will probably be contiguous segments, but don't bother with that rn.
+            {
+                let color = node.color.load(Ordering::Relaxed);
+                let color = color.or(uncolored_node_color);
+                if let Some(color) = color {
+                    for (real, c, best_distance) in itertools::izip!(
+                        pixel_real_mids.iter(),
+                        colors.iter_mut(),
+                        distances.iter_mut(),
+                    ) {
+                        let new_dist = distance((*real, pixel_imag_mid), dom.mid());
+                        if new_dist < *best_distance {
+                            *best_distance = new_dist;
+                            *c = color.into();
+                        }
+                    }
+                }
+            }
+
+            // // for now, don't use distance
+            // {
+            //     let color = node.color.load(Ordering::Relaxed);
+            //     let color = color.or(uncolored_node_color);
+            //     if let Some(color) = color {
+            //         for (real, c, best_distance) in itertools::izip!(
+            //             pixel_real_mids.iter(),
+            //             colors.iter_mut(),
+            //             distances.iter_mut(),
+            //         ) {
+            //             *c = color.into();
+            //         }
+            //     }
+            // }
+
+            // if we have children, explore them.
+            if let Some(children_handle) = node.children_handle.load(Ordering::Acquire) {
+                for child_handle in children_handle.siblings() {
+                    f(
+                        tree,
+                        uncolored_node_color,
+                        prev_frame_start,
+                        pixel_real_mids,
+                        pixel_imag_mid,
+                        colors,
+                        distances,
+                        child_handle,
+                    );
+                }
+            }
+        }
+
+        #[cfg_attr(feature = "profiling", inline(never))]
+        fn distance((real_0, imag_0): (Real, Imag), (real_1, imag_1): (Real, Imag)) -> Fixed {
+            let real_delta = real_0 - real_1;
+            let imag_delta = imag_0 - imag_1;
+            // real_delta.mul(real_delta) + imag_delta.mul(imag_delta)
+
+            // i think they give the same result
+            // except manhattan maybe gives weird lines
+            // real_delta.abs() + imag_delta.abs()
+            real_delta.abs().max(imag_delta.abs())
+        }
     }
 }
 
