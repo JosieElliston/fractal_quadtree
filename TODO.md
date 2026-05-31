@@ -47,6 +47,28 @@
 - separate complex/quadratic_map/sampling/the specific fractal and the generic quadtree stuff (so the Domain lives in `[0, 1) x [0, 1)`) (not `[-1, 1) x [-1, 1)` bc the midpoint might not be 0 and that's weird)
 - insert random sleeps during stack traversal to fuzz reclamation
 - color by segments (currently you drop frames during a full redraw)
+- does update_timestamp need to be top-down for correctness?
+    - or does it need to be bottom-up for correctness?
+    - or are both bottom-up and top-down not correct?
+    - like do we need to finish the "eventual consistency of timestamps" before the next draw call?
+    - is it important for the render_now to never advance without acks from all threads?
+    - like what if one thread prunes while someone else is updating the timestamp, and render_now advances twice, so we never draw the update to the leaf (/node that got color inserted)?
+    - TODO: maybe have render_moment advance by 2, and render_now be odd, so we never have that timestamp == render_now
+    - eg
+        - root - leaf
+        - // init (not `0` bc everything gets rendered on 0)
+        - `1 - 1`
+        - // insert color at leaf (bottom-up)
+            - `1 - 2`
+            - // `render_now => prune requires timestamp <= 0` prune at root?
+            - // rendering finishes
+            - // `render_now => prune requires timestamp <= 1` prune at root?
+            - // rendering finishes
+            - // `render_now => prune requires timestamp <= 2` prune at root?
+            - // rendering finishes
+            - `2 - 2`
+    - TODO: find exactly what `render_now` we should pass to `color_of_pixel`
+- `NodeHandle` should really be a `u64` not `usize`
 
 ## optimization
 
@@ -86,30 +108,18 @@
 
 - fancy trace thing so i don't need to store the domain in each node
 - alt quadtree architecture where you store samples at the corners of the domain, not the center, which allows for bilinear interpolation, at the cost of probably redundancy or complexity. like consider a sample on the edge of the domain, it on the corner of multiple leafs that aren't near cousins, and aren't guaranteed to exist in some order.
-- refactor: make `ExactFixed` and `Domain`
-    - `ExactFixed` guarantees that it's never been rounded, and has been constructed
-        - you can only add, sub, mul2, and div2
-    - `Domain` is a square but with `ExactFixed`
-    - square will probably be unused
 - to avoid aliasing artifacts, jitter the samples
     - jitter z0, store both z0 and color, if you get split, give it to the child which contains the sample, and internal nodes don't store samples, (different quadtree architecture)
         - seed the rng from the domain for determinism
     - jitter each c
+    - if we have internal nodes not storing color, and have samples randomly jittered, we dont need to store a full u64x2 point for each samply, we can use a portion across the domain, with less resolution, like a u8x2 or u4x2
 - split and sample and insert on a parallel datastructure, gc can be really slow, whatever
     - note that the deepest parent of all the active nodes for a given window is kinda deep, this is a pseudo root, maybe we can use this somehow
 - when we split a node, instead of filling all the children with a sample/color, only fill the children that intersect the window. (the parent is guaranteed to intersect the window, but it's not guaranteed that all of its children do too)
 - have the pixels live in a quadtree? where if a internal node has a `Some` color, it means all children have that color
     - a `PixelNode` gets a color if its fully contained inside a `FractalNode`
     - we can cache pixels across time if we're not panning lmao
-- broadcast to all the threads that the texture was just submitted to be drawn and that they should all draw the pixels they're responsible for into the new texture, and after that they can go back to getting new samples
-    - have two textures to swap?
-    - also tell them the new window
-    - what if a thread has been preempted, so it can't render the pixels it owns? does this mean we can't have threads simply own pixels?
-    - stagger the rendering threads so they aren't all using the bus at the same time. most should instead be doing alu heavy sampling
 - use that nearby samples are relevant to make parallelism harder/more interesting
-- parallel arena allocator
-- parallel dynamic array
-- single-consumer-single-producer (except actually i shouldn't need this for the final version)
 
 ## rust style
 
@@ -165,6 +175,7 @@
 
 - does `egui::Frame` have an ugly border?
 - gui for keyboard controls for discoverability
+- hovering over widgets should preview their effects
 
 ## sync testing
 

@@ -813,6 +813,7 @@ impl App {
 
                 // sampling
                 {
+                    // TODO: rename to "refining"
                     ui.checkbox(&mut self.sampling, "sampling")
                         .on_hover_text("whether to get new samples of the metabrot. keybinding: ".to_owned() + &ctx.format_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::NONE, egui::Key::S)));
                 }
@@ -827,7 +828,7 @@ impl App {
                 {
                     let mut retire_max_width = tree::RETIRE_MAX_WIDTH.load(Ordering::Relaxed) as f64;
                     let r = ui
-                        .add(MyDragValue::new(egui::Label::new("retire max width:"), egui::DragValue::new(&mut retire_max_width)))
+                        .add(MyDragValue::new(egui::Label::new("retire max width:"), egui::DragValue::new(&mut retire_max_width).update_while_editing(false)))
                         .on_hover_text("nodes get retired if they're smaller than window.rad / retire_max_width");
                     let mut retire_max_width = retire_max_width.round() as usize;
                     retire_max_width = retire_max_width.max(1);
@@ -841,6 +842,7 @@ impl App {
 
                 // draw uncolored nodes
                 {
+                    // TODO: this documentation is outdated
                     let mut draw_uncolored_nodes = tree::DRAW_UNCOLORED_NODES.load(Ordering::Relaxed);
                     if ui.checkbox(&mut draw_uncolored_nodes, "draw uncolored nodes").on_hover_text("draw nodes that have been split but haven't yet been sampled in yellow. enabling this slows down refining.").changed() {
                         tree::DRAW_UNCOLORED_NODES.store(draw_uncolored_nodes, Ordering::Relaxed);

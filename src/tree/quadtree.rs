@@ -1011,6 +1011,9 @@ impl Tree {
         // if we have a segment that's definitely good, we stop exploring.
         // if we have a segment that's definitely bad, we fail.
         // to know that a segment is definitely bad, it must be a leaf.
+        // TODO: we allow splitting leafs that are yet to have a sample inserted,
+        // so it's not the case that timestamps are
+        // monotonically decreasing as you go down the tree.
         while let Some(node_handle) = stack.pop() {
             let node = self.alloc.get(node_handle);
             let dom = unsafe { node.dom() };
@@ -1030,6 +1033,7 @@ impl Tree {
             if let Some(children_handle) = node.children_handle.load(Ordering::Acquire) {
                 stack.extend(children_handle.siblings());
             } else {
+                // TODO: probably we should check this for internal nodes too
                 if timestamp >= prev_frame_start {
                     return true;
                 }
