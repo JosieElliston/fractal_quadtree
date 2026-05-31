@@ -109,6 +109,9 @@ impl Worker {
         if texture_lock_begin.load(Ordering::Relaxed) >= camera_map.pixels_height() {
             return Err("texture_lock_begin >= camera_map.pixels_height()");
         }
+        // this synchronizes-with the `store(0, ...)` in `reset_locks`,
+        // which might be required to see the writes to `shared_texture.camera_map`,
+        // but maybe the `RwLock` handles that?
         let row = texture_lock_begin.fetch_add(1, Ordering::Acquire);
         if row >= camera_map.pixels_height() {
             return Err("row >= camera_map.pixels_height()");
@@ -218,6 +221,10 @@ impl Worker {
         debug_assert!(
             shared_texture.finish_count().load(Ordering::SeqCst) < camera_map.pixels_height()
         );
+        // TODO: what does this synchronizes-with actually?
+        // i think this should be `Ordering::Relaxed`?
+        // or maybe it synchronizes-with the main thread checking if we're done,
+        // but the `RwLock` handles that.
         shared_texture
             .finish_count()
             .fetch_add(1, Ordering::Release);

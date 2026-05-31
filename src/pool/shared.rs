@@ -52,6 +52,7 @@ pub(crate) struct Shared {
     /// for debugging / UX, not needed for the main algorithm.
     pub(super) sample_counter: AtomicU64,
 
+    // TODO: make this not `RwLock`.
     pub(super) shared_texture_data: RwLock<SharedTextureData>,
 
     /// set by the main thread to ask worker threads to exit.
@@ -133,6 +134,7 @@ impl SharedTextureData {
         &mut self.camera_map
     }
 
+    // TODO: do i really need getters for these?
     pub(super) fn begin_count(&self) -> &AtomicUsize {
         &self.begin_count
     }
