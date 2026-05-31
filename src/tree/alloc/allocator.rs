@@ -123,24 +123,9 @@ impl Alloc {
         for sibling_handle in block_handle.siblings() {
             let sibling = self.get(sibling_handle);
             sibling.assert_not_any_uninit();
-
             unsafe {
-                sibling.write_dom(Domain::uninit());
+                sibling.deinit();
             }
-            sibling
-                .children_handle
-                .store(Some(BlockHandle::uninit()), Ordering::Relaxed);
-            sibling.color.store(Some(Rgb::uninit()), Ordering::Relaxed);
-            sibling
-                .min_height
-                .store(Node::UNINIT_HEIGHT, Ordering::Relaxed);
-            sibling
-                .max_height
-                .store(Node::UNINIT_HEIGHT, Ordering::Relaxed);
-            sibling
-                .timestamp
-                .store(RenderMoment::uninit(), Ordering::Relaxed);
-
             sibling.assert_all_uninit();
         }
 

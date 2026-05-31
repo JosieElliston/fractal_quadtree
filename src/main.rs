@@ -1,4 +1,5 @@
 #![allow(clippy::manual_is_multiple_of)]
+#![deny(unsafe_op_in_unsafe_fn)]
 // #![allow(dead_code)]
 
 mod app;

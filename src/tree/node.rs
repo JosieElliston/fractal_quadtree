@@ -97,6 +97,27 @@ impl Node {
         }
     }
 
+    /// deinitializes all the fields.
+    /// a bit like `*self = Node::uninit()`.
+    ///
+    /// SAFETY: the caller must ensure that no other thread could be touching `self`.
+    /// (bc of the call to [`Self::write_dom`]).
+    #[cfg(feature = "deinit_nodes")]
+    pub(super) unsafe fn deinit(&self) {
+        unsafe {
+            self.write_dom(Domain::uninit());
+        }
+        self.children_handle
+            .store(Some(BlockHandle::uninit()), Ordering::Relaxed);
+        self.color.store(Some(Rgb::uninit()), Ordering::Relaxed);
+        self.min_height
+            .store(Node::UNINIT_HEIGHT, Ordering::Relaxed);
+        self.max_height
+            .store(Node::UNINIT_HEIGHT, Ordering::Relaxed);
+        self.timestamp
+            .store(RenderMoment::uninit(), Ordering::Relaxed);
+    }
+
     #[track_caller]
     #[cfg(feature = "deinit_nodes")]
     pub(super) fn assert_all_uninit(&self) {
@@ -167,14 +188,20 @@ impl Node {
         );
     }
 
-    /// SAFETY: the caller probably should ensure that no one is writing to the node.
+    /// SAFETY: the caller must ensure that no thread could be writing to `dom`
+    /// (tho that's mostly maintained by threads that want to write to `dom`).
+    ///
     /// i could return a reference, but immediately reading the pointer is a bit safer.
     pub(super) unsafe fn dom(&self) -> Domain {
         unsafe { self.dom.get().read() }
     }
 
-    /// SAFETY: the caller probably should ensure that we have exclusive access,
-    /// tho maybe it's fine even without (like maybe we can't get partial writes bc it's small enough).
+    /// SAFETY: the caller must ensure that no other thread could be touching `self`.
+    ///
+    /// tho maybe it's fine even if other threads can access `self`,
+    /// like maybe we can't get partial writes bc `Domain`/`Node` is small enough?
+    /// but that's still a data race,
+    /// so `dom` would need to be a `Atomic<Domain>` where we only have `Relaxed` `load`/`store`s.
     pub(super) unsafe fn write_dom(&self, dom: Domain) {
         unsafe {
             self.dom.get().write(dom);
@@ -186,11 +213,12 @@ impl Node {
     ///
     /// `Err(cur)` if we didn't update the timestamp.
     /// we guarantee that `cur >= now`.
-    /// this can happen if the timestamp was already up to date,
+    /// this happens if the timestamp was already up to date,
     /// or another thread brought it up to date while we were trying to update it.
     ///
-    /// in any case, the timestamp is guaranteed to be at least `now` after this function returns.
-    // TODO: weaken orderings
+    /// in any case, the timestamp is guaranteed to be at least `now` after this function returns
+    /// (this is basically a `fetch_max`).
+    // TODO: weaken orderings.
     #[cfg_attr(feature = "profiling", inline(never))]
     pub(super) fn update_timestamp(&self, now: RenderMoment) -> Result<RenderMoment, RenderMoment> {
         let mut expected_cur = self.timestamp.load(Ordering::SeqCst);
