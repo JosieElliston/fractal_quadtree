@@ -7,6 +7,7 @@ use std::{
 
 use atomic::Atomic;
 use egui::Color32;
+use itertools::Itertools;
 
 use crate::{
     complex::{Pixel, fixed::*},
@@ -179,7 +180,7 @@ impl Worker {
                 .pixels()
                 .nth(row)
                 .unwrap()
-                .zip(l.iter_mut())
+                .zip_eq(l.iter_mut())
                 .filter_map(|((_rect, pixel), color)| match pixel {
                     Some(pixel) => Some((pixel, color)),
                     None => {
@@ -268,7 +269,8 @@ impl Worker {
         debug_assert!(
             self.nursing_home
                 .iter()
-                .zip(self.nursing_home.iter().skip(1))
+                .take(self.nursing_home.len().saturating_sub(1))
+                .zip_eq(self.nursing_home.iter().skip(1))
                 .all(|((moment_a, _), (moment_b, _))| moment_a <= moment_b),
             "nursing_home should have increasing timestamps"
         );

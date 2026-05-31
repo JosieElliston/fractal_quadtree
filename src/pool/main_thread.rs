@@ -8,6 +8,7 @@ use std::{
 
 use atomic::Atomic;
 use egui::Color32;
+use itertools::Itertools;
 
 use crate::{
     complex::{CameraMap, Window},
@@ -311,11 +312,11 @@ impl Fractal {
         for (texture_line, diff_line) in self
             .local_texture
             .iter_mut()
-            .zip(shared_texture_data.diff().iter())
+            .zip_eq(shared_texture_data.diff().iter())
         {
             for (texture_color, diff_color) in texture_line
                 .iter_mut()
-                .zip(diff_line.try_lock().unwrap().iter())
+                .zip_eq(diff_line.try_lock().unwrap().iter())
             {
                 if let Some(diff_color) = diff_color {
                     *texture_color = *diff_color;
@@ -336,11 +337,11 @@ impl Fractal {
                 for (texture_line, diff_line) in self
                     .local_texture
                     .iter_mut()
-                    .zip(shared_texture_data.diff().iter())
+                    .zip_eq(shared_texture_data.diff().iter())
                 {
                     for (texture_color, diff_color) in texture_line
                         .iter_mut()
-                        .zip(diff_line.try_lock().unwrap().iter())
+                        .zip_eq(diff_line.try_lock().unwrap().iter())
                     {
                         ret.push(if diff_color.is_none() {
                             *texture_color
