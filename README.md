@@ -48,3 +48,46 @@ if we store the distance to nearest/shallowest descendant leaf at each node,
 #### concurrency
 
 #### reclamation / block allocator -->
+<!-- 
+## 2026-05-29 writeup
+
+have f: [0, 1]^2 -> Color.
+(note this is fixed across time).
+we want to render f to the screen (pixel grid), with panning and zooming .
+naively (without antialiasing), we sample f at the pixel centers
+insert mermaid visualization.
+
+but f is expensive, so we want to cache samples.
+
+bad version: quadtree where only leafs store samples.
+leafs store the sample at their center.
+bad because this discards a node's samples when it gets split.
+
+bad version: quadtree with internal nodes storing samples,
+color-of-point is the color of the nearest sample.
+bad because finding the nearest sample is complicated.
+
+![quadtree_internal](assets/quadtree_no_internal.svg)
+
+![quadtree_internal](assets/quadtree_internal.svg)
+
+good version: quadtree with internal nodes storing samples, color-of-point with following the path down to the leaf.
+
+so that's the definition of the color at a point.
+for the color of a pixel,
+currently i just take the color of a pixels center,
+but in the future i hope to do some antialiasing,
+defined as the average color of the points contained in the pixel.
+
+other tree operations:
+refine
+insert
+color
+retire
+free
+
+optimizations
+min/max height
+render timestamp
+
+concurrency -->

@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 480 480">
+    <!-- root's rect -->
+    <rect x="0" y="0" width="480" height="480" style="fill: #BA5485; stroke: rgb(0, 0, 0);" />
+
+    <!-- root's children's rects -->
+    <rect x="0" y="0" width="240" height="240" style="fill: #D272F7; stroke: rgb(0, 0, 0);" />
+    <rect x="240" y="0" width="240" height="240" style="fill: #FAC775; stroke: rgb(0, 0, 0);" />
+    <rect x="0" y="240" width="240" height="240" style="fill: #F5C4B3; stroke: rgb(0, 0, 0);" />
+    <rect x="240" y="240" width="240" height="240" style="fill: #C0DD97; stroke: rgb(0, 0, 0);" />
+
+    <!-- root's top-left child's children's rects -->
+    <rect x="0" y="0" width="120" height="120" style="fill: #CECBF6; stroke: rgb(0, 0, 0);" />
+    <rect x="120" y="0" width="120" height="120" style="fill: #9FE1CB; stroke: rgb(0, 0, 0);" />
+    <rect x="0" y="120" width="120" height="120" style="fill: #F4C0D1; stroke: rgb(0, 0, 0);" />
+    <rect x="120" y="120" width="120" height="120" style="fill: #B5D4F4; stroke: rgb(0, 0, 0);" />
+
+    <!-- root's sample -->
+    <circle style="fill: #BA5485; stroke: rgb(0, 0, 0);" cx="240" cy="240" r="10" />
+
+    <!-- root's children's samples -->
+    <circle style="fill: #D272F7; stroke: rgb(0, 0, 0);" cx="120" cy="120" r="10" />
+    <circle style="fill: #FAC775; stroke: rgb(0, 0, 0);" cx="360" cy="120" r="10" />
+    <circle style="fill: #F5C4B3; stroke: rgb(0, 0, 0);" cx="120" cy="360" r="10" />
+    <circle style="fill: #C0DD97; stroke: rgb(0, 0, 0);" cx="360" cy="360" r="10" />
+
+    <!-- root's top-left child's samples -->
+    <circle style="fill: #CECBF6; stroke: rgb(0, 0, 0);" cx="60" cy="60" r="10" />
+    <circle style="fill: #9FE1CB; stroke: rgb(0, 0, 0);" cx="180" cy="60" r="10" />
+    <circle style="fill: #F4C0D1; stroke: rgb(0, 0, 0);" cx="60" cy="180" r="10" />
+    <circle style="fill: #B5D4F4; stroke: rgb(0, 0, 0);" cx="180" cy="180" r="10" />
+</svg>
