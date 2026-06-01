@@ -470,13 +470,12 @@ impl Tree {
             })
         }
 
-        let retire_depth = match self.depth_needed_for_window(window) {
-            Ok(depth) => depth,
-            Err(err) => {
+        let retire_depth = self
+            .depth_needed_for_window(window)
+            .inspect_err(|err| {
                 log!(err);
-                return None;
-            }
-        };
+            })
+            .ok()?;
 
         let vec_handle_u16 = &mut tree_local.vec_handle_u16;
         let vec_handle = &mut tree_local.vec_handle;
@@ -558,16 +557,13 @@ impl Tree {
         let retire_depth = if SPLIT_RETIRABLE_NODES.load(Ordering::Relaxed) {
             None
         } else {
-            match retire_window {
-                Some(retire_window) => match self.depth_needed_for_window(retire_window) {
-                    Ok(depth) => Some(depth),
-                    Err(err) => {
+            retire_window.and_then(|retire_window| {
+                self.depth_needed_for_window(retire_window)
+                    .inspect_err(|err| {
                         log!(err);
-                        None
-                    }
-                },
-                None => None,
-            }
+                    })
+                    .ok()
+            })
         };
 
         // // debug disabled to make more races happen

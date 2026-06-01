@@ -66,6 +66,7 @@ pub(crate) struct Shared {
 /// bc those invariants are maintained manually.
 pub(super) struct SharedTextureData {
     pub(super) needs_full_redraw: bool,
+
     /// the `CameraMap` where we're rendering.
     /// `Some` iff we're between rendering begin and finish.
     ///
@@ -79,6 +80,7 @@ pub(super) struct SharedTextureData {
     /// *and* when workers check if they're finished,
     /// they only need to check one location and not all of the locks.
     camera_map: Option<CameraMap>,
+
     // /// these are set when a line begins rendering.
     // texture_lock_begin: Vec<AtomicBool>,
     // /// these are set when a line finishes rendering.
@@ -86,9 +88,11 @@ pub(super) struct SharedTextureData {
     /// these are incremented when a worker acquires a line to render.
     /// may be greater than the height.
     begin_count: AtomicUsize,
+
     /// these are incremented when a worker finishes rendering a line.
     /// must not be greater than the height.
     finish_count: AtomicUsize,
+
     /// the diff the main thread should apply to its local texture.
     /// a color is `None` if the color hasn't changed.
     /// should never call `lock`, only `try_lock`.

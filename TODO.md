@@ -113,6 +113,7 @@
         - seed the rng from the domain for determinism
     - jitter each c
     - if we have internal nodes not storing color, and have samples randomly jittered, we dont need to store a full u64x2 point for each samply, we can use a portion across the domain, with less resolution, like a u8x2 or u4x2
+    - maybe only use this to decide which child gets the parent's samples, and whether samples are inside the pixel, but don't bother finding the distance to the point, and just have the color of a leaf be the average of all its samples, so there's no voronoi.
 - split and sample and insert on a parallel datastructure, gc can be really slow, whatever
     - note that the deepest parent of all the active nodes for a given window is kinda deep, this is a pseudo root, maybe we can use this somehow
 - when we split a node, instead of filling all the children with a sample/color, only fill the children that intersect the window. (the parent is guaranteed to intersect the window, but it's not guaranteed that all of its children do too)

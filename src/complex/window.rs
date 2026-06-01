@@ -26,6 +26,11 @@ impl Window {
     /// fails if the window would be empty,
     /// ie if it would have zero width or height.
     /// also fails if the window is too big, to avoid later overflow issues.
+    // TODO: use this convention, which is more unambiguous, and matches egui.
+    // pub(crate) fn from_lo_hi(
+    //     (real_lo, imag_lo): (Real, Imag),
+    //     (real_hi, imag_hi): (Real, Imag),
+    // ) -> Option<Self> {
     pub(crate) fn from_lo_hi(
         real_lo: Real,
         real_hi: Real,
@@ -226,7 +231,7 @@ impl fmt::Display for Window {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "Window(real: [{}, {}], imag: [{}, {}])",
+            "Window(real: [{}, {}] x imag: [{}, {}])",
             self.real_lo, self.real_hi, self.imag_lo, self.imag_hi
         )
     }
