@@ -7,7 +7,7 @@ use std::{
 };
 
 use atomic::Atomic;
-use egui::Color32;
+use egui::{Color32, emath::GuiRounding};
 use itertools::Itertools;
 
 use crate::{
@@ -302,11 +302,13 @@ impl Fractal {
 
         shared_texture_data.assert_finished_rendering();
 
-        assert!(
-            shared_texture_data.camera_map().is_some(),
-            "i should change this in the future so that a worker resets the camera, but right now that's the main thread's job"
-        );
-        *shared_texture_data.camera_map_mut() = None;
+        let camera_map = shared_texture_data.camera_map_mut().take().unwrap();
+
+        // assert!(
+        //     shared_texture_data.camera_map().is_some(),
+        //     "i should change this in the future so that a worker resets the camera, but right now that's the main thread's job"
+        // );
+        // *shared_texture_data.camera_map_mut() = None;
 
         // update local_texture from the diff
         for (texture_line, diff_line) in self
@@ -328,37 +330,53 @@ impl Fractal {
         {
             let width = shared_texture_data.width();
             let height = shared_texture_data.height();
-            let colors = if !shared_texture_data.needs_full_redraw
+            let texture: Vec<Box<[Color32]>> = if !shared_texture_data.needs_full_redraw
                 && DRAW_COLOR_DIFF.load(Ordering::Relaxed)
             {
-                // map is annoying bc of the mutex,
-                // so don't bother with iterators.
-                let mut ret = Vec::with_capacity(width * height);
-                for (texture_line, diff_line) in self
-                    .local_texture
+                // // map is annoying bc of the mutex,
+                // // so don't bother with iterators.
+                // let mut ret = Vec::with_capacity(width * height);
+                // for (texture_line, diff_line) in self
+                //     .local_texture
+                //     .iter_mut()
+                //     .zip_eq(shared_texture_data.diff().iter())
+                // {
+                //     for (texture_color, diff_color) in texture_line
+                //         .iter_mut()
+                //         .zip_eq(diff_line.try_lock().unwrap().iter())
+                //     {
+                //         ret.push(if diff_color.is_none() {
+                //             *texture_color
+                //         } else {
+                //             texture_color.lerp_to_gamma(DRAW_COLOR_DIFF_COLOR, 0.3)
+                //         });
+                //     }
+                // }
+                // ret
+
+                // if the diff is `Some`, debug color the pixel blended towards `DRAW_COLOR_DIFF_COLOR`.
+                self.local_texture
                     .iter_mut()
                     .zip_eq(shared_texture_data.diff().iter())
-                {
-                    for (texture_color, diff_color) in texture_line
-                        .iter_mut()
-                        .zip_eq(diff_line.try_lock().unwrap().iter())
-                    {
-                        ret.push(if diff_color.is_none() {
-                            *texture_color
-                        } else {
-                            texture_color.lerp_to_gamma(DRAW_COLOR_DIFF_COLOR, 0.3)
-                        });
-                    }
-                }
-                ret
-            } else {
-                self.local_texture
-                    .iter()
-                    .flat_map(|line| line.clone().into_vec())
+                    .map(|(texture_line, diff_line)| {
+                        texture_line
+                            .iter_mut()
+                            .zip_eq(diff_line.try_lock().unwrap().iter())
+                            .map(|(texture_color, diff_color)| match diff_color {
+                                None => *texture_color,
+                                Some(_) => texture_color.lerp_to_gamma(DRAW_COLOR_DIFF_COLOR, 0.3),
+                            })
+                            .collect()
+                    })
                     .collect()
+            } else {
+                // self.local_texture
+                //     .iter()
+                //     .flat_map(|line| line.clone().into_vec())
+                //     .collect()
+                self.local_texture.clone()
             };
-
-            set_texture(handle, [width, height], colors);
+            set_texture(handle, &camera_map, &texture);
         }
     }
 }
@@ -377,54 +395,153 @@ mod rayon_fractal {
         camera_map: &CameraMap,
         (z0_real, z0_imag): (Real, Imag),
     ) {
-        let colors = camera_map
+        let colors: Vec<Box<[Color32]>> = camera_map
             .pixels()
-            .flatten()
-            .collect::<Vec<_>>()
+            .collect_vec()
             .into_par_iter()
-            .map(|(_rect, pixel)| {
-                if let Some(pixel) = pixel {
-                    let c = pixel.mid();
-                    sample::quadratic_map::<false>(&mut None, (z0_real, z0_imag), c).color()
-                } else {
-                    Color32::MAGENTA
-                }
+            .map(|line| {
+                line.map(|(_rect, pixel)| {
+                    if let Some(pixel) = pixel {
+                        let c = pixel.mid();
+                        sample::quadratic_map::<false>(&mut None, (z0_real, z0_imag), c).color()
+                    } else {
+                        Color32::MAGENTA
+                    }
+                })
+                .collect()
             })
-            .collect::<Vec<_>>();
-        set_texture(
-            handle,
-            [camera_map.pixels_width(), camera_map.pixels_height()],
-            colors,
-        );
+            .collect();
+        set_texture(handle, camera_map, &colors);
     }
 
     #[cfg_attr(feature = "profiling", inline(never))]
     pub(crate) fn render_color(handle: &mut egui::TextureHandle, camera_map: &CameraMap) {
-        let colors = camera_map
+        let colors: Vec<Box<[Color32]>> = camera_map
             .pixels()
-            .flatten()
-            .collect::<Vec<_>>()
+            .collect_vec()
             .into_par_iter()
-            .map(|(_rect, pixel)| {
-                if pixel.is_some() {
-                    Color32::BLACK
-                } else {
-                    Color32::MAGENTA
-                }
+            .map(|line| {
+                line.map(|(_rect, pixel)| {
+                    if pixel.is_some() {
+                        Color32::BLACK
+                    } else {
+                        Color32::MAGENTA
+                    }
+                })
+                .collect()
             })
-            .collect::<Vec<_>>();
-        set_texture(
-            handle,
-            [camera_map.pixels_width(), camera_map.pixels_height()],
-            colors,
-        );
+            .collect();
+        set_texture(handle, camera_map, &colors);
     }
 }
 
+/// the egui texture gets set at full resolution, without stride.
+/// the strided_texture is the internal representation with stride.
+/// in the strided_texture, the pixels at the end of a row/col
+/// may be only partially contained inside the egui texture.
+//
+// TODO: it's weird and bouncy when resizing
+// probably bc this is using a camera_map.rect that's a frame old.
+//
+// TODO: when resizing, there's a discontinuity when crossing a pixel boundary,
+// and it seems like all the pixels are getting their `Fixed` position changed,
+// and this is actually a sr-latch: going back and forth across
+// one boundary has different behavior from two.
+// this is probably related to how `camera_map.rect` is smaller than
+// the disjoint union of `camera_map.pixels.rect`,
+// and i should use that union for some stuff instead.
 #[cfg_attr(feature = "profiling", inline(never))]
-fn set_texture(handle: &mut egui::TextureHandle, size: [usize; 2], colors: Vec<Color32>) {
+fn set_texture(
+    handle: &mut egui::TextureHandle,
+    camera_map: &CameraMap,
+    strided_texture: &[Box<[Color32]>],
+) {
+    debug_assert_eq!(camera_map.pixels_height(), strided_texture.len());
+    debug_assert_eq!(camera_map.pixels_width(), strided_texture[0].len());
+
+    // TODO: maybe camera_map should round the rect to physical pixels?
+    // camera_map.rect.round_to_pixels();
+    // TODO: debug print the rect to see if it's aligned
+
+    // TODO: maybe the egui texture can be 2x or 4x for the weird good antialiasing that gives.
+    let subpixels = 2;
+
+    // let height = subpixels * camera_map.rect().height().round() as usize;
+    // let width = subpixels * camera_map.rect().width().round() as usize;
+
+    let (width, height) = {
+        let min_x = (subpixels as f32 * camera_map.rect().min.x).round() as usize;
+        let min_y = (subpixels as f32 * camera_map.rect().min.y).round() as usize;
+        let max_x = (subpixels as f32 * camera_map.rect().max.x).round() as usize;
+        let max_y = (subpixels as f32 * camera_map.rect().max.y).round() as usize;
+        (max_x - min_x, max_y - min_y)
+    };
+
+    // TODO: this is probably upside-down
+
+    let colors = {
+        let mut colors = vec![vec![None; width].into_boxed_slice(); height].into_boxed_slice();
+
+        for (row0, line) in camera_map.pixels().enumerate() {
+            for (col0, (rect, _pixel)) in line.enumerate() {
+                let color = strided_texture[row0][col0];
+                let min_x = (subpixels as f32 * rect.min.x).round() as usize;
+                let min_y = (subpixels as f32 * rect.min.y).round() as usize;
+                let max_x = (subpixels as f32 * rect.max.x).round() as usize;
+                let max_y = (subpixels as f32 * rect.max.y).round() as usize;
+                for row1 in min_y..max_y {
+                    if row1 >= height {
+                        continue;
+                    }
+                    for col1 in min_x..max_x {
+                        if col1 >= width {
+                            continue;
+                        }
+                        // dbg!(colors);
+                        // dbg!(row0, col0);
+                        // dbg!(row1, col1);
+                        debug_assert!(
+                            colors[row1][col1].is_none(),
+                            "should only write to each color once"
+                        );
+                        colors[row1][col1] = Some(color);
+                    }
+                }
+            }
+        }
+
+        // if all the pixels are `Some`,
+        // all the egui pixels should have been filled.
+        // #[cfg(false)]
+        #[cfg(debug_assertions)]
+        if camera_map
+            .pixels()
+            .all(|line| line.into_iter().all(|(_rect, pixel)| pixel.is_some()))
+        {
+            for (row, line) in colors.iter().enumerate() {
+                for (col, color) in line.iter().enumerate() {
+                    // debug_assert!(color.is_some(), "row: {row}, col: {col}");
+                    if color.is_none() {
+                        dbg!(width, height);
+                        dbg!(colors[0].len(), colors.len());
+                        dbg!(row, col);
+                        panic!();
+                    }
+                }
+            }
+        }
+
+        colors
+            .into_iter()
+            .flat_map(|line| {
+                line.into_iter()
+                    .map(|color| color.unwrap_or(Color32::MAGENTA))
+            })
+            .collect()
+    };
+
     handle.set(
-        egui::ColorImage::new(size, colors),
+        egui::ColorImage::new([width, height], colors),
         egui::TextureOptions::NEAREST,
     );
 }

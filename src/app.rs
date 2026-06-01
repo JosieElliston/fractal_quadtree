@@ -18,7 +18,7 @@ use crate::{
 fn dynamic_draw_size(camera_map: &CameraMap, max_rad: f32) -> f32 {
     const BASE_RAD: Fixed = Fixed::try_from_f64(0.001).unwrap();
     let rad = BASE_RAD.mul_f64(max_rad as f64);
-    (camera_map.delta_real_to_vec1(rad)).min(max_rad)
+    (camera_map.delta_real_to_vec1(rad) as f32).min(max_rad)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,6 +54,8 @@ pub(crate) struct App {
     secondary_camera_velocity: Vec2,
     secondary_camera_stride: usize,
     /// the ui frame time, not the fractal frame time.
+    /// `last_frame_time` and `global_dts` are only for showing in the ui;
+    /// i never do stuff like capping the ui framerate.
     last_frame_time: Instant,
     global_dts: egui::util::History<f32>,
     fractal_dts: egui::util::History<f32>,
@@ -210,14 +212,8 @@ impl App {
                     }
                 }
             }
-            assert_eq!(primary_camera_map.rect(), secondary_camera_map.rect());
         }
-        painter.image(
-            self.texture.id(),
-            primary_camera_map.rect(),
-            Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0)),
-            Color32::WHITE,
-        );
+        egui::Image::from_texture(&self.texture).paint_at(ui, primary_camera_map.rect());
     }
 
     fn draw_complex_circle_stroke(
@@ -229,7 +225,7 @@ impl App {
     ) {
         painter.circle_stroke(
             camera_map.complex_to_pos((c_real, c_imag)),
-            camera_map.delta_real_to_vec1(rad),
+            camera_map.delta_real_to_vec1(rad) as f32,
             stroke,
         );
     }
@@ -1055,11 +1051,13 @@ impl eframe::App for App {
                 let primary_camera_map = CameraMap::new(
                     ui.max_rect(),
                     self.primary_camera,
+                    ui.pixels_per_point(),
                     self.primary_camera_stride,
                 );
                 let secondary_camera_map = CameraMap::new(
                     ui.max_rect(),
                     self.secondary_camera,
+                    ui.pixels_per_point(),
                     self.secondary_camera_stride,
                 );
 
